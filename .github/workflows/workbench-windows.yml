@@ -1,0 +1,27 @@
+name: Workbench Windows package
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: workbench-windows-package
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test Windows capture implementation
+        run: cargo test --locked --manifest-path native/windows/bridge-rs/Cargo.toml
+      - name: Build Windows helper
+        run: node scripts/build-native.mjs --platform windows
+      - name: Package verified upstream archive with Windows repair
+        run: python scripts/package-workbench-windows.py
+      - name: Publish immutable workbench package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create v0.5.1-workbench.1 dist/pi-computer-use-0.5.1-workbench.1.tgz dist/SHA256SUMS --target ${{ github.sha }} --title "Workbench Windows capture repair" --notes "Windows GDI alpha repair. Mac/Linux helpers retained byte-for-byte from integrity-verified upstream 0.5.1."

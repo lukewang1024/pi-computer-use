@@ -315,10 +315,7 @@ unsafe fn gdi_capture_to_base64(
         ));
     }
 
-    // Convert BGRA → RGBA (GDI returns B,G,R,A; PNG expects R,G,B,A).
-    for chunk in bits.chunks_exact_mut(4) {
-        chunk.swap(0, 2);
-    }
+    bgrx_to_opaque_rgba(&mut bits);
 
     let source_width = width as u32;
     let source_height = height as u32;
@@ -372,6 +369,17 @@ unsafe fn gdi_capture_to_base64(
 // Tests
 // ---------------------------------------------------------------------------
 
+// BI_RGB 32-bit DIBs contain B,G,R plus an unused byte, not alpha. GDI may
+// leave that byte zero or undefined. Normalize before resizing or PNG encoding
+// so alpha-aware viewers do not hide the captured window's RGB content.
+#[cfg(any(windows, test))]
+fn bgrx_to_opaque_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        pixel[3] = 255;
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -379,6 +387,26 @@ mod unit_tests {
     #[cfg(windows)]
     use crate::refs::NativeHandle;
     use crate::state::StateId;
+
+    #[test]
+    fn gdi_unused_bytes_do_not_become_png_transparency() {
+        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+
+        let mut pixels = vec![30, 20, 10, 0, 60, 50, 40, 64, 90, 80, 70, 255];
+        bgrx_to_opaque_rgba(&mut pixels);
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&pixels, 3, 1, ExtendedColorType::Rgba8)
+            .unwrap();
+        let decoded = image::load_from_memory(&png).unwrap().into_rgba8();
+        assert_eq!(
+            decoded.as_raw(),
+            &[10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255]
+        );
+        let resized =
+            image::imageops::resize(&decoded, 2, 1, image::imageops::FilterType::Triangle);
+        assert!(resized.pixels().all(|pixel| pixel[3] == 255));
+    }
 
     // -- Platform support check (non-Windows) -------------------------------
 

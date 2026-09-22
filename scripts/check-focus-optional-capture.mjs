@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import extension from "../extensions/computer-use.ts";
+const registered=[];
+extension({registerTool:t=>registered.push(t),registerCommand(){},on(){}});
+const keypressSchema=registered.find(t=>t.name==="act_ui").parameters.properties.actions.items.anyOf.find(s=>s.properties.action.const==="keypress");
+assert(keypressSchema.required.includes("ref"),"published standalone keypress contract requires explicit ref");
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -53,8 +58,9 @@ Object.assign(currentPlatformBackend, {
   async getFrontmost() { if (!focused) return { pid: 99, windowId: 202 }; return { appName: "FakeApp", bundleId: "com.example.fake", pid: 4242, windowId: 101 }; },
   isBrowserApp() { return false; },
   isChromeFamilyApp() { return false; },
-  async observe() {
+  async observe(_target, options) {
     captureCalls += 1;
+    if (captureMode === "image_only_failed" && _target.includeImage) throw new Error("Capture timed out");
     if (captureMode === "failed") throw new Error("Capture timed out");
     if (captureMode === "transport") throw new HelperTransportError("capture-only reply lost", { command: "look", requestId: "look-lost", requestWriteAttempted: true, reason: "timeout" });
     const result = parseLookResponse({
@@ -83,6 +89,7 @@ Object.assign(currentPlatformBackend, {
   },
   async act(request) {
     actCalls.push(request);
+    if (actMode === "effect_unverified") return { outcome: "unknown", performed: { delivery: "ax" } };
     if (actMode === "worked") return { outcome: focused ? "worked" : "didnt", performed: { delivery: "ax" }, evidence: { focused }, error: focused ? undefined : { code: "foreground_mismatch", message: "not focused" } };
     if (actMode === "partial_hid") {
       return {
@@ -154,6 +161,21 @@ try {
  const node=seen.details.outline.root.children.find(n=>n.role==="AXTextField").ref;
  await executeAct("after-late",{stateId:validState,actions:[{action:"setText",ref:node,text:"fresh survives"}]},undefined,undefined,ctx);
  assert.equal(actCalls.length,2);
+ // Actual observe retains semantic state when image capture fails.
+ captureMode="image_only_failed";
+ seen=await executeObserve("optional-image",{root:ref,mode:"fused"},undefined,undefined,ctx);
+ assert.equal(seen.details.observation.status,"semantic_only");
+ assert.equal(seen.details.observation.nativeCompletion,"unconfirmed");
+ assert(!seen.content.some(c=>c.type==="image"));
+ assert.equal(seen.details.capture.width,0);
+ captureMode="normal";actMode="effect_unverified";
+ const saveRef=seen.details.outline.root.children.find(n=>n.role==="AXButton").ref;
+ result=await executeAct("normal-return-save",{stateId:seen.details.capture.stateId,actions:[{action:"press",ref:saveRef}]},undefined,undefined,ctx);
+ assert.equal(result.details.execution.outcome,"unknown");
+ assert.equal(result.details.execution.dispatchCompletion,"returned");
+ assert.equal(result.details.execution.effectVerification,"unverified");
+ assert.equal(result.details.execution.transport,undefined);
+ assert.equal(result.details.execution.inputDispatch,undefined);
  focusMode="unknown";
  await assert.rejects(()=>focus(),/focus reply lost|unknown/);
  console.log("actual focus executor: default/optional failure/eligible action/failed verification/late result/unknown focus passed");

@@ -140,17 +140,13 @@ export async function ensureMacosReady(
 ): Promise<PlatformReadyState> {
 	const helperDiagnostics = await ensureHelperAvailable(signal);
 
-	const now = Date.now();
-	const cachedStatus = state.permissionStatus;
-	const canUseCachedPermissions =
-		cachedStatus?.accessibility &&
-		cachedStatus.screenRecording &&
-		now - state.lastPermissionCheckAt < 2_000;
-	if (canUseCachedPermissions) {
-		return { ...state, helperDiagnostics };
-	}
-
-	const permissionStatus = await ensurePermissions(ctx, macosPermissionBridge(), HELPER_APP_PATH, signal);
-
+	// Accessibility gates semantic/native operations. Screen Recording is reported
+	// independently and enforced by image capture itself, never by a global live probe.
+	const permissionStatus: PermissionStatus = {
+		accessibility: helperDiagnostics.accessibility === true,
+		screenRecording: helperDiagnostics.screenRecording === true,
+		screenRecordingPreflight: helperDiagnostics.screenRecording === true,
+	};
+	if (!permissionStatus.accessibility) throw new Error(`Accessibility is unavailable for the helper. Readiness did not request permission. Helper path: ${HELPER_APP_PATH}`);
 	return { permissionStatus, lastPermissionCheckAt: Date.now(), helperDiagnostics };
 }

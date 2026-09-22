@@ -153,6 +153,10 @@ interface ComputerUseDetails {
 		frontmostWindowRef?: string;
 	};
 }
+interface FocusOnlyDetails extends Omit<ComputerUseDetails, "capture" | "view"> {
+	observation: { status: "omitted" | "failed"; error?: string; readOnly: true; completion: "not_started" | "unconfirmed"; cancellationRequested: boolean; nativeCapture?: unknown };
+	timings: { nativeFocusMs: number; verificationMs: number; captureMs: number };
+}
 interface TerminalDesktopActionDetails {
 	tool: "act_ui";
 	status: "target_closed" | "post_action_observation_failed" | "dispatch_outcome_unknown";
@@ -1029,6 +1033,8 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
 	const look = await performLook(target, { maxDimension, readText, includeImage }, signal);
+	// An optional read may finish after its caller timed out. Never adopt that late look.
+	throwIfAborted(signal);
 	const outline = stabilizeRefs(baseTarget && sameRootIdentity(baseTarget, target) ? baseOutline : undefined, look.parsedOutline!);
 	look.parsedOutline = outline;
 	look.outline = outline.root;
@@ -1452,68 +1458,66 @@ async function performListWindows(params: FindParams, signal?: AbortSignal): Pro
 	return { content: [{ type: "text", text }], details };
 }
 
-async function performFocusWindow(params: FocusWindowParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails>> {
+async function performFocusWindow(params: FocusWindowParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | FocusOnlyDetails>> {
 	if (!/^@r\d+$/.test(params.root)) throw new Error("focus_window.root must be an exact @r ref issued by find_roots.");
 	const record = runtimeState.windowRefs.get(params.root);
 	if (!record || record.pid <= 0) throw new Error(`Root ref '${params.root}' is unavailable. Call find_roots again.`);
 	const target = await ensureTargetWindowId(await resolveTargetByWindowSelector(params.root, signal), signal);
-	if (target.isMinimized || !target.isOnscreen) {
-		throw new Error("focus_window only activates a currently onscreen, non-minimized root; it does not restore hidden windows.");
-	}
+	if (target.isMinimized || !target.isOnscreen) throw new Error("focus_window only activates a currently onscreen, non-minimized root; it does not restore hidden windows.");
 	return await withWindowWriteLock(target, async () => {
+		const started = performance.now();
+		// A transport failure here remains genuinely uncertain; do not catch it as an observation failure.
 		const native = await currentPlatformBackend.focusWindow(nativeWindowRequest(target), signal);
+		const focusedAt = performance.now();
 		let roots: HelperWindow[] = [];
 		let frontmost: FrontmostResult | undefined;
-		let probeErrors: string[] = [];
-		try {
-			roots = await currentPlatformBackend.listRoots({ pid: target.pid }, signal);
-		} catch (error) {
-			probeErrors.push(`roots: ${String(error)}`);
-		}
-		try {
-			frontmost = await currentPlatformBackend.getFrontmost(signal);
-		} catch (error) {
-			probeErrors.push(`frontmost: ${String(error)}`);
-		}
+		const probeErrors: string[] = [];
+		try { roots = await currentPlatformBackend.listRoots({ pid: target.pid }, signal); }
+		catch (error) { probeErrors.push(`roots: ${String(error)}`); }
+		try { frontmost = await currentPlatformBackend.getFrontmost(signal); }
+		catch (error) { probeErrors.push(`frontmost: ${String(error)}`); }
 		const verification = verifyFocusedWindow(target, roots, frontmost);
-		const capture = await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target);
-		const summary = verification.verified
-			? `Focused and verified ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`
-			: `The native focus request for ${target.appName} — ${target.windowTitle} did not verify the exact root as main, focused, and frontmost. No pointer or keyboard input was sent. Returned state ${capture.capture.stateId}.`;
-		const result = await buildToolResult(
-			"focus_window",
-			summary,
-			capture,
-			executionTrace("act", currentRuntimeMode(), {
-				outcome: verification.verified ? "worked" : "didnt",
-				actionCount: 1,
-				performed: {
-					grounding: "description",
-					delivery: "ax",
-					activated: native.activated,
-					raised: native.raised,
-					focused: native.focused,
-				},
-				evidence: { nativeFocus: native, verification, probeErrors },
-			}),
-			signal,
-		);
-		const details = result.details;
-		if (!details) throw new Error("focus_window completed without a structured result.");
-		details.focusWindow = {
-			requested: true,
-			alreadyFocused: native.alreadyFocused,
-			activated: native.activated,
-			setMain: native.setMain,
-			setFocused: native.setFocused,
-			raised: native.raised,
-			reason: native.reason ?? (probeErrors.length ? probeErrors.join("; ") : undefined),
-			...verification,
-			frontmostPid: frontmost?.pid,
-			frontmostWindowId: frontmost?.windowId,
+		const verifiedAt = performance.now();
+		const focusWindow = {
+			requested: true, alreadyFocused: native.alreadyFocused, activated: native.activated,
+			setMain: native.setMain, setFocused: native.setFocused, raised: native.raised,
+			reason: native.reason ?? (probeErrors.length ? probeErrors.join("; ") : undefined), ...verification,
+			frontmostPid: frontmost?.pid, frontmostWindowId: frontmost?.windowId,
 			frontmostWindowRef: frontmost?.windowRef ?? frontmost?.rootRef,
 		};
-		return result;
+		const execution = executionTrace("act", currentRuntimeMode(), {
+			outcome: verification.verified ? "worked" : "didnt", actionCount: 1,
+			performed: { grounding: "description", delivery: "ax", activated: native.activated, raised: native.raised, focused: native.focused },
+			evidence: { nativeFocus: native, verification, probeErrors },
+		});
+		const summary = verification.verified ? "Focus completed and exact foreground identity verified." : "Focus did not verify the exact root as main, focused, and frontmost. No pointer or keyboard input was sent.";
+		let observation: FocusOnlyDetails["observation"] = { status: "omitted", readOnly: true, completion: "not_started", cancellationRequested: false };
+		if (params.capture === true) {
+			// Only the read-only observation is bounded/caught. Its cancellation is
+			// not native completion, nor is it uncertainty about input dispatch.
+			const controller = new AbortController();
+			const abort = () => controller.abort(signal?.reason);
+			signal?.addEventListener("abort", abort, { once: true });
+			if (signal?.aborted) abort();
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const deadline = new Promise<never>((_, reject) => {
+					timer = setTimeout(() => { controller.abort(); reject(new Error("Optional capture deadline exceeded; read completion unconfirmed.")); }, 9_000);
+				});
+				const capture = await Promise.race([captureCurrentTarget(controller.signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target), deadline]);
+				const result = await buildToolResult("focus_window", summary, capture, execution, signal);
+				if (result.details) Object.assign(result.details, { focusWindow, observation: { status: "captured", readOnly: true, completion: "completed", cancellationRequested: false }, timings: { nativeFocusMs: focusedAt-started, verificationMs: verifiedAt-focusedAt, captureMs: performance.now()-verifiedAt } });
+				return result;
+			} catch (error) {
+				controller.abort();
+				observation = { status: "failed", readOnly: true, error: String(error).slice(0, 512), completion: "unconfirmed", cancellationRequested: true, nativeCapture: error instanceof Error && "details" in error ? error.details : undefined };
+			} finally { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+		}
+		return { content: [{ type: "text", text: `${summary} Observation ${observation.status}; no new image or stateId. Use a fresh semantic observation or other valid grounding for subsequent actions.` }], details: {
+			tool: "focus_window", target: { app: target.appName, bundleId: target.bundleId, pid: target.pid, windowTitle: target.windowTitle, windowId: target.windowId, windowRef: target.windowRef, nativeWindowRef: target.nativeWindowRef },
+			activation: { activated: native.activated === true, raised: native.raised === true, unminimized: false }, execution, focusWindow, observation,
+			timings: { nativeFocusMs: focusedAt-started, verificationMs: verifiedAt-focusedAt, captureMs: params.capture ? performance.now()-verifiedAt : 0 },
+		} };
 	});
 }
 
@@ -2507,7 +2511,7 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 }
 
 export const executeFind = makeToolExecutor("find_roots", performListWindows);
-export const executeFocusWindow = makeToolExecutor<FocusWindowParams, ComputerUseDetails>("focus_window", performFocusWindow);
+export const executeFocusWindow = makeToolExecutor<FocusWindowParams, ComputerUseDetails | FocusOnlyDetails>("focus_window", performFocusWindow);
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
 export const executeObserve = makeToolExecutor("observe_ui", performObserve);

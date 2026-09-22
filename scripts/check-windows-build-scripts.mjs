@@ -99,6 +99,7 @@ function runScript(relPath, args, timeoutMs = 120_000) {
       env: {
         ...process.env,
         PI_COMPUTER_USE_HELPER_APP_PATH: TEST_HELPER_APP,
+        XDG_DATA_HOME: path.join(TEST_ROOT, "data"),
         PI_COMPUTER_USE_WINDOWS_HELPER_PATH: TEST_WINDOWS_HELPER,
         // These smoke tests validate routing and isolated install paths, not
         // Keychain integration. Signing can open SecurityAgent on headless macOS.
@@ -249,9 +250,11 @@ console.log(`\n${LABEL} setup-helper.mjs (no args, platform detection)`);
     const isAcceptable = result.code === 0 || result.stderr.includes("EPERM");
     tap(isAcceptable, true, "no-args handles win32 auto-detection");
   } else if (isDarwin()) {
-    tap(result.code === 0 || result.stderr.includes("EPERM"), true, "no-args installs only into the isolated test app on macOS");
+    const signedSourceRefused = result.code === 1 && result.stderr.includes("The explicit unsigned local build unexpectedly has a code-signing requirement.");
+    tap(result.code === 0 || result.stderr.includes("EPERM") || signedSourceRefused, true, "isolated unsigned routing either installs unsigned bytes or rejects signed source");
     const combined = result.stderr + result.stdout;
-    tap(/installed|current|unavailable|EPERM/i.test(combined), true, "prints macOS install/current/sandbox status");
+    tap(/installed|current|unavailable|EPERM/i.test(combined) || signedSourceRefused, true, "reports exact install or fail-closed unsigned-source status");
+    if (signedSourceRefused) tap(fs.existsSync(TEST_HELPER_APP), false, "refused source never creates installed app");
   } else {
     tap(result.code, 1, "no-args exits 1 on non-Windows/non-macOS");
     tapMatch(result.stderr, /only supported on macOS/, "prints macOS-only error");

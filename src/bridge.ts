@@ -62,6 +62,9 @@ interface ExecutionTrace {
 		recoveryRequired: true;
 		retrySafe: false;
 	};
+	/** Native terminal reply, distinct from whether the intended UI effect was observed. */
+	dispatchCompletion?: "returned" | "unknown";
+	effectVerification?: "observed" | "not_observed" | "unverified";
 	outcome?: ActOutcome;
 	performed?: HelperActPerformed;
 	evidence?: Record<string, unknown>;
@@ -85,6 +88,7 @@ interface ExecutionTrace {
 }
 
 interface ComputerUseDetails {
+	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "unconfirmed" };
 	tool: string;
 	target: {
 		app: string;
@@ -153,7 +157,7 @@ interface ComputerUseDetails {
 		frontmostWindowRef?: string;
 	};
 }
-interface FocusOnlyDetails extends Omit<ComputerUseDetails, "capture" | "view"> {
+interface FocusOnlyDetails extends Omit<ComputerUseDetails, "capture" | "view" | "observation"> {
 	observation: { status: "omitted" | "failed"; error?: string; readOnly: true; completion: "not_started" | "unconfirmed"; cancellationRequested: boolean; nativeCapture?: unknown };
 	timings: { nativeFocusMs: number; verificationMs: number; captureMs: number };
 }
@@ -1192,6 +1196,8 @@ function executionTraceFromAct(result: HelperActResult, policy = currentDelivery
 	const inputDispatch = partialHidDispatchFromAct(result);
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
+		dispatchCompletion: inputDispatch ? "unknown" : "returned",
+		effectVerification: result.outcome === "worked" ? "observed" : result.outcome === "didnt" ? "not_observed" : "unverified",
 		performed: result.performed,
 		evidence: result.evidence,
 		error: result.error,
@@ -1810,10 +1816,21 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		: await resolveTargetForObserve(signal);
 	const imageMode = normalizeImageMode(image);
 	const resourceKey = desktopResourceKey(requestedTarget);
+	let imageError: string | undefined;
 	const scheduled = await resourceScheduler.read(resourceKey, async (epoch) => {
 		state.resourceKey = resourceKey;
 		state.epoch = epoch;
-		return await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, imageMode !== "never");
+		// Publish real semantic evidence first; optional image failure cannot erase it.
+		const semantic = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, requestedTarget, false);
+		if (imageMode === "never") return semantic;
+		try {
+			return await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true);
+		} catch (error) {
+			throwIfAborted(signal);
+			imageError = (error instanceof Error ? error.message : String(error)).slice(0, 1024);
+			// Native work may still be pending: a returned error is not cancellation completion.
+			return semantic;
+		}
 	});
 	const captureResult = scheduled.value;
 	// Model @r refs are re-minted on re-resolution, so ref string equality
@@ -1825,7 +1842,12 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		);
 	}
 	const summary = `Observed ${mode} ${captureResult.target.windowRef ? `${captureResult.target.windowRef} ` : ""}${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned the latest outline state.`;
-	return await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageMode);
+	const result = await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageError ? "never" : imageMode);
+	if (imageError) {
+		result.details.observation = { status: "semantic_only", readOnly: true, imageError, nativeCompletion: "unconfirmed" };
+		result.content.unshift({ type: "text", text: "Image observation failed; fresh semantic evidence remains valid. Native capture completion is unconfirmed; no image was returned." });
+	}
+	return result;
 }
 
 function currentOutlineOrThrow(stateId?: string): Outline {
@@ -2013,6 +2035,8 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	const fallback = steps.find((step) => step.escalatedToForeground);
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
+		dispatchCompletion: steps.some(step => step.transport || step.inputDispatch) ? "unknown" : "returned",
+		effectVerification: outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified",
 		steps,
 		actionCount: steps.some((step) => step.transport || step.inputDispatch) ? undefined : steps.length,
 		stoppedAt: steps.findIndex((step) => step.outcome !== "worked") >= 0 ? steps.findIndex((step) => step.outcome !== "worked") : undefined,

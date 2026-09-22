@@ -177,7 +177,7 @@ check("INV-10 resource-keyed scheduling", () => {
 check("INV-11 unified agent contract", () => {
 	const extension = fs.readFileSync(path.join(root, "extensions/computer-use.ts"), "utf8");
 	const tools = [...extension.matchAll(/\bname:\s*"([^"]+)"/g)].map((match) => match[1]);
-	const expected = ["find_roots", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "read_text", "wait_for", "launch_browser", "navigate_browser", "evaluate_browser"];
+	const expected = ["find_roots", "focus_window", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "read_text", "wait_for", "launch_browser", "navigate_browser", "evaluate_browser"];
 	assert(JSON.stringify(tools) === JSON.stringify(expected), `unexpected public tool surface: ${tools.join(", ")}`);
 	assert(!extension.includes('executionMode: "sequential"'), "computer-use tools remain globally sequential");
 	assert(extension.includes("Required state id owning every @e ref"), "state-scoped ref contract is missing");
@@ -271,6 +271,27 @@ check("INV-20 bounded broad root discovery", () => {
 	assert(swift.includes("recentCompletedRequestIds"), "helper diagnostics cannot establish abandoned-request completion");
 });
 
+check("INV-21 exact native window focus has no pointer or keyboard fallback", () => {
+	const focus = ts.slice(ts.indexOf("async function performFocusWindow"), ts.indexOf("function normalizeImageMode"));
+	const swiftFocus = swift.slice(swift.indexOf("private func focusWindow"), swift.indexOf("private func scoreWindow"));
+	assert(focus.includes("resolveTargetByWindowSelector(params.root") && focus.includes("currentPlatformBackend.focusWindow(nativeWindowRequest(target)"), "focus_window does not target the exact discovered native window");
+	assert(focus.includes("verifyFocusedWindow(target, roots, frontmost)"), "focus_window does not verify exact main/focused/frontmost state");
+	assert(!focus.includes("postMouse") && !focus.includes("keypress") && !focus.includes("typeText"), "focus_window can send pointer or keyboard input");
+	assert(swiftFocus.includes("let activated = app.activate()") && swiftFocus.includes("for attempt in 0..<12") && swiftFocus.includes("observedFrontmostPid == pid && observedFocused && observedMain"), "macOS native focus lacks bounded global/frontmost/main/focused verification");
+	assert(swiftFocus.includes("AXUIElementPerformAction(window, kAXRaiseAction"), "macOS native focus does not raise the exact window during verification");
+});
+
+check("INV-22 desktop action validation precedes epoch-consuming write", () => {
+	const actionStart = ts.indexOf("async function performDesktopTransaction");
+	const writeLock = ts.indexOf("withWindowWriteLock(target", actionStart);
+	const preflight = ts.indexOf("preflightActionSequence(actions, false", actionStart);
+	const runtime = fs.readFileSync(path.join(root, "src/runtime.ts"), "utf8");
+	const preflightWrite = runtime.slice(runtime.indexOf("export async function runPreflightWrite"));
+	assert(actionStart >= 0 && writeLock > actionStart && preflight > writeLock, "act_ui must provide full-sequence preflight to its epoch write boundary");
+	assert(preflightWrite.indexOf("preflight();") < preflightWrite.indexOf("scheduler.write("), "transaction preflight must run before the scheduler can consume the epoch");
+	assert(ts.includes("runPreflightWrite(resourceScheduler, key, baseEpoch"), "production window writes must use the tested real scheduler transaction boundary");
+});
+
 check("INV-8 swift typecheck", () => {
 	const triple = process.arch === "x64" ? "x86_64-apple-macosx14.0" : "arm64-apple-macosx14.0";
 	execFileSync("xcrun", [
@@ -284,6 +305,7 @@ check("INV-8 swift typecheck", () => {
 		"-typecheck",
 		"native/macos/agent_cursor.swift",
 		"native/macos/agent_cursor_motion.swift",
+		"native/macos/foreground_gate.swift",
 		"native/macos/bridge.swift",
 	], { cwd: root, stdio: "pipe" });
 });

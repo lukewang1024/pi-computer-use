@@ -6,22 +6,23 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
+import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, preflightActionSequence, type ActionState, type PreparedAction } from "./actions.ts";
 import { cdpClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
-import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
+import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type FocusWindowParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
 import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
 import type { PermissionStatus } from "./permissions.ts";
-import { ResourceScheduler } from "./runtime.ts";
+import { ResourceScheduler, runPreflightWrite } from "./runtime.ts";
+import { verifyFocusedWindow } from "./focus-window.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
-export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
+export type { ActParams, EvaluateBrowserParams, ExpandUiParams, FocusWindowParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
 
 interface ActivationFlags {
 	activated: boolean;
@@ -46,6 +47,21 @@ interface ExecutionTrace {
 	stealthCompatible?: boolean;
 	delivery?: ActionDelivery;
 	deliveryPolicy?: DeliveryPolicy;
+	transport?: {
+		outcome: "unknown";
+		command: string;
+		requestId: string;
+		requestWriteAttempted: boolean;
+	};
+	inputDispatch?: {
+		outcome: "unknown";
+		kind: "partial_hid";
+		eventsDispatched: number;
+		unreleasedKeys: number[];
+		unreleasedMouseButtons: number[];
+		recoveryRequired: true;
+		retrySafe: false;
+	};
 	outcome?: ActOutcome;
 	performed?: HelperActPerformed;
 	evidence?: Record<string, unknown>;
@@ -119,10 +135,27 @@ interface ComputerUseDetails {
 		| "unlabeled_ax_targets"
 		| "duplicated_ax_labels"
 		| "browser_wait_verification";
+	focusWindow?: {
+		requested: boolean;
+		alreadyFocused?: boolean;
+		activated?: boolean;
+		setMain?: boolean;
+		setFocused?: boolean;
+		raised?: boolean;
+		reason?: string;
+		verified: boolean;
+		targetIsMain: boolean;
+		targetIsFocused: boolean;
+		frontmostPidMatches: boolean;
+		frontmostWindowMatches: boolean;
+		frontmostPid?: number;
+		frontmostWindowId?: number;
+		frontmostWindowRef?: string;
+	};
 }
 interface TerminalDesktopActionDetails {
 	tool: "act_ui";
-	status: "target_closed" | "post_action_observation_failed";
+	status: "target_closed" | "post_action_observation_failed" | "dispatch_outcome_unknown";
 	baseStateId: string;
 	target: {
 		app: string;
@@ -429,11 +462,11 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-async function withWindowWriteLock<T>(target: ResolvedTarget | CurrentTarget, work: () => Promise<T>): Promise<T> {
+async function withWindowWriteLock<T>(target: ResolvedTarget | CurrentTarget, work: () => Promise<T>, preflight?: () => void): Promise<T> {
 	const state = operationState();
 	const key = desktopResourceKey(target);
 	const baseEpoch = state.epoch ?? resourceScheduler.epoch(key);
-	const result = await resourceScheduler.write(key, baseEpoch, async (nextEpoch) => {
+	const result = await runPreflightWrite(resourceScheduler, key, baseEpoch, preflight ?? (() => {}), async (nextEpoch) => {
 		state.resourceKey = key;
 		state.epoch = nextEpoch;
 		return await work();
@@ -913,8 +946,14 @@ async function resolveFrontmostTarget(signal?: AbortSignal): Promise<ResolvedTar
 	}
 
 	let selected = windows.find((window) => window.windowId !== undefined && window.windowId === frontmost.windowId);
-	if (!selected && frontmost.windowTitle) {
-		selected = windows.find((window) => normalizeText(window.title) === normalizeText(frontmost.windowTitle));
+	if (!selected) {
+		const frontmostRef = frontmost.rootRef ?? frontmost.windowRef;
+		if (frontmostRef) {
+			selected = windows.find((window) => window.rootRef === frontmostRef || window.windowRef === frontmostRef);
+		}
+	}
+	if (!selected && currentPlatformBackend.name === "macos") {
+		throw new Error("The macOS frontmost AX focused-window identity was unavailable; refusing a ranked window fallback.");
 	}
 	selected ??= choosePreferredWindow(windows, app.appName);
 
@@ -1144,15 +1183,56 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 
 function executionTraceFromAct(result: HelperActResult, policy = currentDeliveryPolicy()): ExecutionTrace {
 	const rootDelta = result.rootDelta?.map((delta) => ({ ...delta, ref: modelRefForRootDelta(delta) }));
+	const inputDispatch = partialHidDispatchFromAct(result);
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
 		performed: result.performed,
 		evidence: result.evidence,
 		error: result.error,
+		inputDispatch,
 		stoppedAt: result.stoppedAt,
 		rootDelta,
 		delivery: result.performed?.delivery,
 		deliveryPolicy: policy,
+	});
+}
+
+function partialHidDispatchFromAct(result: HelperActResult): ExecutionTrace["inputDispatch"] {
+	if (result.outcome !== "unknown" || result.error?.code !== "foreground_interrupted_after_partial_hid") return undefined;
+	const raw = (result as HelperActResult & { inputDispatch?: unknown }).inputDispatch
+		?? (result.evidence?.foregroundVerification && (result.evidence.foregroundVerification as Record<string, unknown>).inputDispatch);
+	if (!raw || typeof raw !== "object") return undefined;
+	const value = raw as Record<string, unknown>;
+	if (value.recoveryRequired !== true || value.retrySafe !== false || typeof value.eventsDispatched !== "number" || value.eventsDispatched <= 0) return undefined;
+	const integerArray = (candidate: unknown): number[] => Array.isArray(candidate) ? candidate.filter((item): item is number => Number.isInteger(item)) : [];
+	return {
+		outcome: "unknown",
+		kind: "partial_hid",
+		eventsDispatched: value.eventsDispatched,
+		unreleasedKeys: integerArray(value.unreleasedKeys),
+		unreleasedMouseButtons: integerArray(value.unreleasedMouseButtons),
+		recoveryRequired: true,
+		retrySafe: false,
+	};
+}
+
+function transportUnknownTrace(error: unknown, policy: DeliveryPolicy): ExecutionTrace | undefined {
+	if (!(error instanceof Error)) return undefined;
+	const details = error as Error & {
+		code?: unknown;
+		outcome?: unknown;
+		command?: unknown;
+		requestId?: unknown;
+		requestWriteAttempted?: unknown;
+	};
+	if (details.code !== "helper_transport_unknown" || details.outcome !== "unknown" || typeof details.requestId !== "string") return undefined;
+	const command = typeof details.command === "string" ? details.command : "act";
+	const requestWriteAttempted = details.requestWriteAttempted === true;
+	return executionTrace("act", currentRuntimeMode(), {
+		outcome: "unknown",
+		deliveryPolicy: policy,
+		error: { code: "helper_transport_unknown", message: details.message, requestId: details.requestId, requestWriteAttempted },
+		transport: { outcome: "unknown", command, requestId: details.requestId, requestWriteAttempted },
 	});
 }
 
@@ -1171,16 +1251,34 @@ async function helperAct(
 	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
 	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
-		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
-		const trace = executionTraceFromAct(foreground, "foreground");
-		trace.backgroundFirst = false;
-		return trace;
+		try {
+			const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+			const trace = executionTraceFromAct(foreground, "foreground");
+			trace.backgroundFirst = false;
+			return trace;
+		} catch (error) {
+			const trace = transportUnknownTrace(error, "foreground");
+			if (!trace) throw error;
+			trace.backgroundFirst = false;
+			return trace;
+		}
 	}
 	try {
 		const initialPolicy = headless ? "ax_only" : "background";
 		const result = checked(await currentPlatformBackend.act(helperActRequest(target, action, initialPolicy), { signal, timeoutMs }));
 		if (canRetryInForeground(action, result.outcome, headless)) {
-			const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+			let foreground: HelperActResult;
+			try {
+				foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+			} catch (error) {
+				const transport = transportUnknownTrace(error, "foreground");
+				if (!transport) throw error;
+				transport.backgroundFirst = true;
+				transport.escalatedToForeground = true;
+				transport.escalationReason = "side_effect_free_didnt";
+				transport.backgroundAttempt = { outcome: "didnt", reason: "The background action reported no effect before the foreground request became unknown." };
+				return transport;
+			}
 			const trace = executionTraceFromAct(foreground, "foreground");
 			trace.backgroundFirst = true;
 			trace.escalatedToForeground = true;
@@ -1192,9 +1290,25 @@ async function helperAct(
 		trace.backgroundFirst = true;
 		return trace;
 	} catch (error) {
+		const transport = transportUnknownTrace(error, "background");
+		if (transport) {
+			transport.backgroundFirst = true;
+			return transport;
+		}
 		const code = (error as Error & { code?: string })?.code;
 		if (code !== "foreground_required" || headless) throw error;
-		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+		let foreground: HelperActResult;
+		try {
+			foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
+		} catch (retryError) {
+			const transport = transportUnknownTrace(retryError, "foreground");
+			if (!transport) throw retryError;
+			transport.backgroundFirst = true;
+			transport.escalatedToForeground = true;
+			transport.escalationReason = code;
+			transport.backgroundAttempt = { outcome: "foreground_required", reason: error instanceof Error ? error.message : String(error) };
+			return transport;
+		}
 		const trace = executionTraceFromAct(foreground, "foreground");
 		trace.backgroundFirst = true;
 		trace.escalatedToForeground = true;
@@ -1336,6 +1450,71 @@ async function performListWindows(params: FindParams, signal?: AbortSignal): Pro
 			? "No roots matched the supplied filters."
 			: "No roots are currently visible to pi-computer-use.";
 	return { content: [{ type: "text", text }], details };
+}
+
+async function performFocusWindow(params: FocusWindowParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails>> {
+	if (!/^@r\d+$/.test(params.root)) throw new Error("focus_window.root must be an exact @r ref issued by find_roots.");
+	const record = runtimeState.windowRefs.get(params.root);
+	if (!record || record.pid <= 0) throw new Error(`Root ref '${params.root}' is unavailable. Call find_roots again.`);
+	const target = await ensureTargetWindowId(await resolveTargetByWindowSelector(params.root, signal), signal);
+	if (target.isMinimized || !target.isOnscreen) {
+		throw new Error("focus_window only activates a currently onscreen, non-minimized root; it does not restore hidden windows.");
+	}
+	return await withWindowWriteLock(target, async () => {
+		const native = await currentPlatformBackend.focusWindow(nativeWindowRequest(target), signal);
+		let roots: HelperWindow[] = [];
+		let frontmost: FrontmostResult | undefined;
+		let probeErrors: string[] = [];
+		try {
+			roots = await currentPlatformBackend.listRoots({ pid: target.pid }, signal);
+		} catch (error) {
+			probeErrors.push(`roots: ${String(error)}`);
+		}
+		try {
+			frontmost = await currentPlatformBackend.getFrontmost(signal);
+		} catch (error) {
+			probeErrors.push(`frontmost: ${String(error)}`);
+		}
+		const verification = verifyFocusedWindow(target, roots, frontmost);
+		const capture = await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target);
+		const summary = verification.verified
+			? `Focused and verified ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`
+			: `The native focus request for ${target.appName} — ${target.windowTitle} did not verify the exact root as main, focused, and frontmost. No pointer or keyboard input was sent. Returned state ${capture.capture.stateId}.`;
+		const result = await buildToolResult(
+			"focus_window",
+			summary,
+			capture,
+			executionTrace("act", currentRuntimeMode(), {
+				outcome: verification.verified ? "worked" : "didnt",
+				actionCount: 1,
+				performed: {
+					grounding: "description",
+					delivery: "ax",
+					activated: native.activated,
+					raised: native.raised,
+					focused: native.focused,
+				},
+				evidence: { nativeFocus: native, verification, probeErrors },
+			}),
+			signal,
+		);
+		const details = result.details;
+		if (!details) throw new Error("focus_window completed without a structured result.");
+		details.focusWindow = {
+			requested: true,
+			alreadyFocused: native.alreadyFocused,
+			activated: native.activated,
+			setMain: native.setMain,
+			setFocused: native.setFocused,
+			raised: native.raised,
+			reason: native.reason ?? (probeErrors.length ? probeErrors.join("; ") : undefined),
+			...verification,
+			frontmostPid: frontmost?.pid,
+			frontmostWindowId: frontmost?.windowId,
+			frontmostWindowRef: frontmost?.windowRef ?? frontmost?.rootRef,
+		};
+		return result;
+	});
 }
 
 function normalizeImageMode(value: unknown): ImageMode {
@@ -1767,6 +1946,7 @@ async function performInspectUi(params: InspectUiParams): Promise<AgentToolResul
 
 function prepareUiAction(action: UiAction, state: ActionState, look: LookResponse, headless: boolean): PreparedAction {
 	return prepareAction(action, state, {
+		platform: currentPlatformBackend.name,
 		headless,
 		image: look.image,
 		node: outlineNodeByRef,
@@ -1796,7 +1976,14 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 		const actionState: ActionState = { currentFocus: false };
 		const requests = actions.map((action) => helperActRequest(target, prepareUiAction(action, actionState, look, true) as NativePreparedAction, "ax_only"));
 		const textLength = actions.reduce((sum, action) => sum + (action.text?.length ?? 0), 0);
-		const result = await currentPlatformBackend.actBatch(requests, { signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, textLength * 25 + 6_000) });
+		let result: HelperActResult;
+		try {
+			result = await currentPlatformBackend.actBatch(requests, { signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, textLength * 25 + 6_000) });
+		} catch (error) {
+			const transport = transportUnknownTrace(error, "ax_only");
+			if (!transport) throw error;
+			return transport;
+		}
 		if (!result.steps || result.steps.length === 0) throw new Error("Native action transaction returned no checked steps.");
 		const execution = aggregateExecutions(result.steps.map((step) => executionTraceFromAct(step, "ax_only")));
 		const batchTrace = executionTraceFromAct(result, "ax_only");
@@ -1811,7 +1998,7 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 	for (const action of actions) {
 		const step = await dispatchUiAction(action, target, look, headless, actionState, signal);
 		steps.push(step);
-		if (step.outcome === "didnt") break;
+		if (step.outcome !== "worked") break;
 	}
 	return aggregateExecutions(steps);
 }
@@ -1823,8 +2010,12 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
 		steps,
-		actionCount: steps.length,
+		actionCount: steps.some((step) => step.transport || step.inputDispatch) ? undefined : steps.length,
+		stoppedAt: steps.findIndex((step) => step.outcome !== "worked") >= 0 ? steps.findIndex((step) => step.outcome !== "worked") : undefined,
 		rootDelta: steps.flatMap((step) => step.rootDelta ?? []),
+		transport: steps.find((step) => step.transport)?.transport,
+		inputDispatch: steps.find((step) => step.inputDispatch)?.inputDispatch,
+		error: steps.find((step) => step.error)?.error,
 		backgroundFirst: true,
 		escalatedToForeground: Boolean(fallback),
 		escalationReason: fallback?.escalationReason,
@@ -1856,15 +2047,20 @@ async function terminalDesktopActionResult(
 	condition?: ReturnType<typeof validateCondition>,
 ): Promise<AgentToolResult<TerminalDesktopActionDetails>> {
 	let exactRootAvailable: boolean | undefined;
-	try {
-		for (let attempt = 0; attempt < 3; attempt += 1) {
-			const roots = await currentPlatformBackend.listRoots({ pid: target.pid });
-			exactRootAvailable = roots.some((root) => exactPlatformRootMatchesTarget(root, target));
-			if (exactRootAvailable) break;
-			if (attempt < 2) await sleep(75);
+	const transportUnknown = execution.transport?.outcome === "unknown";
+	const partialInputUnknown = execution.inputDispatch?.outcome === "unknown";
+	const dispatchUnknown = transportUnknown || partialInputUnknown;
+	if (!dispatchUnknown) {
+		try {
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				const roots = await currentPlatformBackend.listRoots({ pid: target.pid });
+				exactRootAvailable = roots.some((root) => exactPlatformRootMatchesTarget(root, target));
+				if (exactRootAvailable) break;
+				if (attempt < 2) await sleep(75);
+			}
+		} catch {
+			// A failed identity probe cannot prove that the root closed.
 		}
-	} catch {
-		// A failed identity probe cannot prove that the root closed.
 	}
 	const targetClosed = exactRootAvailable === false;
 	if (targetClosed && !(execution.rootDelta ?? []).some((delta) => delta.change === "closed" && delta.pid === target.pid && (delta.ref === target.windowRef || delta.ref === target.nativeWindowRef))) {
@@ -1898,8 +2094,8 @@ async function terminalDesktopActionResult(
 			};
 		}
 	}
-	const status = targetClosed ? "target_closed" : "post_action_observation_failed";
-	const code = targetClosed ? "target_closed" : "post_action_observation_failed";
+	const status = dispatchUnknown ? "dispatch_outcome_unknown" : targetClosed ? "target_closed" : "post_action_observation_failed";
+	const code = transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? "foreground_interrupted_after_partial_hid" : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
 	clearDesktopOperationState(operationState());
 	const details: TerminalDesktopActionDetails = {
@@ -1918,11 +2114,19 @@ async function terminalDesktopActionResult(
 		execution,
 		error: { code, message },
 	};
-	const result = targetClosed
+	const unreleasedKeys = execution.inputDispatch?.unreleasedKeys ?? [];
+	const unreleasedButtons = execution.inputDispatch?.unreleasedMouseButtons ?? [];
+	const result = transportUnknown
+		? `The native outcome of the act_ui request is unknown. Request ${execution.transport?.requestId} ${execution.transport?.requestWriteAttempted ? "had a helper-socket write attempted, but daemon receipt and input delivery are unknown" : "was not written to the helper socket"}. Do not retry this action. Explicit desktop recovery is required before continuing.`
+		: partialInputUnknown
+		? `Foreground verification failed after ${execution.inputDispatch?.eventsDispatched} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
+		: targetClosed
 		? `The action was delivered, and its source root ${target.appName} — ${target.windowTitle} closed before a successor observation could be captured.`
 		: `The action was delivered, but its source root ${target.appName} — ${target.windowTitle} could not be observed afterward: ${message}`;
 	return {
-		content: [{ type: "text", text: `${result}\nNo successor state was created. Call find_roots, then observe_ui to continue.` }],
+		content: [{ type: "text", text: dispatchUnknown
+			? `${result}\nNo successor state was created. Keep writes quarantined and perform explicit desktop recovery before any further CU call.`
+			: `${result}\nNo successor state was created. Call find_roots, then observe_ui to continue.` }],
 		details,
 	};
 }
@@ -1937,9 +2141,18 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 	const noteBefore = state.currentNote;
+	const headless = getComputerUseConfig().headless;
 	return await withWindowWriteLock(target, async () => {
-		const headless = getComputerUseConfig().headless;
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
+		if (execution.transport?.outcome === "unknown" || execution.inputDispatch?.outcome === "unknown") {
+			return await terminalDesktopActionResult(
+				target,
+				baseView.stateId,
+				execution,
+				new Error(execution.error?.message ?? "Helper transport ended before a terminal native response."),
+				condition,
+			);
+		}
 		const executedActions = actions.slice(0, execution.actionCount ?? actions.length);
 		try {
 			if (condition) {
@@ -1988,6 +2201,15 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			}
 			return await terminalDesktopActionResult(target, baseView.stateId, execution, error, condition);
 		}
+	}, () => {
+		preflightActionSequence(actions, false, {
+			platform: currentPlatformBackend.name,
+			headless,
+			image: look.image,
+			node: outlineNodeByRef,
+			center: outlineNodeCenter,
+			validatePoint: (x, y, label) => ensurePointIsInLookImage(x, y, look, label),
+		});
 	});
 }
 
@@ -2285,6 +2507,7 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 }
 
 export const executeFind = makeToolExecutor("find_roots", performListWindows);
+export const executeFocusWindow = makeToolExecutor<FocusWindowParams, ComputerUseDetails>("focus_window", performFocusWindow);
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
 export const executeObserve = makeToolExecutor("observe_ui", performObserve);

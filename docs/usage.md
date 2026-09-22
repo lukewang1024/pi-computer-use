@@ -12,6 +12,7 @@ The normal loop is:
 | Tool | Purpose |
 | --- | --- |
 | `find_roots` | Return a bounded, ranked set of desktop and CDP browser-page roots. |
+| `focus_window` | Activate and verify one exact visible root before interaction. Supported on macOS, Windows, and Linux; it sends no pointer or keyboard input. |
 | `observe_ui` | Capture the current/frontmost root or one exact `@r` root and return a folded outline plus `stateId`. |
 | `search_ui` | Run a bounded, ranked query over the full cached outline. |
 | `expand_ui` | Show local outline context for one ref. |
@@ -26,6 +27,8 @@ The normal loop is:
 ## Refs and state
 
 `find_roots` returns roots such as `@r1`. Every desktop window, transient surface, and CDP page participates in that same forest. `observe_ui` returns element refs such as `@e12` and a `stateId`.
+
+For a background desktop root, call `focus_window({ root: "@r1" })` and continue only when its result verifies the requested process and exact window as main, focused, and frontmost. On macOS the native helper activates the app, raises the selected Accessibility window, and polls those facts for a bounded interval; a successful AX setter alone is not treated as proof. Platform backends without an exact frontmost window identity fail closed.
 
 Every tool that consumes an `@e` ref also requires its owning `stateId`. A state remains queryable while it is in the bounded store, but a mutation from an old resource epoch is rejected as stale. `act_ui` returns the next usable `stateId`; consume it directly instead of observing again. Observe again only after an uncertain external mutation or state eviction.
 

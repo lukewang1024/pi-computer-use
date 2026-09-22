@@ -46,11 +46,12 @@ Grant these permissions to the resolved `pi-computer-use.app`, normally `~/Appli
 - Accessibility
 - Screen Recording, shown as Screen and System Audio Recording on newer macOS versions
 
-The setup flow registers the helper with TCC before opening System
-Settings, so `pi-computer-use.app` is already listed in both panes — enable
-its toggle and choose **Recheck**. Recheck restarts the helper on purpose:
-macOS caches permission answers per process, so a helper that started
-before the grant would keep reporting "missing" forever.
+Session startup and normal computer-use operations only check permission
+status; they do not request access or open System Settings. In an interactive
+session, run `/computer-use permissions` and explicitly choose either
+**Request missing macOS permissions** or the relevant Settings pane. After
+changing a toggle, run the command again and choose **Recheck permissions**
+to restart the helper before checking the grant.
 
 Older versions used other helper identities such as `bridge`, Terminal, Ghostty, node, Codex, or `PiComputerUseBridge.app`. Those are not current. Grant access to `pi-computer-use.app`.
 
@@ -65,20 +66,14 @@ log stream --debug --predicate 'subsystem == "com.apple.TCC" AND eventMessage BE
 `checkPermissions` reports two Screen Recording signals: the TCC database
 boolean (`screenRecordingPreflight`) and a live ScreenCaptureKit probe
 (authoritative). When the preflight reads granted but the live probe fails,
-the grant row belongs to a different identity than the running helper —
-usually because the helper was re-signed or updated (TCC keys grant rows to
-the code signature), or because it is not running as the canonical app (see
-next section). Re-toggle the grant in System Settings, or reset and
-re-grant:
+the grant may belong to a different identity or the running helper may need a
+restart. This status alone does not prove that the app was re-signed. Check
+the helper path and identity first, then use `/computer-use permissions` to
+explicitly open Settings or recheck after restarting the helper.
 
-```bash
-tccutil reset Accessibility com.injaneity.pi-computer-use
-tccutil reset ScreenCapture com.injaneity.pi-computer-use
-```
-
-An empty AX tree with Accessibility "granted" is the per-process cache
-again: the grant landed after the helper started. Recheck (which restarts
-the helper) or restart Pi.
+An empty AX tree with Accessibility "granted" can reflect a stale per-process
+answer. Choose **Recheck permissions** from `/computer-use permissions` to
+restart the helper and check again.
 
 ## Permission source says "caller"
 

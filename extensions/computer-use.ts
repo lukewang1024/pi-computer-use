@@ -67,7 +67,10 @@ const focusWindowTool = defineTool({
 	label: "Focus Window",
 	description: "Activate and raise one exact visible @r window without sending pointer or keyboard input, then verify its foreground state.",
 	promptSnippet: "Use an exact @r ref from find_roots before interacting with a background window. Continue only when verification confirms the target is main, focused, and frontmost.",
-	parameters: Type.Object({ root: Type.String({ description: "Exact visible @r ref issued by find_roots" }) }),
+	parameters: Type.Object({
+		root: Type.String({ description: "Exact visible @r ref issued by find_roots" }),
+		capture: Type.Optional(Type.Boolean({ description: "Capture an observation after focus (default false). Capture failure does not erase focus verification." })),
+	}),
 	execute: executeFocusWindow,
 });
 

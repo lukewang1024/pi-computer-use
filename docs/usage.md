@@ -141,3 +141,11 @@ Browser states use the same outline, action, text, and condition contracts as de
 ## Parallel calls
 
 Pi may issue tool calls concurrently. Cached queries can overlap freely. Live work for different desktop processes or CDP pages can overlap; work for the same physical resource is ordered. Do not intentionally race two mutations derived from the same state: one wins and the other receives a stale-state error by design.
+
+### Focus and optional capture
+
+`focus_window({root: "@r1"})` defaults to focus-only. It returns native focus evidence and exact main/focused/frontmost verification, without an image or new `stateId`. Set `capture: true` to request an optional observation. Its `observation.status` is independent of focus: `captured`, `omitted`, or `failed`. Failure does not erase the focus receipt or imply input dispatch uncertainty. A failed verification still forbids input.
+
+Actions require their own valid grounding and the unchanged per-event foreground gate. Obtain a fresh semantic observation for AX actions; only pixel-grounded actions require an image. Ordinary macOS readiness checks Accessibility using passive diagnostics and reports Screen Recording separately. Capture availability is tested when an image is requested, not as a global permission precondition.
+
+Optional capture has a 9-second caller budget (native SCK budget remains 8 seconds). Cancellation requested is not native completion. A late result is discarded before publishing observation state. Native diagnostics expose bounded, metadata-only capture records (request ID, PID/window, shareable/image/fallback timing and completion). At most four unfinished capture tasks are admitted; further captures report busy while input and AX operations retain their own eligibility rules. Unknown input dispatch and uncertain native focus transport remain protected.

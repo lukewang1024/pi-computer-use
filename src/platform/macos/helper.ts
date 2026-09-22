@@ -49,7 +49,7 @@ export class HelperTransportError extends Error {
 export class HelperCommandError extends Error {
 	readonly code?: string;
 
-	constructor(message: string, code?: string) {
+	constructor(message: string, code?: string, readonly details?: unknown) {
 		super(message);
 		this.name = "HelperCommandError";
 		this.code = code;
@@ -248,7 +248,7 @@ export class MacosHelperClient {
 					cleanup();
 					socket.end();
 					if (parsed.ok === true) resolve(parsed.result as T);
-					else reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code));
+					else reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code, parsed?.error?.details));
 				} catch (error) {
 					fail("invalid_response", `Daemon command '${cmd}' returned an invalid response: ${error instanceof Error ? error.message : String(error)}; native completion is unknown.`);
 				}

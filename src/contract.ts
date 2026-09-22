@@ -16,6 +16,8 @@ export interface FindParams {
 }
 
 export interface FocusWindowParams {
+	/** Optional observation after focus. Defaults to false; failure never erases the focus receipt. */
+	capture?: boolean;
 	/** Exact @r ref returned by find_roots. */
 	root: RootSelector;
 }

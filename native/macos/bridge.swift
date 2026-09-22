@@ -95,6 +95,13 @@ private struct WindowPairing {
 	let confidence: String
 }
 
+private struct FocusedWindowResolution {
+	let element: AXUIElement?
+	let windowId: UInt32?
+	let windowRef: String?
+	let diagnostics: [String: Any]
+}
+
 private struct CapturedWindowImage {
 	let image: CGImage
 	let windowId: UInt32
@@ -108,6 +115,17 @@ private struct LookRecord {
 	let imageWidth: Int
 	let imageHeight: Int
 	let hasImage: Bool
+}
+
+private struct PhysicalInputTarget {
+	let pid: Int32
+	let windowId: UInt32
+	let axWindow: AXUIElement?
+	let dispatchState: ForegroundInputDispatchState
+}
+
+private struct ForegroundGateFailure: Error {
+	let details: [String: Any]
 }
 
 private struct RootAXEvent {
@@ -623,6 +641,8 @@ final class Bridge {
 			return try listRoots(pid: optionalIntArg(request, "pid").map { Int32($0) }, title: optionalStringArg(request, "title"))
 		case "getFrontmost":
 			return try getFrontmost()
+		case "focusDiagnostics":
+			return try focusDiagnostics(request)
 		case "getUserContext":
 			return try getUserContext()
 		case "beginInputSuppression":
@@ -638,7 +658,11 @@ final class Bridge {
 		case "look":
 			return try look(request)
 		case "act":
-			return try act(request)
+			do {
+				return try act(request)
+			} catch let failure as ForegroundGateFailure {
+				return foregroundRejectedActResult(details: failure.details)
+			}
 		case "actBatch":
 			return try actBatch(request)
 		case "hitTest":
@@ -694,6 +718,30 @@ final class Bridge {
 			return Int(value)
 		}
 		return nil
+	}
+
+	private func boundedOptionalInt32Arg(_ request: [String: Any], _ key: String) throws -> Int32? {
+		guard let raw = request[key] else { return nil }
+		let value: Int64?
+		if let integer = raw as? Int { value = Int64(integer) }
+		else if let number = raw as? NSNumber { value = number.int64Value }
+		else { value = nil }
+		guard let value, value >= Int64(Int32.min), value <= Int64(Int32.max) else {
+			throw BridgeFailure(message: "Argument '\(key)' is outside the Int32 range", code: "invalid_args")
+		}
+		return Int32(value)
+	}
+
+	private func boundedOptionalUInt32Arg(_ request: [String: Any], _ key: String) throws -> UInt32? {
+		guard let raw = request[key] else { return nil }
+		let value: UInt64?
+		if let integer = raw as? Int, integer >= 0 { value = UInt64(integer) }
+		else if let number = raw as? NSNumber, number.int64Value >= 0 { value = UInt64(number.int64Value) }
+		else { value = nil }
+		guard let value, value <= UInt64(UInt32.max) else {
+			throw BridgeFailure(message: "Argument '\(key)' is outside the UInt32 range", code: "invalid_args")
+		}
+		return UInt32(value)
 	}
 
 	private func boolArg(_ request: [String: Any], _ key: String) -> Bool? {
@@ -955,7 +1003,6 @@ final class Bridge {
 			throw BridgeFailure(message: "No frontmost app available", code: "frontmost_unavailable")
 		}
 		let pid = app.processIdentifier
-		let windows = try listWindows(pid: pid)
 
 		var result: [String: Any] = [
 			"appName": app.localizedName ?? "Unknown App",
@@ -965,16 +1012,49 @@ final class Bridge {
 			result["bundleId"] = bundleId
 		}
 
-		if let chosen = windows.sorted(by: { scoreWindow($0) > scoreWindow($1) }).first {
-			result["windowTitle"] = (chosen["title"] as? String) ?? ""
-			if let windowId = chosen["windowId"] {
-				result["windowId"] = windowId
+		// A frontmost PID is not enough to identify the window that will receive
+		// global input. Resolve the application's exact AXFocusedWindow instead
+		// of promoting the highest-scoring visible window as a proxy.
+		if let focused = focusedWindowIdentity(pid: pid) {
+			result["windowTitle"] = stringAttribute(focused.element, attribute: kAXTitleAttribute as CFString) ?? ""
+			if let windowId = focused.windowId {
+				result["windowId"] = Int(windowId)
 			}
-			if let windowRef = chosen["windowRef"] as? String {
+			if let windowRef = focused.windowRef {
 				result["windowRef"] = windowRef
 			}
 		}
 		return result
+	}
+
+	// Read-only diagnostic for a foreground mapping race. This deliberately
+	// performs the same two AX/CG resolutions as the HID gate but never raises,
+	// activates, or emits input. Keep the payload to identities, counts, scores,
+	// status codes, and timings; never include titles or AX values.
+	private func focusDiagnostics(_ request: [String: Any]) throws -> [String: Any] {
+		let requestedPid = try boundedOptionalInt32Arg(request, "pid")
+		let targetWindowId = try boundedOptionalUInt32Arg(request, "windowId")
+		let firstPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
+		let first = firstPid.map { focusedWindowResolution(pid: $0) }
+		let secondPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
+		let second = secondPid.map { focusedWindowResolution(pid: $0) }
+		let focusedSameElement = first?.element.flatMap { left in second?.element.map { right in sameElement(left, right) } } ?? false
+		let targetOwnerPid = targetWindowId.flatMap { windowInfo(windowId: $0)?.pid }
+		let targetPresentForPid = targetWindowId.flatMap { id in firstPid.map { pid in cgWindowCandidates(pid: pid).contains { $0.windowId == id } } } ?? false
+		return [
+			"requestedPid": requestedPid.map { Int($0) } as Any? ?? NSNull(),
+			"firstFrontmostPid": firstPid.map { Int($0) } as Any? ?? NSNull(),
+			"secondFrontmostPid": secondPid.map { Int($0) } as Any? ?? NSNull(),
+			"frontmostPidStable": firstPid == secondPid,
+			"focusedSameElement": focusedSameElement,
+			"target": [
+				"windowId": targetWindowId.map { Int($0) } as Any? ?? NSNull(),
+				"ownerPid": targetOwnerPid.map { Int($0) } as Any? ?? NSNull(),
+				"presentForFirstPid": targetPresentForPid,
+			],
+			"first": first?.diagnostics ?? ["mappingStage": "frontmost_unavailable"],
+			"second": second?.diagnostics ?? ["mappingStage": "frontmost_unavailable"],
+		]
 	}
 
 	private func getUserContext() throws -> [String: Any] {
@@ -1095,26 +1175,52 @@ final class Bridge {
 		guard let window = windowElement(pid: pid, windowId: windowId, windowRef: windowRef) else {
 			return ["focused": false, "reason": "window_not_found"]
 		}
+		guard let app = NSRunningApplication(processIdentifier: pid) else {
+			throw BridgeFailure(message: "App with pid \(pid) is no longer running", code: "app_not_found")
+		}
+		let activated = app.activate()
 
 		let appElement = AXUIElementCreateApplication(pid)
-		if let focusedWindow = copyAttribute(appElement, attribute: kAXFocusedWindowAttribute as CFString).flatMap(asAXElement),
-			sameElement(focusedWindow, window)
-		{
-			return ["focused": true, "alreadyFocused": true]
+		var setMain = false
+		var setFocused = false
+		var raised = false
+		var alreadyFocused = false
+		var verified = false
+		var observedFrontmostPid: Int32?
+		var observedMain = false
+		var observedFocused = false
+		for attempt in 0..<12 {
+			observedFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+			observedFocused = copyAttribute(appElement, attribute: kAXFocusedWindowAttribute as CFString)
+				.flatMap(asAXElement)
+				.map { sameElement($0, window) } ?? false
+			observedMain = boolAttribute(window, attribute: kAXMainAttribute as CFString) ?? false
+			if observedFrontmostPid == pid && observedFocused && observedMain {
+				alreadyFocused = attempt == 0
+				verified = true
+				break
+			}
+
+			setMain = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue) == .success || setMain
+			setFocused = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success || setFocused
+			raised = AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success || raised
+			if attempt < 11 { Thread.sleep(forTimeInterval: 0.05) }
 		}
 
-		let setMainStatus = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-		let setFocusedStatus = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-		let raiseStatus = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-		let focused = setMainStatus == .success || setFocusedStatus == .success || raiseStatus == .success
 		var result: [String: Any] = [
-			"focused": focused,
-			"setMain": setMainStatus == .success,
-			"setFocused": setFocusedStatus == .success,
-			"raised": raiseStatus == .success,
+			"focused": verified,
+			"verified": verified,
+			"alreadyFocused": alreadyFocused,
+			"activated": activated,
+			"setMain": setMain,
+			"setFocused": setFocused,
+			"raised": raised,
+			"targetIsMain": observedMain,
+			"targetIsFocused": observedFocused,
 		]
-		if !focused {
-			result["reason"] = "focus_failed"
+		if let observedFrontmostPid { result["frontmostPid"] = Int(observedFrontmostPid) }
+		if !verified {
+			result["reason"] = "focus_verification_failed"
 		}
 		return result
 	}
@@ -1228,6 +1334,7 @@ final class Bridge {
 		let appElement = AXUIElementCreateApplication(pid)
 		AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
 		let windows = Array(axElementArray(appElement, attribute: kAXWindowsAttribute as CFString).prefix(128))
+		let focusedWindow = copyAttribute(appElement, attribute: kAXFocusedWindowAttribute as CFString).flatMap(asAXElement)
 		let candidates = cgWindowCandidates(pid: pid, entries: cgEntries)
 		let pairings = windowPairings(windows: windows, candidates: candidates)
 
@@ -1247,7 +1354,10 @@ final class Bridge {
 			let windowRef = refStore.storeWindow(window)
 			let isMinimized = boolAttribute(window, attribute: kAXMinimizedAttribute as CFString) ?? false
 			let isMain = boolAttribute(window, attribute: kAXMainAttribute as CFString) ?? false
-			let isFocused = boolAttribute(window, attribute: kAXFocusedAttribute as CFString) ?? false
+			// AXFocused on an individual window is not equivalent to the
+			// application's focused-window identity. Use the latter for every
+			// root, and leave all roots unconfirmed when it is unavailable.
+			let isFocused = focusedWindow.map { sameElement($0, window) } ?? false
 			let sheetCount = sheetElements(of: window).count
 			let isModal = (boolAttribute(window, attribute: "AXModal" as CFString) ?? false) || sheetCount > 0 || isDialogLikeRoot(role: axRole, subrole: axSubrole)
 			let scale = displayScaleFactor(for: effectiveFrame)
@@ -1297,7 +1407,7 @@ final class Bridge {
 					"isMinimized": false,
 					"isOnscreen": sheetCandidate?.isOnscreen ?? candidate?.isOnscreen ?? !isMinimized,
 					"isMain": false,
-					"isFocused": isFocused,
+					"isFocused": focusedWindow.map { sameElement($0, sheet) } ?? false,
 					"metadata": ["pairing": ["confidence": sheetCandidate == nil ? pairing.confidence : "high", "score": sheetCandidate == nil ? pairing.score : 100], "sheetCount": 0],
 				]
 				if let sheetCandidate { sheetItem["windowId"] = Int(sheetCandidate.windowId) }
@@ -1856,17 +1966,23 @@ final class Bridge {
 	}
 
 	private func act(_ request: [String: Any]) throws -> [String: Any] {
+		let action = try stringArg(request, "action")
+		let params = request["params"] as? [String: Any] ?? [:]
+		let validatedKeys = action == "keypress"
+			? try normalizedMacKeypressKeys(params["keys"] as? [String] ?? [])
+			: nil
 		let lookId = try stringArg(request, "lookId")
 		guard let record = lookRecord(for: lookId) else {
 			throw BridgeFailure(message: "Look id '\(lookId)' is no longer available", code: "stale_look")
 		}
 		let pid = Int32(try intArg(request, "pid"))
-		let action = try stringArg(request, "action")
 		let target = request["target"] as? [String: Any] ?? [:]
-		let params = request["params"] as? [String: Any] ?? [:]
 		let policy = optionalStringArg(request, "policy") ?? "default"
 		let deferRootDelta = boolArg(request, "deferRootDelta") ?? false
 		let delivery = policy == "background" ? "pid" : ((params["delivery"] as? String) == "pid" ? "pid" : "hid")
+		let physicalTarget: PhysicalInputTarget? = delivery == "hid"
+			? PhysicalInputTarget(pid: pid, windowId: record.windowId, axWindow: record.windowId > 0 ? windowElement(pid: pid, windowId: record.windowId) : nil, dispatchState: ForegroundInputDispatchState())
+			: nil
 		var holdsPhysicalInput = false
 		func acquirePhysicalInputIfNeeded() {
 			if delivery == "hid" && !holdsPhysicalInput {
@@ -1983,13 +2099,13 @@ final class Bridge {
 			switch action {
 			case "press", "click":
 				animateCursor(at: point)
-				try postMouseClick(at: point, pid: pid, button: mouseButton(params["button"] as? String ?? "left"), clickCount: max(1, min(3, (params["clickCount"] as? NSNumber)?.intValue ?? 1)), delivery: delivery)
+				try postMouseClick(at: point, pid: pid, target: physicalTarget, button: mouseButton(params["button"] as? String ?? "left"), clickCount: max(1, min(3, (params["clickCount"] as? NSNumber)?.intValue ?? 1)), delivery: delivery)
 			case "moveMouse":
 				animateCursor(at: point)
-				try postMouseMove(to: point, pid: pid, delivery: delivery)
+				try postMouseMove(to: point, pid: pid, target: physicalTarget, delivery: delivery)
 			case "scroll":
 				animateCursor(at: point)
-				try postScrollWheel(at: point, deltaX: (params["scrollX"] as? NSNumber)?.intValue ?? 0, deltaY: (params["scrollY"] as? NSNumber)?.intValue ?? 0, pid: pid, delivery: delivery)
+				try postScrollWheel(at: point, deltaX: (params["scrollX"] as? NSNumber)?.intValue ?? 0, deltaY: (params["scrollY"] as? NSNumber)?.intValue ?? 0, pid: pid, target: physicalTarget, delivery: delivery)
 			case "drag":
 				guard let rawPath = params["path"] as? [[String: Any]], rawPath.count >= 2 else {
 					throw BridgeFailure(message: "drag requires path", code: "invalid_args")
@@ -2001,7 +2117,7 @@ final class Bridge {
 					return lookPoint(record: record, x: x, y: y)
 				}
 				animateCursor(at: point)
-				try postMouseDrag(points: points, pid: pid, delivery: delivery)
+				try postMouseDrag(points: points, pid: pid, target: physicalTarget, delivery: delivery)
 			default:
 				throw BridgeFailure(message: "Action \(action) cannot use coordinate grounding", code: "invalid_args")
 			}
@@ -2054,10 +2170,10 @@ final class Bridge {
 					AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, $0) == .success
 				} ?? false
 				if !selected {
-					try postKeyPress(keys: ["cmd", "a"], pid: pid, delivery: delivery)
+					try postKeyPress(keys: ["cmd", "a"], pid: pid, target: physicalTarget, delivery: delivery)
 					usleep(20_000)
 				}
-				try postAtomicUnicodeText(text, pid: pid, delivery: delivery)
+				try postAtomicUnicodeText(text, pid: pid, target: physicalTarget, delivery: delivery)
 				usleep(40_000)
 				let verificationElement = refreshElement() ?? element
 				let value = stringAttribute(verificationElement, attribute: kAXValueAttribute as CFString) ?? ""
@@ -2091,7 +2207,7 @@ final class Bridge {
 			acquirePhysicalInputIfNeeded()
 			if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
 			let text = params["text"] as? String ?? ""
-			try postUnicodeText(text, pid: pid, delivery: delivery)
+			try postUnicodeText(text, pid: pid, target: physicalTarget, delivery: delivery)
 			performed["grounding"] = "coordinates"
 			if let element, !text.isEmpty {
 				usleep(30_000)
@@ -2101,9 +2217,7 @@ final class Bridge {
 			}
 		} else if action == "keypress" {
 			let preserveFocus = params["preserveFocus"] as? Bool ?? false
-			guard let keys = params["keys"] as? [String], !keys.isEmpty else {
-				throw BridgeFailure(message: "keypress requires keys", code: "invalid_args")
-			}
+			let keys = validatedKeys ?? []
 			if let element {
 				let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 				if focused == .success { performed["focused"] = true }
@@ -2123,7 +2237,7 @@ final class Bridge {
 			}
 			acquirePhysicalInputIfNeeded()
 			if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
-			try postKeyPress(keys: keys, pid: pid, delivery: delivery)
+			try postKeyPress(keys: keys, pid: pid, target: physicalTarget, delivery: delivery)
 			performed["grounding"] = "coordinates"
 		} else if let element, action == "scroll" {
 			let cursorPoint = try? coordinatePoint()
@@ -2164,6 +2278,10 @@ final class Bridge {
 		guard let actions = request["actions"] as? [[String: Any]], !actions.isEmpty, actions.count <= 20 else {
 			throw BridgeFailure(message: "actBatch requires 1...20 actions", code: "invalid_args")
 		}
+		for action in actions where (action["action"] as? String) == "keypress" {
+			let params = action["params"] as? [String: Any] ?? [:]
+			_ = try normalizedMacKeypressKeys(params["keys"] as? [String] ?? [])
+		}
 		let pid = Int32(try intArg(actions[0], "pid"))
 		let lookId = try stringArg(actions[0], "lookId")
 		guard actions.allSatisfy({ ($0["pid"] as? NSNumber)?.int32Value == pid }) else {
@@ -2194,6 +2312,10 @@ final class Bridge {
 				if (step["outcome"] as? String) == "didnt" { stoppedAt = index; break }
 			} catch let failure as BridgeFailure {
 				steps.append(["outcome": "didnt", "error": ["code": failure.code, "message": failure.message]])
+				stoppedAt = index
+				break
+			} catch let failure as ForegroundGateFailure {
+				steps.append(foregroundRejectedActResult(details: failure.details))
 				stoppedAt = index
 				break
 			}
@@ -2853,6 +2975,16 @@ final class Bridge {
 		return unsafeBitCast(cfValue, to: AXUIElement.self)
 	}
 
+	private func asAXElementArray(_ value: AnyObject) -> [AXUIElement]? {
+		if let array = value as? [AXUIElement] { return array }
+		if let anyArray = value as? [AnyObject] { return anyArray.compactMap(asAXElement) }
+		return nil
+	}
+
+	private func elapsedMilliseconds(since start: UInt64) -> Double {
+		Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000.0
+	}
+
 	private func pointAttribute(_ element: AXUIElement, attribute: CFString) -> CGPoint? {
 		guard let value = copyAttribute(element, attribute: attribute) else { return nil }
 		let cfValue = value as CFTypeRef
@@ -2879,6 +3011,13 @@ final class Bridge {
 		let origin = pointAttribute(window, attribute: kAXPositionAttribute as CFString) ?? .zero
 		let size = sizeAttribute(window, attribute: kAXSizeAttribute as CFString) ?? .zero
 		return CGRect(origin: origin, size: size)
+	}
+
+	private func strictFrameForWindow(_ window: AXUIElement) -> CGRect? {
+		strictFocusedFrame(
+			origin: pointAttribute(window, attribute: kAXPositionAttribute as CFString),
+			size: sizeAttribute(window, attribute: kAXSizeAttribute as CFString)
+		)
 	}
 
 	private func allCGWindowEntries() -> [[String: Any]] {
@@ -3308,33 +3447,183 @@ final class Bridge {
 		optionalStringArg(request, "delivery") == "pid" ? "pid" : "hid"
 	}
 
-	private func postEvent(_ event: CGEvent, pid: Int32, delivery: String = "hid") {
+	private func focusedAXWindow(pid: Int32) -> AXUIElement? {
+		let app = AXUIElementCreateApplication(pid)
+		AXUIElementSetMessagingTimeout(app, 0.25)
+		return copyAttribute(app, attribute: kAXFocusedWindowAttribute as CFString).flatMap(asAXElement)
+	}
+
+	private func currentForegroundIdentity(focused: AXUIElement? = nil, pid: Int32? = nil) -> ForegroundActualIdentity {
+		let actualPid = pid ?? NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
+		guard let actualPid else { return ForegroundActualIdentity(pid: nil, windowId: nil) }
+		if let focused {
+			return ForegroundActualIdentity(pid: actualPid, windowId: focusedWindowResolution(pid: actualPid, focused: focused).windowId)
+		}
+		return ForegroundActualIdentity(pid: actualPid, windowId: focusedWindowResolution(pid: actualPid).windowId)
+	}
+
+	private func focusedWindowIdentity(pid: Int32, focused: AXUIElement? = nil) -> (element: AXUIElement, windowId: UInt32?, windowRef: String?)? {
+		let resolution = focusedWindowResolution(pid: pid, focused: focused)
+		guard let element = resolution.element else { return nil }
+		return (element, resolution.windowId, resolution.windowRef)
+	}
+
+	private func focusedWindowResolution(pid: Int32, focused suppliedFocused: AXUIElement? = nil) -> FocusedWindowResolution {
+		let started = DispatchTime.now().uptimeNanoseconds
+		let app = AXUIElementCreateApplication(pid)
+		AXUIElementSetMessagingTimeout(app, 0.25)
+		var focusedValue: AnyObject?
+		let focusedStatus = suppliedFocused == nil
+			? AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focusedValue)
+			: .success
+		let focused = suppliedFocused ?? focusedValue.flatMap(asAXElement)
+		let focusedElapsed = elapsedMilliseconds(since: started)
+		var windowsValue: AnyObject?
+		let windowsStarted = DispatchTime.now().uptimeNanoseconds
+		let windowsStatus = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsValue)
+		let windowsArray = windowsValue.flatMap(asAXElementArray)
+		let windows = Array((windowsArray ?? []).prefix(128))
+		let windowsElapsed = elapsedMilliseconds(since: windowsStarted)
+		let candidates = cgWindowCandidates(pid: pid)
+		var nodes: [FocusedAXNodeSnapshot] = []
+		var elements: [String: AXUIElement] = [:]
+		for (index, window) in windows.enumerated() {
+			let token = "window-\(index)"
+			nodes.append(FocusedAXNodeSnapshot(token: token, frame: strictFrameForWindow(window), title: stringAttribute(window, attribute: kAXTitleAttribute as CFString), isSheet: false))
+			elements[token] = window
+			for (sheetIndex, sheet) in sheetElements(of: window).enumerated() {
+				let sheetToken = "window-\(index)-sheet-\(sheetIndex)"
+				nodes.append(FocusedAXNodeSnapshot(token: sheetToken, frame: strictFrameForWindow(sheet), title: stringAttribute(sheet, attribute: kAXTitleAttribute as CFString), isSheet: true))
+				elements[sheetToken] = sheet
+			}
+		}
+		let axReadUsable = focusedStatus == .success && windowsStatus == .success && windowsArray != nil
+		let focusedToken = axReadUsable ? focused.flatMap { focusedElement in nodes.first { token in elements[token.token].map { sameElement(focusedElement, $0) } ?? false }?.token } : nil
+		let candidateSnapshots = candidates.map { candidate in
+			FocusedCGCandidateSnapshot(windowId: candidate.windowId, ownerPid: pid, frame: candidate.bounds, title: candidate.title, isOnscreen: candidate.isOnscreen)
+		}
+		let decision = axReadUsable
+			? decideFocusedMapping(focusedToken: focusedToken, axNodes: nodes, candidates: candidateSnapshots, targetPid: pid)
+			: FocusedMappingDecision(stage: "ax_read_failed", selectedWindowId: nil, candidateCount: candidates.count, validCandidateIds: [], ambiguous: false)
+		let matched = axReadUsable ? focusedToken.flatMap { elements[$0] } : nil
+		var diagnostics: [String: Any] = [
+			"pid": Int(pid),
+			"focusedProvided": suppliedFocused != nil,
+			"focusedReadStatus": Int(focusedStatus.rawValue),
+			"focusedFound": focused != nil,
+			"focusedReadMs": focusedElapsed,
+			"windowsReadStatus": Int(windowsStatus.rawValue),
+			"windowsTypeValid": windowsArray != nil,
+			"axWindowsCount": windows.count,
+			"windowsReadMs": windowsElapsed,
+			"sameElementWindowCount": focusedToken.map { $0.contains("-sheet-") ? 0 : 1 } ?? 0,
+			"sameElementSheetCount": focusedToken.map { $0.contains("-sheet-") ? 1 : 0 } ?? 0,
+			"cgCandidateCount": candidates.count,
+			"cgCandidateWindowIds": candidates.map { Int($0.windowId) },
+			"elapsedMs": elapsedMilliseconds(since: started),
+		]
+		for (key, value) in decision.diagnostics { diagnostics[key] = value }
+		var verifiedSelectedWindowId: UInt32?
+		if let selectedWindowId = decision.selectedWindowId {
+			let selectedInfo = windowInfo(windowId: selectedWindowId)
+			if let ownerPid = selectedInfo?.pid, ownerPid == pid {
+				verifiedSelectedWindowId = selectedWindowId
+				diagnostics["selectedOwnerPid"] = Int(ownerPid)
+				diagnostics["selectedCgPresent"] = true
+			} else {
+				diagnostics["selectedOwnerPid"] = selectedInfo.map { Int($0.pid) } ?? NSNull()
+				diagnostics["selectedCgPresent"] = false
+				diagnostics["mappingStage"] = "selected_cg_owner_mismatch"
+			}
+		}
+		return FocusedWindowResolution(element: matched, windowId: verifiedSelectedWindowId, windowRef: matched.map { refStore.storeWindow($0) }, diagnostics: diagnostics)
+	}
+
+	private func windowIdForAXWindow(_ focused: AXUIElement, pid: Int32) -> UInt32? {
+		focusedWindowResolution(pid: pid, focused: focused).windowId
+	}
+
+	private func postEvent(_ event: CGEvent, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "pid" {
 			event.postToPid(pid)
 			return
 		}
-		// Post as a real foreground HID event. AppKit views with mouseDown handlers
-		// can ignore pid-targeted CGEvents even though postToPid reports success.
-		// Keep the target app frontmost so the HID event is delivered to the intended
-		// window, then post at the session event tap.
-		if let app = NSRunningApplication(processIdentifier: pid), !app.isActive {
-			if #available(macOS 14.0, *) {
-				_ = app.activate()
-			} else {
-				_ = app.activate(options: [.activateIgnoringOtherApps])
-			}
-			usleep(20_000)
+		guard let target else {
+			let report = ForegroundGateReport(
+				target: ForegroundTargetIdentity(pid: pid, windowId: 0),
+				actual: currentForegroundIdentity(),
+				focusedWindowMatches: false,
+				targetIsMain: false
+			)
+			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
-		event.post(tap: .cghidEventTap)
+		let firstPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
+		let firstResolution = firstPid.map { focusedWindowResolution(pid: $0) }
+		let firstFocused = firstResolution?.element
+		let firstActual = ForegroundActualIdentity(pid: firstPid, windowId: firstResolution?.windowId)
+		let firstFocusedMatches = firstFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
+		let firstWindowMatches = firstActual.pid == target.pid && firstActual.windowId == target.windowId
+		let firstTargetIsMain = target.axWindow.flatMap { boolAttribute($0, attribute: kAXMainAttribute as CFString) } ?? false
+		// Re-read the PID, focused AX window, mapped window identity, and main state
+		// after the first AX walk. The final PID read catches visible activation
+		// races immediately before emit; this cannot make the OS operation atomic.
+		let secondPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
+		let secondTargetIsMain = target.axWindow.flatMap { boolAttribute($0, attribute: kAXMainAttribute as CFString) } ?? false
+		let secondResolution = secondPid.map { focusedWindowResolution(pid: $0) }
+		let secondFocused = secondResolution?.element
+		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
+		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
+		let emitPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
+		let report = ForegroundGateReport(
+			target: ForegroundTargetIdentity(pid: target.pid, windowId: target.windowId),
+			actual: secondActual,
+			focusedWindowMatches: firstFocusedMatches && firstWindowMatches && secondFocusedMatches,
+			targetIsMain: firstTargetIsMain && secondTargetIsMain,
+			frontmostPidStable: firstPid == secondPid && secondPid == emitPid && secondActual.pid == emitPid,
+			firstActual: firstActual,
+			firstDiagnostics: firstResolution?.diagnostics,
+			secondDiagnostics: secondResolution?.diagnostics
+		)
+		// AppKit views can ignore pid-targeted events, so verified foreground
+		// input is posted globally only after the exact PID and window recheck.
+		guard dispatchForegroundEventIfVerified(report, event: foregroundInputEvent(event), dispatch: target.dispatchState, emit: {
+			event.post(tap: .cghidEventTap)
+		}) else {
+			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState))
+		}
 	}
 
-	private func postMouseMove(to point: CGPoint, pid: Int32, delivery: String = "hid") throws {
+	private func foregroundInputEvent(_ event: CGEvent) -> ForegroundInputEvent {
+		switch event.type {
+		case .keyDown:
+			return .keyDown(Int(event.getIntegerValueField(.keyboardEventKeycode)), modifiers: activeModifierKeyCodes(event.flags))
+		case .keyUp:
+			return .keyUp(Int(event.getIntegerValueField(.keyboardEventKeycode)), modifiers: activeModifierKeyCodes(event.flags))
+		case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+			return .mouseDown(Int(event.getIntegerValueField(.mouseEventButtonNumber)))
+		case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+			return .mouseUp(Int(event.getIntegerValueField(.mouseEventButtonNumber)))
+		default:
+			return .other
+		}
+	}
+
+	private func activeModifierKeyCodes(_ flags: CGEventFlags) -> [Int] {
+		var keyCodes: [Int] = []
+		if flags.contains(.maskCommand) { keyCodes.append(55) }
+		if flags.contains(.maskShift) { keyCodes.append(56) }
+		if flags.contains(.maskAlternate) { keyCodes.append(58) }
+		if flags.contains(.maskControl) { keyCodes.append(59) }
+		return keyCodes
+	}
+
+	private func postMouseMove(to point: CGPoint, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse move event", code: "input_failed")
 		}
-		postEvent(move, pid: pid, delivery: delivery)
+		try postEvent(move, pid: pid, target: target, delivery: delivery)
 	}
 
 	private func mouseButton(_ name: String) -> CGMouseButton {
@@ -3381,10 +3670,10 @@ final class Bridge {
 		}
 	}
 
-	private func postMouseClick(at point: CGPoint, pid: Int32, button: CGMouseButton = .left, clickCount: Int = 1, delivery: String = "hid") throws {
+	private func postMouseClick(at point: CGPoint, pid: Int32, target: PhysicalInputTarget?, button: CGMouseButton = .left, clickCount: Int = 1, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
-		try postMouseMove(to: point, pid: pid, delivery: delivery)
+		try postMouseMove(to: point, pid: pid, target: target, delivery: delivery)
 		for index in 1...max(1, clickCount) {
 			guard let down = CGEvent(mouseEventSource: nil, mouseType: mouseDownType(for: button), mouseCursorPosition: point, mouseButton: button),
 				let up = CGEvent(mouseEventSource: nil, mouseType: mouseUpType(for: button), mouseCursorPosition: point, mouseButton: button)
@@ -3393,33 +3682,33 @@ final class Bridge {
 			}
 			down.setIntegerValueField(.mouseEventClickState, value: Int64(index))
 			up.setIntegerValueField(.mouseEventClickState, value: Int64(index))
-			postEvent(down, pid: pid, delivery: delivery)
+			try postEvent(down, pid: pid, target: target, delivery: delivery)
 			usleep(12_000)
-			postEvent(up, pid: pid, delivery: delivery)
+			try postEvent(up, pid: pid, target: target, delivery: delivery)
 			if index < clickCount {
 				usleep(70_000)
 			}
 		}
 	}
 
-	private func postMouseDrag(points: [CGPoint], pid: Int32, delivery: String = "hid") throws {
+	private func postMouseDrag(points: [CGPoint], pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		guard points.count >= 2, let first = points.first else {
 			throw BridgeFailure(message: "Drag requires at least two points", code: "invalid_args")
 		}
-		try postMouseMove(to: first, pid: pid, delivery: delivery)
+		try postMouseMove(to: first, pid: pid, target: target, delivery: delivery)
 		guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: first, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse down event", code: "input_failed")
 		}
-		postEvent(down, pid: pid, delivery: delivery)
+		try postEvent(down, pid: pid, target: target, delivery: delivery)
 		usleep(12_000)
 
 		for point in points.dropFirst() {
 			guard let drag = CGEvent(mouseEventSource: nil, mouseType: mouseDraggedType(for: .left), mouseCursorPosition: point, mouseButton: .left) else {
 				throw BridgeFailure(message: "Failed to create mouse drag event", code: "input_failed")
 			}
-			postEvent(drag, pid: pid, delivery: delivery)
+			try postEvent(drag, pid: pid, target: target, delivery: delivery)
 			usleep(8_000)
 		}
 
@@ -3428,13 +3717,13 @@ final class Bridge {
 		else {
 			throw BridgeFailure(message: "Failed to create mouse up event", code: "input_failed")
 		}
-		postEvent(up, pid: pid, delivery: delivery)
+		try postEvent(up, pid: pid, target: target, delivery: delivery)
 	}
 
-	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32, delivery: String = "hid") throws {
+	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
-		try postMouseMove(to: point, pid: pid, delivery: delivery)
+		try postMouseMove(to: point, pid: pid, target: target, delivery: delivery)
 		guard let event = CGEvent(
 			scrollWheelEvent2Source: nil,
 			units: .pixel,
@@ -3446,7 +3735,7 @@ final class Bridge {
 			throw BridgeFailure(message: "Failed to create scroll event", code: "input_failed")
 		}
 		event.location = point
-		postEvent(event, pid: pid, delivery: delivery)
+		try postEvent(event, pid: pid, target: target, delivery: delivery)
 	}
 
 	private func modifierFlag(_ key: String) -> CGEventFlags? {
@@ -3461,6 +3750,64 @@ final class Bridge {
 			return .maskAlternate
 		default:
 			return nil
+		}
+	}
+
+	private func canonicalMacModifier(_ key: String) -> String? {
+		switch key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+		case "cmd", "command", "meta": return "cmd"
+		case "ctrl", "control": return "ctrl"
+		case "shift": return "shift"
+		case "option", "alt": return "alt"
+		default: return nil
+		}
+	}
+
+	private func isSupportedMacBaseKey(_ key: String) -> Bool {
+		modifierFlag(key) == nil && (keyCode(key) != nil || key.count == 1)
+	}
+
+	private func normalizedMacChordToken(_ token: String) throws -> String? {
+		guard token.contains("+"), token != "+" else { return nil }
+		let rawParts = token.components(separatedBy: "+")
+		guard rawParts.count >= 2 else { return nil }
+		let parts = rawParts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+		guard parts.allSatisfy({ !$0.isEmpty }) else {
+			throw BridgeFailure(message: "keypress.keys contains an empty key in a chord", code: "invalid_args")
+		}
+		let modifiers = parts.dropLast().compactMap(canonicalMacModifier)
+		guard modifiers.count == parts.count - 1 else { return nil }
+		guard let base = parts.last, isSupportedMacBaseKey(base) else {
+			throw BridgeFailure(message: "Unsupported key '\(parts.last ?? "")' in macOS key chord", code: "invalid_args")
+		}
+		return (modifiers + [base]).joined(separator: "+")
+	}
+
+	private func normalizedMacKeypressKeys(_ keys: [String]) throws -> [String] {
+		guard !keys.isEmpty else {
+			throw BridgeFailure(message: "keypress requires keys", code: "invalid_args")
+		}
+		let tokens = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+		guard tokens.allSatisfy({ !$0.isEmpty }) else {
+			throw BridgeFailure(message: "keypress keys must not contain an empty key", code: "invalid_args")
+		}
+
+		if tokens.count >= 2 {
+			let modifiers = tokens.dropLast().compactMap(canonicalMacModifier)
+			if modifiers.count == tokens.count - 1 {
+				guard let base = tokens.last, isSupportedMacBaseKey(base) else {
+					throw BridgeFailure(message: "Unsupported macOS key after modifier", code: "invalid_args")
+				}
+				return modifiers + [base]
+			}
+		}
+
+		return try tokens.map { token in
+			if let chord = try normalizedMacChordToken(token) { return chord }
+			guard isSupportedMacBaseKey(token) else {
+				throw BridgeFailure(message: "Unsupported key '\(token)'", code: "invalid_args")
+			}
+			return token
 		}
 	}
 
@@ -3498,11 +3845,11 @@ final class Bridge {
 		return (flags, keys.last ?? "")
 	}
 
-	private func postKeyPress(keys: [String], pid: Int32, delivery: String = "hid") throws {
+	private func postKeyPress(keys: [String], pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		if let chord = keyChord(keys) {
-			try postKey(chord.key, flags: chord.flags, pid: pid, delivery: delivery)
+			try postKey(chord.key, flags: chord.flags, pid: pid, target: target, delivery: delivery)
 			return
 		}
 
@@ -3512,19 +3859,19 @@ final class Bridge {
 				.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
 				.filter { !$0.isEmpty }
 			if let chord = keyChord(parts) {
-				try postKey(chord.key, flags: chord.flags, pid: pid, delivery: delivery)
+				try postKey(chord.key, flags: chord.flags, pid: pid, target: target, delivery: delivery)
 			} else {
-				try postKey(key, flags: [], pid: pid, delivery: delivery)
+				try postKey(key, flags: [], pid: pid, target: target, delivery: delivery)
 			}
 		}
 	}
 
-	private func postKey(_ key: String, flags: CGEventFlags, pid: Int32, delivery: String = "hid") throws {
+	private func postKey(_ key: String, flags: CGEventFlags, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		guard let code = keyCode(key) else {
 			if key.count == 1 {
-				try postUnicodeText(key, pid: pid, delivery: delivery)
+				try postUnicodeText(key, pid: pid, target: target, delivery: delivery)
 				return
 			}
 			throw BridgeFailure(message: "Unsupported key '\(key)'", code: "invalid_args")
@@ -3536,18 +3883,18 @@ final class Bridge {
 		}
 		down.flags = flags
 		up.flags = flags
-		postEvent(down, pid: pid, delivery: delivery)
-		postEvent(up, pid: pid, delivery: delivery)
+		try postEvent(down, pid: pid, target: target, delivery: delivery)
+		try postEvent(up, pid: pid, target: target, delivery: delivery)
 		usleep(8_000)
 	}
 
-	private func postUnicodeText(_ text: String, pid: Int32, delivery: String = "hid") throws {
+	private func postUnicodeText(_ text: String, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		for scalar in text.unicodeScalars {
 			let char = String(scalar)
 			if let stroke = physicalKeyStroke(for: char) {
-				try postKey(stroke.key, flags: stroke.flags, pid: pid, delivery: delivery)
+				try postKey(stroke.key, flags: stroke.flags, pid: pid, target: target, delivery: delivery)
 				continue
 			}
 			guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
@@ -3557,13 +3904,13 @@ final class Bridge {
 			}
 			setUnicodeString(event: down, text: char)
 			setUnicodeString(event: up, text: char)
-			postEvent(down, pid: pid, delivery: delivery)
-			postEvent(up, pid: pid, delivery: delivery)
+			try postEvent(down, pid: pid, target: target, delivery: delivery)
+			try postEvent(up, pid: pid, target: target, delivery: delivery)
 			usleep(8_000)
 		}
 	}
 
-	private func postAtomicUnicodeText(_ text: String, pid: Int32, delivery: String = "hid") throws {
+	private func postAtomicUnicodeText(_ text: String, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
@@ -3571,9 +3918,9 @@ final class Bridge {
 		else { throw BridgeFailure(message: "Failed to create unicode text event", code: "input_failed") }
 		setUnicodeString(event: down, text: text)
 		setUnicodeString(event: up, text: text)
-		postEvent(down, pid: pid, delivery: delivery)
+		try postEvent(down, pid: pid, target: target, delivery: delivery)
 		usleep(8_000)
-		postEvent(up, pid: pid, delivery: delivery)
+		try postEvent(up, pid: pid, target: target, delivery: delivery)
 	}
 
 	/// Prefer physical key codes for characters represented by the US layout.

@@ -93,6 +93,8 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 			pid,
 			windowTitle: toOptionalString(result?.windowTitle),
 			windowId: Number.isFinite(result?.windowId) ? Math.trunc(result.windowId) : undefined,
+			rootRef: toOptionalString(result?.rootRef ?? result?.windowRef),
+			windowRef: toOptionalString(result?.windowRef ?? result?.rootRef),
 		};
 	},
 

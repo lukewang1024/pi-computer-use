@@ -85,11 +85,16 @@ export interface PlatformFrontmostResult {
 	windowTitle?: string;
 	windowId?: number;
 	rootRef?: string;
+	windowRef?: string;
 }
 
 export interface PlatformFocusWindowResult {
 	focused: boolean;
 	alreadyFocused?: boolean;
+	activated?: boolean;
+	setMain?: boolean;
+	setFocused?: boolean;
+	raised?: boolean;
 	reason?: string;
 }
 
@@ -122,7 +127,7 @@ export interface HelperActResult {
 	outcome: ActOutcome;
 	performed?: HelperActPerformed;
 	evidence?: Record<string, unknown>;
-	error?: { code?: string; message?: string; whatIsThere?: unknown };
+	error?: { code?: string; message?: string; whatIsThere?: unknown; requestId?: string; requestWriteAttempted?: boolean };
 	rootDelta?: PlatformRootDelta[];
 	steps?: HelperActResult[];
 	stoppedAt?: number;

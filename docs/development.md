@@ -93,6 +93,36 @@ On Linux, install Rust/Cargo and run `npm run build:linux`, `npm run test:linux`
 
 This section applies to macOS releases. macOS TCC keys Accessibility and Screen Recording grants to an app's code-signing identity. Ad-hoc and locally self-signed development builds may require permission review whenever their native code changes. Only Developer ID-signed release bundles should be treated as having a stable update identity.
 
+Before replacing an installed pre-signed helper, `setup-helper` verifies the
+candidate and installed bundle signatures and compares their designated
+requirements. Updates with a different requirement are refused while keeping
+the installed app in place. A stored local signing-identity pin must still be
+available; a missing helper with an existing pin also fails closed because its
+prior requirement cannot be established. Local pins do not imply that a CI
+release uses the same certificate. Any identity migration requires a separate
+deliberate procedure; ordinary setup does not perform one.
+
+Release bundles, loose binaries, and locally built binaries all go through the
+same per-install lock and staged transaction. Interrupted directory moves are
+recovered from a record containing the exact paths, bundle hashes, and
+designated requirements. A live lock owner is never taken over only because
+its heartbeat is old; stale locks are reclaimed only after the recorded owner
+process is dead.
+
+If a published pre-signed app has a different requirement from the installed
+helper, setup rejects it and does not silently fall back to a local build. To
+select the local identity path explicitly, run
+`PI_COMPUTER_USE_LOCAL_BUILD=1 node scripts/setup-helper.mjs`. This bypasses
+prebuilt and release candidates, builds the native binary locally, assembles
+and signs a temporary app with the available local identity, verifies its
+signature and requirement, and submits it through the same locked recovery
+transaction. A configured pin must be available, and the resulting requirement
+must match the installed app. This path can preserve a locally authorized
+identity such as DR root `85ea` without requiring that machine's private key
+in CI. If the identity differs, setup still refuses replacement. Same-content
+local setup does not re-sign. Ad-hoc changes continue to require the explicit
+`PI_COMPUTER_USE_ALLOW_ADHOC_UPDATE=1` development option.
+
 Release setup:
 
 1. Run `./scripts/make-signing-cert.sh` once, or use a Developer ID Application certificate.

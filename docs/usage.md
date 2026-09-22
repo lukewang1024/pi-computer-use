@@ -12,6 +12,7 @@ The normal loop is:
 | Tool | Purpose |
 | --- | --- |
 | `find_roots` | Return a bounded, ranked set of desktop and CDP browser-page roots. |
+| `focus_window` | Activate and verify one exact visible root before interaction. Supported on macOS, Windows, and Linux; it sends no pointer or keyboard input. |
 | `observe_ui` | Capture the current/frontmost root or one exact `@r` root and return a folded outline plus `stateId`. |
 | `search_ui` | Run a bounded, ranked query over the full cached outline. |
 | `expand_ui` | Show local outline context for one ref. |
@@ -26,6 +27,8 @@ The normal loop is:
 ## Refs and state
 
 `find_roots` returns roots such as `@r1`. Every desktop window, transient surface, and CDP page participates in that same forest. `observe_ui` returns element refs such as `@e12` and a `stateId`.
+
+For a background desktop root, call `focus_window({ root: "@r1" })` and continue only when its result verifies the requested process and exact window as main, focused, and frontmost. On macOS the native helper activates the app, raises the selected Accessibility window, and polls those facts for a bounded interval; a successful AX setter alone is not treated as proof. Platform backends without an exact frontmost window identity fail closed.
 
 Every tool that consumes an `@e` ref also requires its owning `stateId`. A state remains queryable while it is in the bounded store, but a mutation from an old resource epoch is rejected as stale. `act_ui` returns the next usable `stateId`; consume it directly instead of observing again. Observe again only after an uncertain external mutation or state eviction.
 
@@ -138,3 +141,25 @@ Browser states use the same outline, action, text, and condition contracts as de
 ## Parallel calls
 
 Pi may issue tool calls concurrently. Cached queries can overlap freely. Live work for different desktop processes or CDP pages can overlap; work for the same physical resource is ordered. Do not intentionally race two mutations derived from the same state: one wins and the other receives a stale-state error by design.
+
+### Focus and optional capture
+
+`focus_window({root: "@r1"})` defaults to focus-only. It returns native focus evidence and exact main/focused/frontmost verification, without an image or new `stateId`. Set `capture: true` to request an optional observation. Its `observation.status` is independent of focus: `captured`, `omitted`, or `failed`. Failure does not erase the focus receipt or imply input dispatch uncertainty. A failed verification still forbids input.
+
+Actions require their own valid grounding and the unchanged per-event foreground gate. Obtain a fresh semantic observation for AX actions; only pixel-grounded actions require an image. Ordinary macOS readiness checks Accessibility using passive diagnostics and reports Screen Recording separately. Capture availability is tested when an image is requested, not as a global permission precondition.
+
+Optional capture has a 9-second caller budget (native SCK budget remains 8 seconds). Cancellation requested is not native completion. A late result is discarded before publishing observation state. Native diagnostics expose bounded, metadata-only capture records (request ID, PID/window, shareable/image/fallback timing and completion). At most four unfinished capture tasks are admitted; further captures report busy while input and AX operations retain their own eligibility rules. Unknown input dispatch and uncertain native focus transport remain protected.
+
+### Dispatch receipts and optional observation
+
+`keypress` requires an exact current outline `ref` in the public action schema.
+A native terminal reply sets `execution.dispatchCompletion: "returned"`; this does
+not prove the requested effect. `effectVerification: "unverified"` with generic
+`outcome: "unknown"` can mean no observable delta (for example Save). Explicit
+`transport`/`inputDispatch` uncertainty still forbids replay and requires recovery.
+
+Native `observe_ui` obtains real semantic evidence before an optional image. Image
+failure returns semantic refs and `observation.status: "semantic_only"`, no image.
+`nativeCompletion: "unconfirmed"` is not proof native capture work has stopped;
+use native diagnostics for its request/task lifecycle. Pixel actions still require
+a valid image, and all input retains its exact target/foreground preconditions.

@@ -48,6 +48,7 @@ assert.equal(changesBetween(baseLook.parsedOutline, regeneratedLook.parsedOutlin
 const editor = nextLook.parsedOutline.nodes.find((node) => node.wireRef === "editor");
 assert(editor, "editor fixture was not parsed");
 const actionEnv = {
+	platform: "macos",
 	headless: false,
 	image: { width: 800, height: 600 },
 	node: (ref) => nodeByRef(nextLook.parsedOutline, ref),

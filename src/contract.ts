@@ -15,6 +15,13 @@ export interface FindParams {
 	kind?: "window" | "menu" | "sheet" | "popover" | "dialog" | "browser_page";
 }
 
+export interface FocusWindowParams {
+	/** Optional observation after focus. Defaults to false; failure never erases the focus receipt. */
+	capture?: boolean;
+	/** Exact @r ref returned by find_roots. */
+	root: RootSelector;
+}
+
 export interface StateTargetParams {
 	stateId?: string;
 }
@@ -91,6 +98,7 @@ export interface WaitForParams extends StateTargetParams, UiCondition {}
 
 export const AGENT_TOOL_NAMES = new Set([
 	"find_roots",
+	"focus_window",
 	"read_text",
 	"wait_for",
 	"observe_ui",

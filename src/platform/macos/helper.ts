@@ -24,16 +24,32 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
 
 export class HelperTransportError extends Error {
-	constructor(message: string) {
+	readonly code = "helper_transport_unknown";
+	readonly outcome = "unknown" as const;
+	readonly command: string;
+	readonly requestId: string;
+	readonly requestWriteAttempted: boolean;
+	readonly reason: "timeout" | "aborted" | "socket_error" | "invalid_response";
+
+	constructor(message: string, details: {
+		command: string;
+		requestId: string;
+		requestWriteAttempted: boolean;
+		reason: "timeout" | "aborted" | "socket_error" | "invalid_response";
+	}) {
 		super(message);
 		this.name = "HelperTransportError";
+		this.command = details.command;
+		this.requestId = details.requestId;
+		this.requestWriteAttempted = details.requestWriteAttempted;
+		this.reason = details.reason;
 	}
 }
 
 export class HelperCommandError extends Error {
 	readonly code?: string;
 
-	constructor(message: string, code?: string) {
+	constructor(message: string, code?: string, readonly details?: unknown) {
 		super(message);
 		this.name = "HelperCommandError";
 		this.code = code;
@@ -141,6 +157,10 @@ export class MacosHelperClient {
 	private requestSequence = 0;
 	private diagnosticsCache?: PlatformDiagnostics;
 
+	private nextRequestId(): string {
+		return `req_${++this.requestSequence}`;
+	}
+
 	get diagnostics(): PlatformDiagnostics | undefined {
 		return this.diagnosticsCache;
 	}
@@ -167,39 +187,76 @@ export class MacosHelperClient {
 	}
 
 	async launchDaemon(signal?: AbortSignal): Promise<void> {
-		if (usingExternalHelperSocket) throw new HelperTransportError(`External helper socket is unavailable at ${HELPER_SOCKET_PATH}.`);
+		if (usingExternalHelperSocket) throw new HelperTransportError(`External helper socket is unavailable at ${HELPER_SOCKET_PATH}.`, {
+			command: "launch",
+			requestId: this.nextRequestId(),
+			requestWriteAttempted: false,
+			reason: "socket_error",
+		});
 		await mkdir(path.dirname(HELPER_SOCKET_PATH), { recursive: true });
 		// Open the resolved bundle directly so a legacy system-wide copy with the
 		// same bundle id cannot win LaunchServices resolution.
 		await runProcess("open", ["-n", "-g", HELPER_APP_PATH, "--args", "serve", "--socket", HELPER_SOCKET_PATH], COMMAND_TIMEOUT_MS, signal);
 	}
 
-	async daemonCommand<T>(cmd: string, args: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+	async daemonCommand<T>(cmd: string, args: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal, requestId?: string): Promise<T> {
 		return await new Promise<T>((resolve, reject) => {
-			const id = `req_${++this.requestSequence}`;
+			const id = requestId ?? this.nextRequestId();
 			const socket = net.createConnection(HELPER_SOCKET_PATH);
 			let buffer = "";
-			const timer = setTimeout(() => { socket.destroy(); reject(new HelperTransportError(`Daemon command '${cmd}' timed out after ${timeoutMs}ms.`)); }, timeoutMs);
-			const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
-			const onAbort = () => { socket.destroy(); cleanup(); reject(new Error("Operation aborted.")); };
+			let settled = false;
+			let requestWriteAttempted = false;
+			let timer: NodeJS.Timeout | undefined;
+			const cleanup = () => {
+				if (timer) clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+			};
+			const fail = (reason: HelperTransportError["reason"], message: string) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				socket.destroy();
+				reject(new HelperTransportError(
+					`${message} (requestId=${id}, outcome=unknown, requestWriteAttempted=${requestWriteAttempted}).`,
+					{ command: cmd, requestId: id, requestWriteAttempted, reason },
+				));
+			};
+			const onAbort = () => fail("aborted", `Daemon command '${cmd}' aborted; native completion is unknown.`);
+			timer = setTimeout(() => fail("timeout", `Daemon command '${cmd}' timed out after ${timeoutMs}ms; native completion is unknown.`), timeoutMs);
 			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) onAbort();
 			socket.setEncoding("utf8");
-			socket.on("connect", () => socket.write(`${JSON.stringify({ id, cmd, ...args })}\n`));
+			socket.on("connect", () => {
+				if (settled) return;
+				requestWriteAttempted = true;
+				socket.write(`${JSON.stringify({ id, cmd, ...args })}\n`, (error) => {
+					if (error) fail("socket_error", `Daemon command '${cmd}' request write failed: ${error.message}; native completion is unknown.`);
+				});
+			});
 			socket.on("data", (chunk) => {
+				if (settled) return;
 				buffer += chunk;
 				const newline = buffer.indexOf("\n");
 				if (newline < 0) return;
-				cleanup();
-				socket.end();
 				try {
 					const parsed = JSON.parse(buffer.slice(0, newline));
+					if (parsed.id !== id) {
+						fail("invalid_response", `Daemon command '${cmd}' returned a mismatched request id; native completion is unknown.`);
+						return;
+					}
+					settled = true;
+					cleanup();
+					socket.end();
 					if (parsed.ok === true) resolve(parsed.result as T);
-					else reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code));
+					else reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code, parsed?.error?.details));
 				} catch (error) {
-					reject(error);
+					fail("invalid_response", `Daemon command '${cmd}' returned an invalid response: ${error instanceof Error ? error.message : String(error)}; native completion is unknown.`);
 				}
 			});
-			socket.on("error", (error) => { cleanup(); reject(new HelperTransportError(error.message)); });
+			socket.on("error", (error) => fail("socket_error", `Daemon command '${cmd}' transport failed: ${error.message}; native completion is unknown.`));
+			socket.on("close", () => {
+				if (!settled) fail("socket_error", `Daemon command '${cmd}' socket closed without a terminal response; native completion is unknown.`);
+			});
 		});
 	}
 
@@ -225,13 +282,30 @@ export class MacosHelperClient {
 
 	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
 		const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
-		if (!(await this.ensureDaemon(options?.signal))) {
-			throw new HelperTransportError(`pi-computer-use helper app daemon is unavailable at ${HELPER_APP_PATH}.`);
-		}
+		let requestId: string | undefined;
 		try {
-			return await this.daemonCommand<T>(cmd, args, timeoutMs, options?.signal);
+			if (!(await this.ensureDaemon(options?.signal))) {
+				requestId = this.nextRequestId();
+				throw new HelperTransportError(`pi-computer-use helper app daemon is unavailable at ${HELPER_APP_PATH}; request was not written (requestId=${requestId}, outcome=unknown).`, {
+					command: cmd,
+					requestId,
+					requestWriteAttempted: false,
+					reason: options?.signal?.aborted ? "aborted" : "socket_error",
+				});
+			}
+			requestId = this.nextRequestId();
+			return await this.daemonCommand<T>(cmd, args, timeoutMs, options?.signal, requestId);
 		} catch (error) {
 			this.daemonAvailable = false;
+			if (!(error instanceof HelperTransportError) && (options?.signal?.aborted || (error instanceof Error && error.message === "Operation aborted."))) {
+				requestId ??= this.nextRequestId();
+				throw new HelperTransportError(`Daemon command '${cmd}' aborted before a terminal response (requestId=${requestId}, outcome=unknown, requestWriteAttempted=false).`, {
+					command: cmd,
+					requestId,
+					requestWriteAttempted: false,
+					reason: "aborted",
+				});
+			}
 			throw error instanceof Error ? error : new Error(String(error));
 		}
 	}

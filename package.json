@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.2-workbench.2",
+	"version": "0.5.2-workbench.3",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -76,7 +76,7 @@
 		"test:local-build-fingerprint": "node scripts/check-local-build-fingerprint.mjs",
 		"test:signing": "node scripts/check-local-signing.mjs",
 		"test:macos-path": "node scripts/check-macos-helper-path.mjs",
-		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:permissions && npm run test:presigned-helper && npm run test:local-build-fingerprint && npm run test:action-preflight && npm run test:helper-transport && npm run test:bridge-unknown && npm run test:native-key-preflight && npm run test:native-focus-gate && npm run test:focus-window && npm run test:focus-optional-capture && npm run test:readiness-without-capture && npm run test:capture-trace && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:package-assets && npm run test:signing && npm run test:macos-path",
+		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:permissions && npm run test:presigned-helper && npm run test:local-build-fingerprint && npm run test:action-preflight && npm run test:helper-transport && npm run test:bridge-unknown && npm run test:native-key-preflight && npm run test:native-focus-gate && npm run test:focus-window && npm run test:focus-optional-capture && npm run test:readiness-without-capture && npm run test:capture-trace && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:package-assets && npm run test:signing && npm run test:macos-path && npm run test:windows-managed-helper",
 		"build:native": "node scripts/build-native.mjs",
 		"build:windows": "node scripts/build-native.mjs --platform windows",
 		"build:linux": "node scripts/build-native.mjs --platform linux",
@@ -85,7 +85,8 @@
 		"test:linux-live": "PI_CU_LIVE=1 tsx scripts/check-linux-live.mjs",
 		"test:focus-optional-capture": "tsx scripts/check-focus-optional-capture.mjs",
 		"test:readiness-without-capture": "tsx scripts/check-readiness-without-capture.mjs",
-		"test:capture-trace": "node scripts/check-capture-trace.mjs"
+		"test:capture-trace": "node scripts/check-capture-trace.mjs",
+		"test:windows-managed-helper": "tsx scripts/check-windows-managed-helper.mjs"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",

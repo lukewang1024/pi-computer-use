@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ensurePermissions, type PermissionKind, type PermissionStatus } from "../../permissions.ts";
+import { ensurePermissions, requestPermissions, type PermissionBridge, type PermissionKind, type PermissionStatus } from "../../permissions.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
-import type { PlatformReadyState } from "../types.ts";
+import type { PlatformDiagnostics, PlatformReadyState } from "../types.ts";
 import { HELPER_APP_PATH, macosHelper } from "./helper.ts";
 import { assertPlatformArchitecture } from "../architecture.ts";
 
@@ -10,9 +10,11 @@ const GRANT_INSTRUCTIONS =
 	"Screen Recording lets the agent see the window; Accessibility lets it interact with the window.";
 
 const SIGNING_MIGRATION_WARNING =
-	"If these permissions were enabled before this install/update, macOS invalidated the old grants because " +
-	"pi-computer-use.app was re-signed. Re-enable both toggles for the newly signed helper. " +
-	"If a toggle is already on, switch it off and on again.";
+	"A missing permission does not identify why macOS reports it missing. If the helper identity changed, " +
+	"macOS may require reviewing the existing grant.";
+
+const PERMISSION_REQUEST_OPTION = "Request missing macOS permissions";
+const PERMISSION_RECHECK_OPTION = "Recheck permissions (restart helper)";
 
 const macosPermissionKinds = [
 	{ kind: "accessibility" as const, openOption: "Open Accessibility Settings (missing)" },
@@ -34,21 +36,25 @@ function permissionStatusSummary(status: PermissionStatus): string {
 }
 
 function permissionPrompt(status: PermissionStatus, helperPath: string, hint?: string): string {
+	const attributionWarning = status.source?.attribution === "caller"
+		? `Warning: the helper is not running as the installed pi-computer-use.app (executable: ${status.source.executablePath ?? "unknown"}). Grants may attach to the launching app instead.`
+		: undefined;
 	return [
-		"pi-computer-use needs macOS permissions for its helper app.",
+		"Explicitly manage missing macOS permissions for the pi-computer-use helper.",
 		permissionStatusSummary(status),
 		"",
 		`Helper: pi-computer-use.app (${helperPath})`,
+		attributionWarning,
 		hint,
 		"",
-		`Important: ${SIGNING_MIGRATION_WARNING}`,
+		SIGNING_MIGRATION_WARNING,
 		"",
-		"pi-computer-use.app is already listed in the pane(s) — enable its toggle, then choose Recheck.",
+		"A request is made only if you select the explicit request option below.",
 	].filter(Boolean).join("\n");
 }
 
 function missingPermissionMessage(kinds: PermissionKind[]): string {
-	return `Still missing after restart: ${kinds.join(" and ")}. ${SIGNING_MIGRATION_WARNING} Then choose Recheck again.`;
+	return `Still missing: ${kinds.join(" and ")}. Grant the listed permissions in System Settings, then run /computer-use permissions to check again.`;
 }
 
 async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus> {
@@ -86,61 +92,61 @@ async function registerPermissions(signal?: AbortSignal): Promise<void> {
 	await macosHelper.command("registerPermissions", {}, { signal, timeoutMs: 15_000 });
 }
 
-export async function ensureMacosReady(
-	ctx: ExtensionContext,
-	state: PlatformReadyState,
-	signal?: AbortSignal,
-): Promise<PlatformReadyState> {
+function macosPermissionBridge(): PermissionBridge {
+	return {
+		kinds: macosPermissionKinds,
+		copy: {
+			nonInteractiveError: (helperPath) => `pi-computer-use permissions are missing. In an interactive Pi session, run /computer-use permissions to explicitly request them. Helper path: ${helperPath}`,
+			prompt: permissionPrompt,
+			incompleteError: (helperPath) => `pi-computer-use permissions are missing. This readiness check did not request them. Run /computer-use permissions to explicitly request or open the relevant settings pane. ${GRANT_INSTRUCTIONS} Helper path: ${helperPath}`,
+			requestOption: PERMISSION_REQUEST_OPTION,
+			recheckOption: PERMISSION_RECHECK_OPTION,
+			readyMessage: "pi-computer-use is ready.",
+			stillMissing: missingPermissionMessage,
+		},
+		checkPermissions,
+		registerPermissions,
+		openPermissionPane: async (kind, signal) => {
+			await macosHelper.command("openPermissionPane", { kind }, { signal, timeoutMs: 15_000 });
+		},
+		restartHelper: (signal) => macosHelper.restart(signal),
+		permissionHint: undefined,
+	};
+}
+
+async function ensureHelperAvailable(signal?: AbortSignal): Promise<PlatformDiagnostics> {
 	await macosHelper.ensureInstalled(signal);
 	if (!(await macosHelper.ensureDaemon(signal))) {
 		throw new Error(`pi-computer-use helper app daemon did not start. Helper app: ${HELPER_APP_PATH}`);
 	}
 	const helperDiagnostics = await macosHelper.ensureProtocol(signal);
 	assertPlatformArchitecture("macOS", helperDiagnostics);
+	return helperDiagnostics;
+}
 
-	const now = Date.now();
-	const cachedStatus = state.permissionStatus;
-	const canUseCachedPermissions =
-		cachedStatus?.accessibility &&
-		cachedStatus.screenRecording &&
-		now - state.lastPermissionCheckAt < 2_000;
-	if (canUseCachedPermissions) {
-		return { ...state, helperDiagnostics };
+/** Explicit entry point used by the `/computer-use permissions` command. */
+export async function requestMacosPermissions(ctx: ExtensionContext, signal?: AbortSignal): Promise<PermissionStatus> {
+	if (!ctx.hasUI) {
+		throw new Error(`Permission requests require an interactive Pi session. Run /computer-use permissions in an interactive session. Helper path: ${HELPER_APP_PATH}`);
 	}
+	await ensureHelperAvailable(signal);
+	return await requestPermissions(ctx, macosPermissionBridge(), HELPER_APP_PATH, signal);
+}
 
-	let permissionStatus = await checkPermissions(signal);
-	let lastPermissionCheckAt = now;
+export async function ensureMacosReady(
+	ctx: ExtensionContext,
+	state: PlatformReadyState,
+	signal?: AbortSignal,
+): Promise<PlatformReadyState> {
+	const helperDiagnostics = await ensureHelperAvailable(signal);
 
-	if (!permissionStatus.accessibility || !permissionStatus.screenRecording) {
-		// Attribution "caller" means the helper is not running as the
-		// canonical installed app — grants would attach to the wrong identity.
-		const attributionHint = permissionStatus.source?.attribution === "caller"
-			? `Warning: the helper is not running as the installed pi-computer-use.app (executable: ${permissionStatus.source?.executablePath ?? "unknown"}). Grants made now would attach to the launching app instead. Restart Pi so the canonical helper is used.`
-			: undefined;
-		permissionStatus = await ensurePermissions(
-			ctx,
-			{
-				kinds: macosPermissionKinds,
-				copy: {
-					nonInteractiveError: (helperPath) => `pi-computer-use setup requires an interactive session. Start pi in interactive mode. ${GRANT_INSTRUCTIONS}\nHelper path: ${helperPath}`,
-					prompt: permissionPrompt,
-					incompleteError: (helperPath) => `pi-computer-use setup is incomplete. ${GRANT_INSTRUCTIONS} Helper path: ${helperPath}`,
-					readyMessage: "pi-computer-use is ready.",
-					stillMissing: missingPermissionMessage,
-				},
-				checkPermissions: (permissionSignal) => checkPermissions(permissionSignal ?? signal),
-				registerPermissions: (permissionSignal) => registerPermissions(permissionSignal ?? signal),
-				openPermissionPane: async (kind, permissionSignal) => {
-					await macosHelper.command("openPermissionPane", { kind }, { signal: permissionSignal ?? signal });
-				},
-				restartHelper: (permissionSignal) => macosHelper.restart(permissionSignal ?? signal),
-				permissionHint: attributionHint,
-			},
-			HELPER_APP_PATH,
-			signal,
-		);
-		lastPermissionCheckAt = Date.now();
-	}
-
-	return { permissionStatus, lastPermissionCheckAt, helperDiagnostics };
+	// Accessibility gates semantic/native operations. Screen Recording is reported
+	// independently and enforced by image capture itself, never by a global live probe.
+	const permissionStatus: PermissionStatus = {
+		accessibility: helperDiagnostics.accessibility === true,
+		screenRecording: helperDiagnostics.screenRecording === true,
+		screenRecordingPreflight: helperDiagnostics.screenRecording === true,
+	};
+	if (!permissionStatus.accessibility) throw new Error(`Accessibility is unavailable for the helper. Readiness did not request permission. Helper path: ${HELPER_APP_PATH}`);
+	return { permissionStatus, lastPermissionCheckAt: Date.now(), helperDiagnostics };
 }

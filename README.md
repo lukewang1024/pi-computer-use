@@ -37,7 +37,7 @@ Computer use is most helpful when the only available interface is the app on scr
 pi install npm:@injaneity/pi-computer-use
 ```
 
-Start Pi and complete the platform setup flow.
+Start Pi and follow the platform-specific permission instructions if readiness reports missing access.
 
 On macOS, the helper is installed per user by default. Grant permissions to:
 
@@ -52,7 +52,7 @@ Required macOS permissions:
 - Accessibility
 - Screen Recording, shown as Screen and System Audio Recording on newer macOS versions
 
-The macOS setup flow registers the helper first, so it should already appear in both Settings panes. Enable the toggles and choose Recheck.
+Session startup and computer-use tools check these permissions without opening prompts or Settings. If a permission is missing, run `/computer-use permissions` to explicitly request the macOS prompt or open the relevant Settings pane. After changing a toggle, run the command again and choose **Recheck permissions** to restart the helper and check the result.
 
 On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 

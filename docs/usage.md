@@ -149,3 +149,17 @@ Pi may issue tool calls concurrently. Cached queries can overlap freely. Live wo
 Actions require their own valid grounding and the unchanged per-event foreground gate. Obtain a fresh semantic observation for AX actions; only pixel-grounded actions require an image. Ordinary macOS readiness checks Accessibility using passive diagnostics and reports Screen Recording separately. Capture availability is tested when an image is requested, not as a global permission precondition.
 
 Optional capture has a 9-second caller budget (native SCK budget remains 8 seconds). Cancellation requested is not native completion. A late result is discarded before publishing observation state. Native diagnostics expose bounded, metadata-only capture records (request ID, PID/window, shareable/image/fallback timing and completion). At most four unfinished capture tasks are admitted; further captures report busy while input and AX operations retain their own eligibility rules. Unknown input dispatch and uncertain native focus transport remain protected.
+
+### Dispatch receipts and optional observation
+
+`keypress` requires an exact current outline `ref` in the public action schema.
+A native terminal reply sets `execution.dispatchCompletion: "returned"`; this does
+not prove the requested effect. `effectVerification: "unverified"` with generic
+`outcome: "unknown"` can mean no observable delta (for example Save). Explicit
+`transport`/`inputDispatch` uncertainty still forbids replay and requires recovery.
+
+Native `observe_ui` obtains real semantic evidence before an optional image. Image
+failure returns semantic refs and `observation.status: "semantic_only"`, no image.
+`nativeCompletion: "unconfirmed"` is not proof native capture work has stopped;
+use native diagnostics for its request/task lifecycle. Pixel actions still require
+a valid image, and all input retains its exact target/foreground preconditions.

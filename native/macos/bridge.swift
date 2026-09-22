@@ -9,6 +9,24 @@ import ScreenCaptureKit
 struct BridgeFailure: Error {
 	let message: String
 	let code: String
+	var details: [String: Any] = [:]
+}
+
+// Bounded read-only capture lifetime. Cancellation requested is never completion.
+final class CaptureTrace {
+	private let lock = NSLock()
+	private let started = ProcessInfo.processInfo.systemUptime
+	private var fields: [String: Any]
+	init(requestId: String, windowId: UInt32, pid: Int32?) {
+		fields = ["requestId": requestId, "windowId": Int(windowId), "pid": pid.map { Int($0) as Any } ?? NSNull(), "completed": false, "taskCompleted": false, "requestCompleted": false, "cancellationRequested": false, "readOnly": true]
+	}
+	func mark(_ stage: String, _ values: [String: Any] = [:]) {
+		lock.lock(); defer { lock.unlock() }
+		fields[stage + "Ms"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+		for (key, value) in values { fields[key] = value }
+		fields["completed"] = fields["taskCompleted"] as? Bool == true && fields["requestCompleted"] as? Bool == true
+	}
+	func snapshot() -> [String: Any] { lock.lock(); defer { lock.unlock() }; return fields }
 }
 
 final class AXRefStore {
@@ -388,6 +406,8 @@ final class InputSuppressionGuard {
 
 final class Bridge {
 	private let protocolVersion = 6
+	private let captureTraceLock = NSLock()
+	private var captureTraces: [CaptureTrace] = []
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
 	private let physicalInputLock = NSRecursiveLock()
@@ -539,6 +559,7 @@ final class Bridge {
 					"error": [
 						"message": failure.message,
 						"code": failure.code,
+						"details": failure.details,
 					],
 				], to: responseSocket)
 			} catch {
@@ -558,6 +579,7 @@ final class Bridge {
 				"error": [
 					"message": failure.message,
 					"code": failure.code,
+						"details": failure.details,
 				],
 			], to: responseSocket)
 		} catch {
@@ -807,6 +829,7 @@ final class Bridge {
 			"accessibility": permissions["accessibility"] ?? false,
 			"screenRecording": permissions["screenRecording"] ?? false,
 			"recentCompletedRequestIds": completedRequestIds(),
+			"captures": captureSnapshots(),
 		]
 		if let parentPath {
 			output["parentPath"] = parentPath
@@ -1433,7 +1456,7 @@ final class Bridge {
 		let isMenuRoot = requestedRole == "AXMenu" || (windowRef?.hasPrefix("cgmenu:") == true)
 		let captureStart = Date()
 		let shouldCapture = !isMenuRoot && (includeImage || readText == "always")
-		let capture = try shouldCapture ? windowId.map { try captureWindow(windowId: $0) } : nil
+		let capture = try shouldCapture ? windowId.map { try captureWindow(windowId: $0, requestId: optionalStringArg(request, "id") ?? "unidentified") } : nil
 		let captureMs = capture.map { _ in elapsedMs(captureStart) } ?? 0
 
 		let pid: Int32
@@ -2311,7 +2334,8 @@ final class Bridge {
 				steps.append(step)
 				if (step["outcome"] as? String) == "didnt" { stoppedAt = index; break }
 			} catch let failure as BridgeFailure {
-				steps.append(["outcome": "didnt", "error": ["code": failure.code, "message": failure.message]])
+				steps.append(["outcome": "didnt", "error": ["code": failure.code,
+						"details": failure.details, "message": failure.message]])
 				stoppedAt = index
 				break
 			} catch let failure as ForegroundGateFailure {
@@ -3261,19 +3285,45 @@ final class Bridge {
 		return scale > 0 ? scale : 1.0
 	}
 
-	private func captureWindow(windowId: UInt32) throws -> CapturedWindowImage {
+	private func captureSnapshots() -> [[String: Any]] {
+		captureTraceLock.lock(); defer { captureTraceLock.unlock() }
+		return captureTraces.map { $0.snapshot() }
+	}
+	private func beginCapture(requestId: String, windowId: UInt32) throws -> CaptureTrace {
+		captureTraceLock.lock(); defer { captureTraceLock.unlock() }
+		let pending = captureTraces.filter { $0.snapshot()["completed"] as? Bool != true }
+		guard pending.count < 4 else { throw BridgeFailure(message: "Read-only capture capacity is busy", code: "capture_busy", details: ["pending": pending.count, "readOnly": true]) }
+		captureTraces = pending + Array(captureTraces.filter { $0.snapshot()["completed"] as? Bool == true }.suffix(28))
+		let trace = CaptureTrace(requestId: requestId, windowId: windowId, pid: pidForWindowId(windowId))
+		captureTraces.append(trace); return trace
+	}
+
+	private func captureWindow(windowId: UInt32, requestId: String) throws -> CapturedWindowImage {
+		let trace = try beginCapture(requestId: requestId, windowId: windowId)
+		trace.mark("request", ["requestThreadMain": Thread.isMainThread])
+		defer { trace.mark("requestReturn", ["requestCompleted": true]) }
+		func tracedFallback() throws -> CapturedWindowImage? {
+			trace.mark("fallbackStart")
+			do {
+				let value = try cgWindowScreenshotFallback(windowId: windowId)
+				trace.mark("fallbackEnd", ["fallbackHasImage": value != nil]); return value
+			} catch { trace.mark("fallbackEnd", ["fallbackErrorType": String(describing: type(of: error))]); throw error }
+		}
 		if #available(macOS 14.0, *) {
 			let semaphore = DispatchSemaphore(value: 0)
 			let capturedImage = Box<CGImage?>(nil)
 			let capturedError = Box<Error?>(nil)
 
 			let task = Task {
-				defer { semaphore.signal() }
+				defer { trace.mark("taskCompletion", ["taskCompleted": true, "taskCancelledAtCompletion": Task.isCancelled]); semaphore.signal() }
 				do {
 					if Task.isCancelled {
 						return
 					}
+					trace.mark("shareableStart", ["taskThreadMain": pthread_main_np() != 0])
 					let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+					trace.mark("shareableEnd")
+					try Task.checkCancellation()
 					guard let window = shareable.windows.first(where: { $0.windowID == windowId }) else {
 						throw BridgeFailure(message: "Window \(windowId) is not available for capture", code: "window_not_found")
 					}
@@ -3287,44 +3337,51 @@ final class Bridge {
 					config.showsCursor = false
 					config.ignoreShadowsSingleWindow = true
 
+					trace.mark("imageStart")
 					let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+					trace.mark("imageEnd")
+					try Task.checkCancellation()
 					capturedImage.value = image
 				} catch {
+					trace.mark("taskError", ["errorType": String(describing: type(of: error))])
 					capturedError.value = error
 				}
 			}
 
 			if semaphore.wait(timeout: .now() + .seconds(8)) == .timedOut {
+				trace.mark("deadline", ["cancellationRequested": true])
 				task.cancel()
-				if let payload = try cgWindowScreenshotFallback(windowId: windowId) {
+				if let payload = try tracedFallback() {
 					return payload
 				}
-				throw BridgeFailure(message: "Capture timed out while capturing window \(windowId)", code: "capture_timeout")
+				throw BridgeFailure(message: "Capture timed out while capturing window \(windowId)", code: "capture_timeout", details: trace.snapshot())
 			}
 
 			if let error = capturedError.value {
-				if let payload = try cgWindowScreenshotFallback(windowId: windowId) {
+				if let payload = try tracedFallback() {
 					return payload
 				}
-				if let failure = error as? BridgeFailure {
+				if var failure = error as? BridgeFailure {
+					failure.details = trace.snapshot()
 					throw failure
 				}
-				throw BridgeFailure(message: "Capture failed: \(error.localizedDescription)", code: "capture_failed")
+				throw BridgeFailure(message: "Capture failed: \(error.localizedDescription)", code: "capture_failed", details: trace.snapshot())
 			}
 
 			guard let image = capturedImage.value else {
-				if let payload = try cgWindowScreenshotFallback(windowId: windowId) {
+				if let payload = try tracedFallback() {
 					return payload
 				}
-				throw BridgeFailure(message: "Capture failed", code: "capture_failed")
+				throw BridgeFailure(message: "Capture failed", code: "capture_failed", details: trace.snapshot())
 			}
 
 			return CapturedWindowImage(image: image, windowId: windowId, frame: currentWindowBounds(windowId: windowId) ?? CGRect(x: 0, y: 0, width: image.width, height: image.height))
 		}
-		if let payload = try cgWindowScreenshotFallback(windowId: windowId) {
+		defer { trace.mark("taskCompletion", ["taskCompleted": true]) }
+		if let payload = try tracedFallback() {
 			return payload
 		}
-		throw BridgeFailure(message: "Capture failed", code: "capture_failed")
+		throw BridgeFailure(message: "Capture failed", code: "capture_failed", details: trace.snapshot())
 	}
 
 	private func jpegData(image: CGImage, quality: Double) -> Data? {

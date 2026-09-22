@@ -127,3 +127,20 @@ export class ResourceScheduler {
 		}
 	}
 }
+
+/**
+ * Run deterministic transaction validation before consuming a resource epoch,
+ * then keep the scheduler's exact epoch check inside its serialized write.
+ * The callback must still treat native delivery and any runtime-only checks as
+ * fallible after the epoch advances.
+ */
+export async function runPreflightWrite<T>(
+	scheduler: ResourceScheduler,
+	resourceKey: string,
+	baseEpoch: number,
+	preflight: () => void,
+	work: (nextEpoch: number) => Promise<T>,
+): Promise<{ value: T; epoch: number }> {
+	preflight();
+	return await scheduler.write(resourceKey, baseEpoch, work);
+}

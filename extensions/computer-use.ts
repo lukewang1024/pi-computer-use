@@ -5,6 +5,7 @@ import {
 	executeAct,
 	executeEvaluateBrowser,
 	executeExpandUi,
+	executeFocusWindow,
 	executeInspectUi,
 	executeLaunchBrowser,
 	executeFind,
@@ -17,6 +18,7 @@ import {
 	shutdownComputerUseSession,
 } from "../src/bridge.ts";
 import { getLoadedComputerUseConfig, loadComputerUseConfig } from "../src/config.ts";
+import { requestMacosPermissions } from "../src/platform/macos/permissions.ts";
 
 const stateId = Type.String({ description: "Required state id owning every @e ref used by this operation" });
 const point = { x: Type.Number(), y: Type.Number() };
@@ -29,7 +31,7 @@ const uiAction = Type.Union([
 	clickByPoint,
 	Type.Object({ action: Type.Literal("setText"), ref: Type.String({ description: "Editable outline ref" }), text: Type.String() }),
 	Type.Object({ action: Type.Literal("typeText"), ref: Type.Optional(Type.String({ description: "Omit after a click to type into the focus established by that click" })), text: Type.String() }),
-	Type.Object({ action: Type.Literal("keypress"), ref: Type.Optional(Type.String({ description: "Omit to send keys to the focused control" })), keys: Type.Array(Type.String(), { minItems: 1 }) }),
+	Type.Object({ action: Type.Literal("keypress"), ref: Type.String({ description: "Exact grounded outline ref receiving this keypress" }), keys: Type.Array(Type.String(), { minItems: 1 }) }),
 	Type.Object({ action: Type.Literal("scroll"), ref: Type.Optional(Type.String()), scrollX: Type.Optional(Type.Number()), scrollY: Type.Optional(Type.Number()) }),
 	Type.Object({ action: Type.Literal("drag"), path: Type.Array(Type.Object(point), { minItems: 2 }) }),
 	Type.Object({ action: Type.Literal("moveMouse"), ...point }),
@@ -49,7 +51,7 @@ const findTool = defineTool({
 	name: "find_roots",
 	label: "Find Roots",
 	description: "Find a bounded, ranked set of controllable UI roots with refs, geometry, and focus state.",
-	promptSnippet: "Find a target root before observe_ui when needed.",
+	promptSnippet: "Find the exact target root. Use focus_window before observing or acting on a background window.",
 	parameters: Type.Object({
 		text: Type.Optional(Type.String({ description: "Ranked app or title text", maxLength: 256 })),
 		app: Type.Optional(Type.String({ description: "Exact normalized app name", maxLength: 256 })),
@@ -60,11 +62,23 @@ const findTool = defineTool({
 	execute: executeFind,
 });
 
+const focusWindowTool = defineTool({
+	name: "focus_window",
+	label: "Focus Window",
+	description: "Activate and raise one exact visible @r window without sending pointer or keyboard input, then verify its foreground state.",
+	promptSnippet: "Use an exact @r ref from find_roots before interacting with a background window. Continue only when verification confirms the target is main, focused, and frontmost.",
+	parameters: Type.Object({
+		root: Type.String({ description: "Exact visible @r ref issued by find_roots" }),
+		capture: Type.Optional(Type.Boolean({ description: "Capture an observation after focus (default false). Capture failure does not erase focus verification." })),
+	}),
+	execute: executeFocusWindow,
+});
+
 const observeTool = defineTool({
 	name: "observe_ui",
 	label: "Observe UI",
 	description: "Capture the current/frontmost root or one exact @r root and return a bounded UI outline.",
-	promptSnippet: "Primary UI observation tool. Follow with search_ui, expand_ui, inspect_ui, or act_ui.",
+	promptSnippet: "Primary UI observation tool. Focus a background window with focus_window first; then follow with search_ui, expand_ui, inspect_ui, or act_ui.",
 	promptGuidelines: [
 		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
@@ -180,12 +194,29 @@ function formatConfigStatus(): string {
 }
 
 export default function computerUseExtension(pi: ExtensionAPI): void {
-	for (const tool of [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
+	for (const tool of [findTool, focusWindowTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
 
 	pi.registerCommand("computer-use", {
-		description: "Show pi-computer-use configuration",
-		handler: async (_args, ctx) => {
+		description: "Show configuration or explicitly manage macOS permissions",
+		handler: async (args, ctx) => {
 			loadComputerUseConfig(ctx.cwd);
+			const command = typeof args === "string" ? args.trim() : "";
+			if (command === "permissions") {
+				if (process.platform !== "darwin") {
+					ctx.ui.notify("The /computer-use permissions command is available on macOS.", "warning");
+					return;
+				}
+				try {
+					await requestMacosPermissions(ctx);
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+				}
+				return;
+			}
+			if (command) {
+				ctx.ui.notify("Usage: /computer-use [permissions]", "warning");
+				return;
+			}
 			ctx.ui.notify(formatConfigStatus(), "info");
 		},
 	});

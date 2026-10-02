@@ -457,6 +457,16 @@ export class CdpTab {
 			try {
 				for (const frame of frames) await this.withBackendNode(frame.route.ownerBackendNodeId, "function(){if(!this.isConnected)throw Error('Nested frame owner detached');this.scrollIntoView({block:'center',inline:'center'});}", [], frame.parentSessionId);
 				await this.withBackendNode(backendNodeId, "function(){if(!this.isConnected||this.disabled||this.matches?.(':disabled')||this.getAttribute?.('aria-disabled')==='true')throw Error('Nested pointer target unavailable');this.scrollIntoView({block:'center',inline:'center'});}", [], sessionId);
+				// Scrolling can update DOM geometry before a remote frame paints.
+				// Wait for rendering opportunities in every owning renderer before
+				// collecting the geometry that the existing hit checks will verify.
+				await Promise.all([undefined, ...frames.map(frame => frame.sessionId)].map(async renderer => {
+					const ready = await this.send("Runtime.evaluate", {
+						expression: "new Promise(resolve=>{let first=0,second=0;const done=value=>{clearTimeout(timer);cancelAnimationFrame(first);cancelAnimationFrame(second);resolve(value)};const timer=setTimeout(()=>done(false),500);first=requestAnimationFrame(()=>{second=requestAnimationFrame(()=>done(true))})})",
+						awaitPromise: true, returnByValue: true,
+					}, 1_000, renderer);
+					if (ready.exceptionDetails || ready.result?.value !== true) throw Error("Nested frame rendering was not ready; no pointer input was sent.");
+				}));
 				const geometry = await this.send("DOM.getContentQuads", {backendNodeId}, COMMAND_TIMEOUT_MS, sessionId);
 				const target = await this.send("DOM.resolveNode", {backendNodeId, objectGroup:group}, COMMAND_TIMEOUT_MS, sessionId);
 				if (typeof target.object?.objectId !== "string") throw new Error("Nested pointer target unavailable.");

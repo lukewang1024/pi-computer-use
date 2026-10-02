@@ -27,6 +27,7 @@ export interface PlatformDiagnostics {
 	arch?: string;
 	accessibility?: boolean;
 	screenRecording?: boolean;
+	optionalImageFailure?: boolean;
 }
 
 export interface PlatformReadyState {
@@ -89,6 +90,8 @@ export interface PlatformFrontmostResult {
 }
 
 export interface PlatformFocusWindowResult {
+	activationDiagnostics?: Record<string, unknown>;
+	unminimized?: boolean;
 	focused: boolean;
 	alreadyFocused?: boolean;
 	activated?: boolean;
@@ -147,6 +150,7 @@ export interface PlatformObserveRequest {
 	scopeRef?: string;
 	maxDimension?: number;
 	includeImage?: boolean;
+	allowImageFailure?: boolean;
 }
 
 export type PlatformActTarget = { ref: string } | { x: number; y: number } | { focus: PlatformPoint };

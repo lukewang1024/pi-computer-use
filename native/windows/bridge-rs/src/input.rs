@@ -2,6 +2,39 @@ use serde_json::{json, Value};
 
 use crate::error::{ErrorCode, ProtocolError};
 
+// ASCII punctuation values are not Windows virtual-key codes: '.' is VK_DELETE.
+// Only letters, digits and space have a layout-independent identity mapping.
+#[cfg(any(windows, test))]
+fn character_virtual_key(name: &str) -> Option<u16> {
+    let bytes = name.as_bytes();
+    if bytes.len() == 1 && (bytes[0].is_ascii_alphanumeric() || bytes[0] == b' ') {
+        Some(bytes[0].to_ascii_uppercase() as u16)
+    } else {
+        None
+    }
+}
+
+// Dedicated navigation keys must not be synthesized as their numeric-keypad
+// equivalents: Shift+Home otherwise moves the caret without extending selection.
+#[cfg(any(windows, test))]
+fn extended_virtual_key(vk: u16) -> bool {
+    matches!(vk, 0x21..=0x28 | 0x2d | 0x2e | 0x5b | 0x5c)
+}
+
+#[cfg(any(windows, test))]
+fn key_names(keys: &[Value]) -> Result<Vec<&str>, ProtocolError> {
+    if keys.is_empty() {
+        return Err(invalid("keypress requires at least one key"));
+    }
+    keys.iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| invalid("keypress keys must be strings"))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActTarget {
     Ref(String),
@@ -294,11 +327,15 @@ mod native {
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: vk,
-                    dwFlags: if up {
+                    dwFlags: (if up {
                         KEYEVENTF_KEYUP
                     } else {
                         KEYBD_EVENT_FLAGS(0)
-                    },
+                    }) | (if extended_virtual_key(vk.0) {
+                        KEYEVENTF_EXTENDEDKEY
+                    } else {
+                        KEYBD_EVENT_FLAGS(0)
+                    }),
                     ..Default::default()
                 },
             },
@@ -376,10 +413,7 @@ mod native {
     }
 
     fn send_keys(keys: &[Value]) -> Result<(), ProtocolError> {
-        let names = keys.iter().filter_map(Value::as_str).collect::<Vec<_>>();
-        if names.is_empty() {
-            return Err(invalid("keypress requires at least one key"));
-        }
+        let names = key_names(keys)?;
         let vks = names
             .iter()
             .map(|name| vk_for(name).ok_or_else(|| invalid(format!("Unsupported key '{name}'"))))
@@ -407,6 +441,22 @@ mod native {
         Ok(())
     }
 
+    #[cfg(test)]
+    mod key_guard_tests {
+        use super::*;
+
+        #[test]
+        fn rejects_punctuation_after_modifier_before_any_key_is_sent() {
+            assert!(vk_for(".").is_none());
+            assert!(send_keys(&[json!("Ctrl"), json!(".")]).is_err());
+        }
+
+        #[test]
+        fn rejects_malformed_modifier_chord_before_any_key_is_sent() {
+            assert!(send_keys(&[json!("Ctrl"), json!(42), json!("s")]).is_err());
+        }
+    }
+
     fn vk_for(name: &str) -> Option<VIRTUAL_KEY> {
         match name.to_ascii_lowercase().as_str() {
             "enter" | "return" => Some(VK_RETURN),
@@ -427,9 +477,7 @@ mod native {
             "shift" => Some(VK_SHIFT),
             "alt" | "option" => Some(VK_MENU),
             "cmd" | "win" | "meta" => Some(VK_LWIN),
-            key if key.len() == 1 => {
-                Some(VIRTUAL_KEY(key.as_bytes()[0].to_ascii_uppercase() as u16))
-            }
+            key if key.len() == 1 => character_virtual_key(key).map(VIRTUAL_KEY),
             key if key.starts_with('f') => key[1..]
                 .parse::<u16>()
                 .ok()
@@ -443,6 +491,52 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_keys_keep_their_dedicated_keyboard_identity() {
+        for vk in [
+            0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2d, 0x2e, 0x5b, 0x5c,
+        ] {
+            assert!(extended_virtual_key(vk));
+        }
+        for vk in [0x08, 0x09, 0x0d, 0x10, 0x11, 0x12, 0x20, 0x41, 0x61, 0x70] {
+            assert!(!extended_virtual_key(vk));
+        }
+    }
+
+    #[test]
+    fn malformed_key_list_is_rejected_as_a_whole() {
+        for keys in [
+            json!([]),
+            json!(["Ctrl", 42, "s"]),
+            json!(["a", null]),
+            json!([false]),
+        ] {
+            assert!(key_names(keys.as_array().unwrap()).is_err());
+        }
+        let keys = json!(["Ctrl", "s"]);
+        assert_eq!(
+            key_names(keys.as_array().unwrap()).unwrap(),
+            vec!["Ctrl", "s"]
+        );
+    }
+
+    #[test]
+    fn character_keys_never_alias_ascii_punctuation_to_control_keys() {
+        assert_eq!(character_virtual_key("."), None); // ASCII 46 is VK_DELETE.
+        for byte in 0..=127u8 {
+            let name = (byte as char).to_string();
+            let expected = if byte.is_ascii_alphanumeric() || byte == b' ' {
+                Some(byte.to_ascii_uppercase() as u16)
+            } else {
+                None
+            };
+            assert_eq!(character_virtual_key(&name), expected, "ASCII {byte}");
+        }
+        for name in ["", "é", "中", "Enter", "ab"] {
+            assert_eq!(character_virtual_key(name), None);
+        }
+    }
 
     #[test]
     fn parses_discriminated_click_request() {
@@ -481,6 +575,20 @@ mod tests {
         assert_eq!(out["rootDelta"].as_array().unwrap().len(), 1);
     }
 
+    #[test]
+    fn coordinate_actions_reject_background_before_native_dispatch() {
+        for action in ["click", "moveMouse", "scroll", "typeText", "keypress"] {
+            let error = act(&json!({
+                "lookId":"look_1", "action":action, "policy":"background",
+                "target":{"x":1,"y":1}, "params":{}, "resolvedPoint":{"x":1,"y":1}
+            }))
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::ForegroundRequired, "{action}");
+        }
+    }
+
+    // This test exercises the non-Windows stub, never real desktop input.
+    #[cfg(not(windows))]
     #[test]
     fn raw_coordinate_actions_do_not_claim_worked() {
         let actions = ["click", "moveMouse", "scroll", "typeText", "keypress"];

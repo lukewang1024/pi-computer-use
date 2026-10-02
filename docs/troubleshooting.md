@@ -149,3 +149,27 @@ observe_ui({ app: "TextEdit", windowTitle: "Untitled" })
 ## Apple Events JavaScript is disabled
 
 On macOS, some browser fallback paths require the browser setting "Allow JavaScript from Apple Events". If this is needed, the error message will say so. Enable the setting in the browser and retry.
+
+
+### Windows foreground activation
+
+Windows activation restores minimized roots, shows and asynchronously raises the
+exact HWND, then polls its observed foreground identity. UIA WindowPattern /
+SetFocus is a bounded fallback in a disposable helper process. A worker timeout
+blocks subsequent physical input until the CU session is closed and reopened.
+No keystroke, AttachThreadInput, or same-process shortcut is used for activation.
+
+Focus-only results include activationDiagnostics with target and foreground HWND,
+PID/thread IDs, bounded owner chains, minimized/enabled/visible state, GUI-thread
+focus, window station, input/helper/target desktops, WTS connection and lock flags,
+and API outcomes. API return values alone never verify foreground ownership.
+No focused root means the foreground is unavailable; enumeration order is not a
+substitute. Stale semantic refs and unresolved occlusion checks reject physical
+fallback instead of using cached rectangles.
+
+A uniform PrintWindow result may fall back to screen pixels only when the exact
+window owns the foreground on the interactive desktop. Failed or uniform fallback
+returns capture_failed with its foreground gate evidence. This describes capture
+readiness and does not diagnose a product white screen.
+
+Window restoration can briefly expose iconic geometry or an unpainted GPU surface. Windows capture retries at most three times after the initial failure, refreshing geometry after each 75 ms wait. It rejects screen fallback if foreground identity or geometry changes during capture. GetDIBits reads an unselected bitmap, as required by the GDI API.

@@ -11,6 +11,17 @@ use serde_json::Value;
 
 use crate::refs::RefStore;
 
+#[cfg(any(windows, test))]
+fn extraction_diagnostics(total_found: usize, raw_visited: usize, visible_retained: usize) -> Value {
+    serde_json::json!({
+        "totalFound": total_found,
+        "rawVisited": raw_visited,
+        "visibleRetained": visible_retained,
+        "rawTruncated": total_found > raw_visited
+    })
+}
+
+
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
@@ -89,29 +100,31 @@ const UIA_EDIT_CONTROL: u32 = 50004;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_BUTTON_CONTROL: u32 = 50000;
 #[cfg_attr(not(windows), allow(dead_code))]
+const UIA_SPLITBUTTON_CONTROL: u32 = 50031;
+#[cfg_attr(not(windows), allow(dead_code))]
 const UIA_CHECKBOX_CONTROL: u32 = 50002;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_RADIOBUTTON_CONTROL: u32 = 50007;
+const UIA_RADIOBUTTON_CONTROL: u32 = 50013;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_COMBOBOX_CONTROL: u32 = 50003;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_LIST_CONTROL: u32 = 50008;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_LISTITEM_CONTROL: u32 = 50009;
+const UIA_LISTITEM_CONTROL: u32 = 50007;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_TREE_CONTROL: u32 = 50020;
+const UIA_TREE_CONTROL: u32 = 50023;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_TREEITEM_CONTROL: u32 = 50021;
+const UIA_TREEITEM_CONTROL: u32 = 50024;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_MENUITEM_CONTROL: u32 = 50010;
+const UIA_MENUITEM_CONTROL: u32 = 50011;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_TEXT_CONTROL: u32 = 50019;
+const UIA_TEXT_CONTROL: u32 = 50020;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_HYPERLINK_CONTROL: u32 = 50005;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_TAB_CONTROL: u32 = 50018;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_TABITEM_CONTROL: u32 = 50022;
+const UIA_TABITEM_CONTROL: u32 = 50019;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_HEADER_CONTROL: u32 = 50034;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -119,23 +132,23 @@ const UIA_HEADERITEM_CONTROL: u32 = 50035;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_TABLE_CONTROL: u32 = 50036;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_IMAGE_CONTROL: u32 = 50031;
+const UIA_IMAGE_CONTROL: u32 = 50006;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_SLIDER_CONTROL: u32 = 50013;
+const UIA_SLIDER_CONTROL: u32 = 50015;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_PROGRESSBAR_CONTROL: u32 = 50006;
+const UIA_PROGRESSBAR_CONTROL: u32 = 50012;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_TOOLBAR_CONTROL: u32 = 50016;
+const UIA_TOOLBAR_CONTROL: u32 = 50021;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_STATUSBAR_CONTROL: u32 = 50014;
+const UIA_STATUSBAR_CONTROL: u32 = 50017;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_TOOLTIP_CONTROL: u32 = 50015;
+const UIA_TOOLTIP_CONTROL: u32 = 50022;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_SCROLLBAR_CONTROL: u32 = 50011;
+const UIA_SCROLLBAR_CONTROL: u32 = 50014;
 #[cfg_attr(not(windows), allow(dead_code))]
 const UIA_GROUP_CONTROL: u32 = 50026;
 #[cfg_attr(not(windows), allow(dead_code))]
-const UIA_SEPARATOR_CONTROL: u32 = 50039;
+const UIA_SEPARATOR_CONTROL: u32 = 50038;
 
 /// Map a UIA control type ID to a semantic role string.
 ///
@@ -147,7 +160,7 @@ fn control_type_to_role(ctrl_type: u32) -> &'static str {
         UIA_PANE_CONTROL => "pane",
         UIA_DOCUMENT_CONTROL => "document",
         UIA_EDIT_CONTROL => "edit",
-        UIA_BUTTON_CONTROL => "button",
+        UIA_BUTTON_CONTROL | UIA_SPLITBUTTON_CONTROL => "button",
         UIA_CHECKBOX_CONTROL => "checkbox",
         UIA_RADIOBUTTON_CONTROL => "radio",
         UIA_COMBOBOX_CONTROL => "comboBox",
@@ -268,6 +281,23 @@ mod native {
                 .map_err(|e| format!("FindAll: {e}"))?
         };
 
+        // Cache only each retained element, not the whole unbounded subtree.
+        // Full element mode keeps live pattern/action resolution available.
+        let property_cache = unsafe {
+            uia.CreateCacheRequest().ok().and_then(|cache| {
+                cache.SetTreeScope(TreeScope_Element).ok()?;
+                cache.SetTreeFilter(&condition).ok()?;
+                for property in [UIA_ControlTypePropertyId, UIA_NamePropertyId,
+                    UIA_AutomationIdPropertyId, UIA_ClassNamePropertyId,
+                    UIA_BoundingRectanglePropertyId, UIA_IsOffscreenPropertyId,
+                    UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
+                    UIA_IsPasswordPropertyId] {
+                    cache.AddProperty(property).ok()?;
+                }
+                Some(cache)
+            })
+        };
+
         let count = unsafe {
             found
                 .Length()
@@ -290,7 +320,10 @@ mod native {
             let parent_runtime_id = unsafe { walker.GetParentElement(&element).ok() }
                 .and_then(|parent| runtime_id(&parent))
                 .unwrap_or_default();
-            if let Some(json_val) = element_to_json(store, &element, parent_runtime_id) {
+            let observed = property_cache.as_ref()
+                .and_then(|cache| unsafe { element.BuildUpdatedCache(cache).ok() })
+                .unwrap_or_else(|| element.clone());
+            if let Some(json_val) = element_to_json(store, &observed, parent_runtime_id) {
                 elements.push(json_val);
             }
         }
@@ -359,6 +392,10 @@ mod native {
             }
         }
 
+        let diagnostics = super::extraction_diagnostics(count, limit, elements.len());
+        if let Some(first) = elements.first_mut() {
+            first["extractionDiagnostics"] = diagnostics;
+        }
         Ok(elements)
     }
 
@@ -394,21 +431,21 @@ mod native {
         element: &IUIAutomationElement,
         parent_runtime_id: Vec<i32>,
     ) -> Option<Value> {
-        let ctrl_type = unsafe { element.CurrentControlType().ok()? };
+        let ctrl_type = unsafe { element.CachedControlType().or_else(|_| element.CurrentControlType()).ok()? };
         let role = control_type_to_role(ctrl_type.0 as u32);
 
-        let name = unsafe { element.CurrentName().unwrap_or_default().to_string() };
+        let name = unsafe { element.CachedName().or_else(|_| element.CurrentName()).unwrap_or_default().to_string() };
         let automation_id = unsafe {
             element
-                .CurrentAutomationId()
+                .CachedAutomationId().or_else(|_| element.CurrentAutomationId())
                 .unwrap_or_default()
                 .to_string()
         };
         let runtime_id = runtime_id(element).unwrap_or_default();
-        let class_name = unsafe { element.CurrentClassName().unwrap_or_default().to_string() };
+        let class_name = unsafe { element.CachedClassName().or_else(|_| element.CurrentClassName()).unwrap_or_default().to_string() };
 
         // Bounding rectangle.
-        let rect = unsafe { element.CurrentBoundingRectangle().ok()? };
+        let rect = unsafe { element.CachedBoundingRectangle().or_else(|_| element.CurrentBoundingRectangle()).ok()? };
 
         // Skip invisible / offscreen elements.
         let w = rect.right - rect.left;
@@ -419,7 +456,7 @@ mod native {
 
         let is_offscreen = unsafe {
             element
-                .CurrentIsOffscreen()
+                .CachedIsOffscreen().or_else(|_| element.CurrentIsOffscreen())
                 .map(|value| value.as_bool())
                 .unwrap_or(true)
         };
@@ -430,19 +467,19 @@ mod native {
         // Capabilities.
         let is_enabled = unsafe {
             element
-                .CurrentIsEnabled()
+                .CachedIsEnabled().or_else(|_| element.CurrentIsEnabled())
                 .map(|value| value.as_bool())
                 .unwrap_or(true)
         };
         let is_keyboard_focusable = unsafe {
             element
-                .CurrentIsKeyboardFocusable()
+                .CachedIsKeyboardFocusable().or_else(|_| element.CurrentIsKeyboardFocusable())
                 .map(|value| value.as_bool())
                 .unwrap_or(false)
         };
         let is_password = unsafe {
             element
-                .CurrentIsPassword()
+                .CachedIsPassword().or_else(|_| element.CurrentIsPassword())
                 .map(|value| value.as_bool())
                 .unwrap_or(false)
         };
@@ -1038,6 +1075,15 @@ mod unit_tests {
     use crate::refs::NativeHandle;
     use serde_json::json;
 
+    #[test]
+    fn retained_count_does_not_hide_raw_extraction_truncation() {
+        let truncated = extraction_diagnostics(500, 200, 60);
+        assert_eq!(truncated["rawTruncated"], true);
+        assert_eq!(truncated["visibleRetained"], 60);
+        let complete = extraction_diagnostics(60, 60, 20);
+        assert_eq!(complete["rawTruncated"], false);
+    }
+
     // -- Platform support check (non-Windows) -------------------------------
 
     #[test]
@@ -1067,7 +1113,7 @@ mod unit_tests {
 
     #[test]
     fn test_control_type_to_role_radio() {
-        assert_eq!(control_type_to_role(50007), "radio");
+        assert_eq!(control_type_to_role(50013), "radio");
     }
 
     #[test]
@@ -1082,17 +1128,31 @@ mod unit_tests {
 
     #[test]
     fn test_control_type_to_role_menu_item() {
-        assert_eq!(control_type_to_role(50010), "menuItem");
+        assert_eq!(control_type_to_role(50011), "menuItem");
     }
 
     #[test]
     fn test_control_type_to_role_list_item() {
-        assert_eq!(control_type_to_role(50009), "listItem");
+        assert_eq!(control_type_to_role(50007), "listItem");
     }
 
     #[test]
     fn test_control_type_to_role_document() {
         assert_eq!(control_type_to_role(50030), "document");
+    }
+
+    // Official UIAutomationClient.h identifiers, independent of local constants.
+    #[test]
+    fn official_control_type_ids_preserve_semantic_roles() {
+        for (id, role) in [
+            (50006, "image"), (50031, "button"), (50007, "listItem"), (50011, "menuItem"),
+            (50012, "progressBar"), (50013, "radio"), (50014, "scrollBar"),
+            (50015, "slider"), (50017, "statusBar"), (50019, "tabItem"),
+            (50020, "text"), (50021, "toolBar"), (50022, "toolTip"),
+            (50023, "tree"), (50024, "treeItem"), (50038, "separator"),
+        ] {
+            assert_eq!(control_type_to_role(id), role, "official control ID {id}");
+        }
     }
 
     #[test]

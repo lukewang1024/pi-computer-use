@@ -661,7 +661,7 @@ async fn act_batch(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Valu
     for (index, action) in actions.iter().enumerate() {
         match act(state, action).await {
             Ok(step) => {
-                let stopped = step.get("outcome").and_then(Value::as_str) == Some("didnt");
+                let stopped = step.get("outcome").and_then(Value::as_str) != Some("worked");
                 steps.push(step);
                 if stopped {
                     stopped_at = Some(index);

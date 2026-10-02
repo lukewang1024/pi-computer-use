@@ -94,7 +94,7 @@
 		"test:cdp-input": "tsx scripts/check-cdp-input.mjs",
 		"test:cdp-frames": "tsx scripts/check-cdp-frames.mjs",
 		"test:cdp-sessions": "tsx scripts/check-cdp-sessions.mjs && tsx scripts/check-cdp-ancestor-routes.mjs",
-		"test:native-action-outcomes": "tsx scripts/check-native-action-outcomes.mjs"
+		"test:native-action-outcomes": "tsx scripts/check-native-action-outcomes.mjs && tsx scripts/check-search-ocr-escalation.mjs"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",

@@ -198,9 +198,23 @@ export class CdpTab {
 		if (![width, height, dpr, viewport?.pageX, viewport?.pageY].every(Number.isFinite)
 			|| width <= 0 || height <= 0 || dpr <= 0) throw new Error("CDP viewport dimensions unavailable.");
 		const pixelScale = Math.min(1, 1600 / width, 1600 / height);
-		// CDP clip scale is expressed in CSS viewport units. devicePixelRatio
-		// also includes page/emulation scaling and must not be divided out.
-		const scale = pixelScale;
+		// The surface screenshot uses device pixels on Retina displays. Compare
+		// CDP's device and CSS viewports instead of assuming that page DPR alone
+		// describes the surface (DPR can also contain emulation/page scaling).
+		let surfaceScale = 1;
+		if (layout.visualViewport) {
+			const physicalWidth = Number(layout.visualViewport.clientWidth);
+			const physicalHeight = Number(layout.visualViewport.clientHeight);
+			const horizontalScale = physicalWidth / width;
+			const verticalScale = physicalHeight / height;
+			if (![physicalWidth, physicalHeight, horizontalScale, verticalScale].every(Number.isFinite)
+				|| physicalWidth <= 0 || physicalHeight <= 0
+				|| Math.abs(horizontalScale - verticalScale) > 1 / Math.min(width, height)) {
+				throw new Error("CDP device and CSS viewport scales are inconsistent.");
+			}
+			surfaceScale = horizontalScale;
+		}
+		const scale = pixelScale / surfaceScale;
 		const screenshot = await this.send("Page.captureScreenshot", {
 			format: "png", fromSurface: true, captureBeyondViewport: false,
 			clip: { x: viewport.pageX, y: viewport.pageY, width, height, scale },

@@ -141,6 +141,29 @@ struct ForegroundGateReport {
 	}
 }
 
+func shouldReobserveForegroundRead(_ report: ForegroundGateReport) -> Bool {
+	for actual in [report.firstActual, report.actual].compactMap({ $0 }) {
+		if let pid = actual.pid, pid != report.target.pid { return false }
+		if let windowId = actual.windowId, windowId != report.target.windowId { return false }
+	}
+	let transientRead = [report.firstDiagnostics, report.secondDiagnostics].contains { $0?["mappingStage"] as? String == "ax_read_failed" }
+	return !report.verified && report.frontmostPidStable && report.actual.pid == report.target.pid && transientRead
+}
+
+func decideBoundFocusedMapping(
+	focusMatchesTarget: Bool, focusedRole: String, target: ForegroundTargetIdentity,
+	frame: CGRect?, title: String?, candidates: [FocusedCGCandidateSnapshot]
+) -> FocusedMappingDecision? {
+	guard focusMatchesTarget, ["AXWindow", "AXSheet"].contains(focusedRole) else { return nil }
+	let decision = decideFocusedMapping(focusedToken: "bound-target",
+		axNodes: [FocusedAXNodeSnapshot(token: "bound-target", frame: frame, title: title, isSheet: focusedRole == "AXSheet")],
+		candidates: candidates, targetPid: target.pid)
+	guard decision.selectedWindowId == nil || decision.selectedWindowId == target.windowId else {
+		return FocusedMappingDecision(stage: "bound_target_cg_mismatch", selectedWindowId: nil, candidateCount: candidates.count, validCandidateIds: decision.validCandidateIds, ambiguous: false)
+	}
+	return decision
+}
+
 enum ForegroundInputEvent: Equatable {
 	case keyDown(Int, modifiers: [Int])
 	case keyUp(Int, modifiers: [Int])

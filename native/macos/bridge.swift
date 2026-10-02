@@ -2332,7 +2332,7 @@ final class Bridge {
 			do {
 				let step = try act(deferred)
 				steps.append(step)
-				if (step["outcome"] as? String) == "didnt" { stoppedAt = index; break }
+				if (step["outcome"] as? String) != "worked" { stoppedAt = index; break }
 			} catch let failure as BridgeFailure {
 				steps.append(["outcome": "didnt", "error": ["code": failure.code,
 						"details": failure.details, "message": failure.message]])

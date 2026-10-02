@@ -1,0 +1,1 @@
+Windows window-root keyboard references now dispatch as observed HWND targets rather than stale UIA elements. Only foreground keypress is supported on synthetic window roots; exact HWND/PID and interactive desktop checks remain mandatory. Invalid/expired references and unavailable desktops still reject input. Includes the workbench.4 foreground and capture fixes.

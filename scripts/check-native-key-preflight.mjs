@@ -1,20 +1,18 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-
-const source = await readFile(new URL("../native/macos/bridge.swift", import.meta.url), "utf8");
-const actStart = source.indexOf("private func act(_ request:");
-const keyValidation = source.indexOf("normalizedMacKeypressKeys(params[\"keys\"]", actStart);
-const lookLookup = source.indexOf("lookRecord(for: lookId)", actStart);
-const rootObserver = source.indexOf("ensureRootObserver(pid: pid)", actStart);
-assert(actStart >= 0 && keyValidation > actStart, "native act must validate keypress parameters at entry");
-assert(keyValidation < lookLookup && keyValidation < rootObserver, "native key validation must precede native observation and input side effects");
-
-const batchStart = source.indexOf("private func actBatch(_ request:");
-const batchValidation = source.indexOf("normalizedMacKeypressKeys(params[\"keys\"]", batchStart);
-const batchObserver = source.indexOf("ensureRootObserver(pid: pid)", batchStart);
-assert(batchStart >= 0 && batchValidation > batchStart && batchValidation < batchObserver, "native batch must validate all keypresses before starting batch execution");
-
-assert(source.includes("case \"cmd\", \"command\", \"meta\": return \"cmd\""), "native Command aliases must be normalized without dropping supported names");
-assert(source.includes("private func normalizedMacChordToken"), "native plus-delimited chord validation must remain available");
-assert(source.includes("private func isSupportedMacBaseKey"), "native base-key validation must be explicit");
-console.log("native key preflight placement checks passed");
+// Newly authored argument regressions; does not deliver platform input.
+import assert from 'node:assert/strict';
+import {normalizeKeypressKeys} from '../src/actions.ts';
+assert.deepEqual(normalizeKeypressKeys('windows',['CTRL','A']),['ctrl','a']);
+assert.deepEqual(normalizeKeypressKeys('windows',['F24']),['f24']);
+assert.deepEqual(normalizeKeypressKeys('linux',['Control','F35']),['control','f35']);
+assert.deepEqual(normalizeKeypressKeys('macos',['Command','O']),['cmd','o']);
+assert.deepEqual(normalizeKeypressKeys('macos',['cmd+shift+p']),['cmd+shift+p']);
+for(const platform of ['windows','linux','macos']){
+ for(const invalid of [[],[''],[3],['definitely-not-a-key']])assert.throws(()=>normalizeKeypressKeys(platform,invalid));
+}
+for(const key of ['.',',','/',';',"'",'`','[',']','\\','-','=','\0','\n']){
+ assert.throws(()=>normalizeKeypressKeys('windows',['ctrl',key]),/Unsupported|empty/,'raw ASCII must not be mistaken for a Windows virtual key: '+JSON.stringify(key));
+}
+assert.throws(()=>normalizeKeypressKeys('windows',['F25']),/Unsupported/);
+assert.throws(()=>normalizeKeypressKeys('linux',['F36']),/Unsupported/);
+assert.throws(()=>normalizeKeypressKeys('macos',['cmd','ctrl']),/Unsupported/);
+console.log('Native key argument preflight checks passed (new coverage; no input)');

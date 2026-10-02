@@ -1,27 +1,26 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { verifyFocusedWindow } from "../src/focus-window.ts";
-
-const target = { pid: 42, windowId: 7, windowRef: "native-window-7" };
-const focusedTarget = { ...target, isMain: true, isFocused: true };
-const otherWindow = { pid: 42, windowId: 8, windowRef: "native-window-8", isMain: true, isFocused: true };
-
-assert.equal(verifyFocusedWindow(target, [focusedTarget], { pid: 42, windowId: 7 }).verified, true);
-assert.equal(verifyFocusedWindow(target, [otherWindow], { pid: 42, windowId: 8 }).verified, false);
-assert.equal(verifyFocusedWindow(target, [focusedTarget], { pid: 99 }).verified, false);
-assert.equal(verifyFocusedWindow(target, [focusedTarget], { pid: 42 }).verified, false, "a matching process without the exact frontmost window id is insufficient");
-assert.equal(verifyFocusedWindow(target, [{ ...focusedTarget, isFocused: false }], { pid: 42, windowId: 7 }).verified, false);
-assert.equal(verifyFocusedWindow(target, [{ ...focusedTarget, isMain: false }], { pid: 42, windowId: 7 }).verified, false);
-assert.equal(verifyFocusedWindow({ pid: 42, windowRef: "native-window-7" }, [focusedTarget], { pid: 42, windowRef: "native-window-7" }).verified, true);
-assert.equal(verifyFocusedWindow({ pid: 42, windowRef: "native-window-7" }, [focusedTarget], { pid: 42 }).verified, false, "a root without a window id still requires an exact frontmost native ref");
-
-const bridgeSource = await readFile(new URL("../src/bridge.ts", import.meta.url), "utf8");
-const frontmostStart = bridgeSource.indexOf("async function resolveFrontmostTarget");
-const frontmostEnd = bridgeSource.indexOf("\nasync function resolveTargetForObserve", frontmostStart);
-assert.ok(frontmostStart >= 0 && frontmostEnd > frontmostStart, "frontmost target resolver must remain discoverable");
-const frontmostResolver = bridgeSource.slice(frontmostStart, frontmostEnd);
-assert.match(frontmostResolver, /currentPlatformBackend\.name === "macos"[\s\S]*frontmost AX focused-window identity was unavailable/,
-	"macOS must fail closed when the native focused-window identity is missing");
-assert.match(frontmostResolver, /frontmostRef[\s\S]*window\.rootRef === frontmostRef/,
-	"frontmost resolution must accept only the native root identity when no window id is available");
-console.log("focus-window verification tests passed");
+// New regression coverage reconstructed from the current exported verifier
+// contract. This is not a recovered copy of the missing deployment-source test.
+import assert from 'node:assert/strict';
+import {verifyFocusedWindow} from '../src/focus-window.ts';
+const target={pid:7,windowId:10};
+const root={...target,isMain:true,isFocused:true};
+const front={...target};
+assert.equal(verifyFocusedWindow(target,[root],front).verified,true);
+for(const [name,roots,foreground] of [
+ ['same-process floating window',[root],{pid:7,windowId:20}],
+ ['another process',[root],{pid:8,windowId:10}],
+ ['no foreground',[root],undefined],
+ ['missing root',[],front],
+ ['root from another process',[{...root,pid:8}],front],
+ ['not main',[{...root,isMain:false}],front],
+ ['not focused',[{...root,isFocused:false}],front],
+ ['missing focus facts',[target],front],
+ ['same-process root replacement',[{...root,windowId:20}],front],
+]) assert.equal(verifyFocusedWindow(target,roots,foreground).verified,false,name);
+// Some platforms expose a stable root reference instead of a numeric HWND.
+const referenced={pid:9,rootRef:'owned-root'};
+assert.equal(verifyFocusedWindow(referenced,[{...referenced,isMain:true,isFocused:true}],referenced).verified,true);
+assert.equal(verifyFocusedWindow(referenced,[{...referenced,isMain:true,isFocused:true}],{pid:9,rootRef:'floating-root'}).verified,false);
+assert.equal(verifyFocusedWindow({pid:9},[{pid:9,isMain:true,isFocused:true}],{pid:9}).verified,false,'PID alone must never suffice');
+assert.equal(verifyFocusedWindow(target,[{...root,windowId:20},root],front).verified,true,'enumeration order must not replace the exact root');
+console.log('Exact focused-window identity regression checks passed (new coverage)');

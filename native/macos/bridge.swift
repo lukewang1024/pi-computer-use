@@ -2236,7 +2236,10 @@ final class Bridge {
 				usleep(30_000)
 				let afterValue = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
 				let changed = afterValue != (beforeValue ?? "")
-				return finish(["outcome": changed ? "worked" : "didnt", "performed": performed, "evidence": ["value": afterValue, "valueChanged": changed]])
+				// AppKit's field editor may apply the event before the AX backing
+				// value catches up. Input has already been posted: an unchanged
+				// value cannot establish a side-effect-free failure or safe retry.
+				return finish(["outcome": changed ? "worked" : "unknown", "performed": performed, "evidence": ["value": afterValue, "valueChanged": changed, "inputPosted": true]])
 			}
 		} else if action == "keypress" {
 			let preserveFocus = params["preserveFocus"] as? Bool ?? false

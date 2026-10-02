@@ -6,6 +6,7 @@ import Vision
 import ImageIO
 import ScreenCaptureKit
 import Carbon
+import CryptoKit
 
 struct BridgeFailure: Error {
 	let message: String
@@ -407,6 +408,13 @@ final class InputSuppressionGuard {
 
 final class Bridge {
 	private let protocolVersion = 6
+	// Eager startup snapshot: reading the file on each diagnostic would mistake
+	// an old in-memory daemon for a newly replaced executable at the same path.
+	private let executableSha256: String = {
+		guard let executable = Bundle.main.executableURL,
+			let bytes = try? Data(contentsOf: executable) else { return "" }
+		return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+	}()
 	private let captureTraceLock = NSLock()
 	private var captureTraces: [CaptureTrace] = []
 	private let refStore = AXRefStore()
@@ -827,6 +835,7 @@ final class Bridge {
 			"pid": Int32(getpid()),
 			"parentPid": parentPid,
 			"executablePath": CommandLine.arguments.first ?? "",
+			"executableSha256": executableSha256,
 			"macOS": ProcessInfo.processInfo.operatingSystemVersionString,
 			"arch": arch,
 			"accessibility": permissions["accessibility"] ?? false,

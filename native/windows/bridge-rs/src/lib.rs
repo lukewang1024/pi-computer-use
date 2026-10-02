@@ -14,3 +14,6 @@ pub mod window;
 
 pub use error::{ErrorCode, ProtocolError};
 pub use protocol::{Request, Response};
+
+#[cfg(windows)]
+pub mod foreground;

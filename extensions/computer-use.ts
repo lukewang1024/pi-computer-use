@@ -65,10 +65,10 @@ const findTool = defineTool({
 const focusWindowTool = defineTool({
 	name: "focus_window",
 	label: "Focus Window",
-	description: "Activate and raise one exact visible @r window without sending pointer or keyboard input, then verify its foreground state.",
+	description: "Activate and raise one exact @r window without sending pointer or keyboard input, then verify its foreground state. Windows can restore minimized windows; an interactive desktop is required.",
 	promptSnippet: "Use an exact @r ref from find_roots before interacting with a background window. Continue only when verification confirms the target is main, focused, and frontmost.",
 	parameters: Type.Object({
-		root: Type.String({ description: "Exact visible @r ref issued by find_roots" }),
+		root: Type.String({ description: "Exact @r ref issued by find_roots (Windows may restore a minimized root)" }),
 		capture: Type.Optional(Type.Boolean({ description: "Capture an observation after focus (default false). Capture failure does not erase focus verification." })),
 	}),
 	execute: executeFocusWindow,
@@ -82,6 +82,7 @@ const observeTool = defineTool({
 	promptGuidelines: [
 		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
+		"A visible native popup can have an empty outline. Inspect its image and exact owner relationship; query the owner root once without refocusing or replaying input.",
 	],
 	parameters: Type.Object({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
@@ -94,7 +95,7 @@ const searchUiTool = defineTool({
 	name: "search_ui",
 	label: "Search UI",
 	description: "Return a bounded, deterministically ranked search of the cached outline. At least one predicate is required.",
-	promptSnippet: "Find targets not shown in the compact observe_ui output; refine broad searches instead of paging matches.",
+	promptSnippet: "Search the current saved state before recapturing. Refine broad matches by path or capability; editable areas can be document nodes rather than edit nodes.",
 	parameters: Type.Object({
 		text: Type.Optional(Type.String({ description: "Human-readable text or label", maxLength: 256 })),
 		role: Type.Optional(Type.String({ description: "Exact normalized role, e.g. button", maxLength: 128 })),
@@ -126,8 +127,12 @@ const actTool = defineTool({
 	name: "act_ui",
 	label: "Act",
 	description: "Perform one or more precisely targeted checked actions and return the successor state.",
-	promptSnippet: "Pass dependent click/type steps together and use expect for observable completion.",
-	promptGuidelines: ["After clicking an editable region, omit ref from typeText/keypress so input follows the established focus."],
+	promptSnippet: "Use the returned successor state directly. Native physical steps can report unknown and stop batches; inspect their effect before continuing.",
+	promptGuidelines: [
+		"After clicking an editable region, typeText may omit ref to preserve the established focus. keypress requires an exact current outline ref.",
+		"An unknown outcome is not permission to resend input. Inspect the returned state or an independent postcondition before the next action.",
+		"For a split button, press may run the default action. Ground a separate dropdown click from the current image and parent/child rectangles.",
+	],
 	parameters: Type.Object({ stateId, expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
 });
@@ -173,7 +178,8 @@ const evaluateBrowserTool = defineTool({
 	name: "evaluate_browser",
 	label: "Evaluate Browser",
 	description: "Evaluate targeted JavaScript in a CDP browser-page state; returned output is strictly bounded.",
-	promptSnippet: "Prefer observe/search/read; return selected fields, aggregates, or bounded slices.",
+	promptSnippet: "Prefer observe/search/read; return selected fields, aggregates, or bounded slices. Evaluation returns a new state: use its outline or search again before acting.",
+	promptGuidelines: ["Browser @e refs are unique to each observation. Old refs are rejected against the returned stateId; obtain action refs from its outline or search again.", "After a failed browser write, observe_ui again before checking results; do not replay the input."],
 	parameters: Type.Object({ stateId, expression: Type.String({ maxLength: 65_536 }) }),
 	execute: executeEvaluateBrowser,
 });

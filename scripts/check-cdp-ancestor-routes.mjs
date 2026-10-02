@@ -59,7 +59,7 @@ for(const stolen of [undefined,20,30]){
 }
 console.log('Nested keyboard checks every ancestor focus in its owning session before input');
 
-for(const mode of ['success','middle-overlay','outer-overlay','middle-moved','unknown-input','scrolled','outer-offscreen']){
+for(const mode of ['success','middle-overlay','outer-overlay','middle-moved','unknown-input','scrolled','outer-offscreen','render-timeout','render-exception']){
  const tab=Object.create(CdpTab.prototype),trace=[];let checks=0,middleBoxes=0;
  const frames=[{route:outer,sessionId:'outer-session',parentTargetId:'page'},{route:inner,sessionId:'inner-session',parentSessionId:'outer-session',parentTargetId:'outer'}];
  tab.withRemoteFrameDocument=async(route,fn)=>fn('inner-session',async()=>{checks++;},'outer-session',async()=>{},frames);
@@ -69,7 +69,7 @@ for(const mode of ['success','middle-overlay','outer-overlay','middle-moved','un
   if(method==='DOM.getContentQuads')return {quads:[[10,10,30,10,30,30,10,30]]};
   if(method==='DOM.resolveNode')return {object:{objectId:params.backendNodeId===80?'target':'hit'}};
   if(method==='Runtime.callFunctionOn')return {result:{value:true}};
-  if(method==='Runtime.evaluate')return {result:{value:{width:100,height:100}}};
+  if(method==='Runtime.evaluate'){if(params.awaitPromise){assert.equal(timeout,1000);assert(params.expression.includes('requestAnimationFrame'));return mode==='render-exception'?{exceptionDetails:{text:'Renderer unavailable'}}:{result:{value:mode!=='render-timeout'}};}return {result:{value:{width:100,height:100}}};}
   if(method==='Runtime.releaseObjectGroup')return {};
   if(method==='DOM.getBoxModel'){
    if(params.backendNodeId===30){assert.equal(sessionId,'outer-session');middleBoxes++;return {model:{content:mode==='middle-moved'&&middleBoxes>1?[11,10,111,10,111,110,11,110]:[10,10,110,10,110,110,10,110]}};}
@@ -91,6 +91,6 @@ for(const mode of ['success','middle-overlay','outer-overlay','middle-moved','un
  assert.equal(inputs.length,['success','scrolled'].includes(mode)?2:mode==='unknown-input'?1:0);
  if(mode==='success')assert(inputs.every(c=>c.params.x===160&&c.params.y===160),'Two ancestor transforms compose to top page coordinates');
  assert.equal(trace.filter(c=>c.method==='Runtime.releaseObjectGroup').length,1);
- assert(checks>0);
+ assert(checks>0||['render-timeout','render-exception'].includes(mode));const renderChecks=trace.filter(c=>c.method==='Runtime.evaluate'&&c.params.awaitPromise);assert.deepEqual(renderChecks.map(c=>c.sessionId),[undefined,'outer-session','inner-session']);assert(renderChecks.every(c=>trace.indexOf(c)<trace.findIndex(v=>v.method==='Input.dispatchMouseEvent')||inputs.length===0));
 }
 console.log('Nested pointer transform composition, intermediate overlays, movement and no-replay guards passed');

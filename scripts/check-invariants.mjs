@@ -554,7 +554,11 @@ async function liveChecks() {
 		if (!fullOutline || !truncated) {
 			console.log(`SKIP LIVE scoped graft (no truncated node in ${windowLabel(target)})`);
 		} else {
-			const beforeRefs = new Map(fullOutline.nodes.map((node) => [node.ref, node.wireRef]));
+			const scopeNodes = new Set();
+			const collectScope = (node) => { scopeNodes.add(node); node.children.forEach(collectScope); };
+			collectScope(truncated);
+			const beforeRefs = new Map(fullOutline.nodes.filter(node => !scopeNodes.has(node) || node === truncated).map((node) => [node.ref, node.wireRef]));
+			const allBeforeRefs = new Set(fullOutline.nodes.map(node => node.ref));
 			const beforeMax = Math.max(...fullOutline.nodes.map((node) => Number(/^@e(\d+)$/.exec(node.ref)?.[1] ?? 0)));
 			const state = { stateId: "full-state", capture: { width: look.image.width, height: look.image.height } };
 			const scopedLook = await call(socketPath, { id: "inv-look-scope", cmd: "look", windowId: target.windowId, readText: "auto", scopeRef: truncated.wireRef, maxDimension: 1 }, 20000);
@@ -572,7 +576,7 @@ async function liveChecks() {
 				assert(afterMax >= beforeMax, "ref counter moved backwards");
 				for (const node of fullOutline.nodes) {
 					const number = Number(/^@e(\d+)$/.exec(node.ref)?.[1] ?? 0);
-					if (!beforeRefs.has(node.ref)) assert(number > beforeMax, `new ref did not continue numbering: ${node.ref}`);
+					if (!allBeforeRefs.has(node.ref)) assert(number > beforeMax, `new ref did not continue numbering: ${node.ref}`);
 				}
 			});
 		}

@@ -16,10 +16,16 @@ const WINDOWS_HELPER_OVERRIDE = process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;
 export const WINDOWS_HELPER_PATH = WINDOWS_HELPER_OVERRIDE || path.join(os.homedir(), ".pi", "agent", "helpers", "pi-computer-use", "windows-bridge.exe");
 const WINDOWS_PREBUILT_PATH = path.join(PACKAGE_ROOT, "prebuilt", "windows", "windows-bridge.exe");
 
+function transportUnknownError(message: string, command: string, requestId: string): Error {
+	return Object.assign(new Error(message), { code: "helper_transport_unknown", outcome: "unknown", command, requestId, requestWriteAttempted: true });
+}
+
 interface Pending<T> {
+	command: string;
 	resolve(value: T): void;
 	reject(error: Error): void;
 	timer: NodeJS.Timeout;
+	cleanup?: () => void;
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {
@@ -77,9 +83,10 @@ export class WindowsHelperClient {
 
 	dispose(): void {
 		const error = new Error("Windows helper closed because the Pi session ended.");
-		for (const pending of this.pending.values()) {
+		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);
-			pending.reject(error);
+			pending.cleanup?.();
+			pending.reject(transportUnknownError(error.message, pending.command, id));
 		}
 		this.pending.clear();
 		this.buffer = "";
@@ -113,9 +120,19 @@ export class WindowsHelperClient {
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
 		child.stdin.setDefaultEncoding("utf8");
-		child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
-		child.on("exit", () => { if (this.child === child) this.child = undefined; });
-		child.on("error", () => { if (this.child === child) this.child = undefined; });
+		child.stdout.on("data", (chunk: string) => { if (this.child === child) this.onStdout(chunk); });
+		const disconnected = (reason: string) => {
+			if (this.child !== child) return;
+			this.child = undefined;
+			this.buffer = "";
+			for (const [id, pending] of this.pending) {
+				clearTimeout(pending.timer); pending.cleanup?.();
+				pending.reject(transportUnknownError(`Windows helper ${reason}; dispatched command outcome is unknown.`, pending.command, id));
+			}
+			this.pending.clear();
+		};
+		child.on("exit", () => disconnected("exited"));
+		child.on("error", () => disconnected("failed"));
 		this.child = child;
 		this.buffer = "";
 		return child;
@@ -135,8 +152,9 @@ export class WindowsHelperClient {
 			if (!pending) continue;
 			this.pending.delete(parsed.id);
 			clearTimeout(pending.timer);
+			pending.cleanup?.();
 			if (parsed.protocolVersion !== WINDOWS_HELPER_PROTOCOL_VERSION) {
-				pending.reject(new Error(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`));
+				pending.reject(transportUnknownError(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`, pending.command, parsed.id));
 			} else if (parsed.ok === true) {
 				pending.resolve(parsed.result);
 			} else {
@@ -148,17 +166,24 @@ export class WindowsHelperClient {
 	}
 
 	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
-		const child = await this.process(options?.signal);
+		const signal = options?.signal;
+		if (signal?.aborted) throw new Error("Operation aborted before dispatch.");
+		const child = await this.process(signal);
+		if (signal?.aborted) throw new Error("Operation aborted before dispatch.");
 		const id = randomUUID();
 		const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
 		return await new Promise<T>((resolve, reject) => {
-			const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Helper command '${cmd}' timed out after ${timeoutMs}ms.`)); }, timeoutMs);
-			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+			const cleanup = () => signal?.removeEventListener("abort", onAbort);
+			const onAbort = () => { this.pending.delete(id); clearTimeout(timer); cleanup(); reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id)); };
+			const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id)); }, timeoutMs);
+			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd });
+			signal?.addEventListener("abort", onAbort, { once: true });
 			child.stdin.write(`${JSON.stringify({ protocolVersion: WINDOWS_HELPER_PROTOCOL_VERSION, id, cmd, args })}\n`, (error) => {
 				if (!error) return;
 				this.pending.delete(id);
 				clearTimeout(timer);
-				reject(error);
+				cleanup();
+				reject(transportUnknownError(error.message, cmd, id));
 			});
 		});
 	}

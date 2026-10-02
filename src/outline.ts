@@ -76,6 +76,7 @@ export interface LookResponse {
 	capturedAt: number;
 	window: LookWindow;
 	image?: LookImage;
+	imageError?: string;
 	outline: OutlineNode;
 	timings: Record<string, number>;
 	readText?: { requested?: "auto" | "always" | "never"; executed: boolean };
@@ -113,7 +114,7 @@ export interface OutlineDiff {
 	changedNodeCount: number;
 	fullNodeCount: number;
 	useFullView: boolean;
-	reason?: "root_replaced" | "change_budget_exceeded" | "identity_confidence_low";
+	reason?: "root_replaced" | "change_budget_exceeded" | "identity_confidence_low" | "structure_changed";
 }
 
 export type SerializedOutlineNode = Omit<OutlineNode, "parent" | "children"> & { children: SerializedOutlineNode[] };
@@ -236,6 +237,7 @@ export function parseLookResponse(raw: unknown): LookResponse {
 			width: Math.max(1, Math.trunc(toNumber(image.width, 1))),
 			height: Math.max(1, Math.trunc(toNumber(image.height, 1))),
 		} : undefined,
+		imageError: typeof record.imageError === "string" ? record.imageError.slice(0, 1024) : undefined,
 		outline: outline.root,
 		timings: isRecord(record.timings) ? Object.fromEntries(Object.entries(record.timings).map(([key, value]) => [key, toNumber(value)])) : {},
 		readText: readText ? { requested: requestedReadText, executed: toBoolean(readText.executed) } : undefined,

@@ -3,6 +3,12 @@ import type { OutlineNode } from "./outline.ts";
 import type { PlatformName } from "./platform/types.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 
+export function describeActionExecution(attempted: number, requested: number, outcome: "worked" | "didnt" | "unknown"): string {
+	const remaining = requested - attempted;
+	const effect = outcome === "worked" ? "worked" : outcome === "didnt" ? "didnt (no effect was observed)" : "unknown (effect is unverified)";
+	return `Attempted ${attempted} of ${requested} UI actions. Reported outcome: ${effect}.${remaining > 0 ? ` Remaining ${remaining} actions were not sent.` : ""}${outcome === "unknown" ? " Do not automatically repeat these actions; inspect the returned state." : ""}`;
+}
+
 export type ActionTarget = { ref: string } | { x: number; y: number } | { focus: { x: number; y: number } };
 
 export type PreparedAction =
@@ -81,6 +87,9 @@ function canonicalModifier(platform: PlatformName, key: string): string | undefi
 }
 
 function isSingleNativeKey(platform: PlatformName, key: string): boolean {
+	// The Windows native helper maps single characters directly to VK codes.
+	// ASCII punctuation is not a Windows OEM-key mapping (e.g. dot is VK_DELETE).
+	if (platform === "windows") return /^[a-z0-9 ]$/i.test(key);
 	if (platform === "macos") return Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(key)).length === 1;
 	return key.length === 1 && key.charCodeAt(0) <= 0x7f;
 }
@@ -112,7 +121,7 @@ export function normalizeKeypressKeys(platform: PlatformName, value: unknown): s
 
 	if (platform !== "macos") {
 		for (const key of tokens) {
-			if (!isBaseKey(platform, key)) throw new Error(`Unsupported ${platform} key '${key}'.`);
+			if (!isBaseKey(platform, key)) throw new Error(`Unsupported ${platform} key '${key}'. Use typeText for printable text that has no supported native key mapping.`);
 		}
 		return tokens;
 	}

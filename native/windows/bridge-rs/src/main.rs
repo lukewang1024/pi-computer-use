@@ -29,6 +29,7 @@ struct ElementRecord {
 
 #[derive(Clone, Debug)]
 struct LookRecord {
+    window_ref: String,
     pid: u64,
     hwnd: isize,
     frame_x: f64,
@@ -113,12 +114,16 @@ thread_local! { static IN_PHYSICAL_TRANSACTION: Cell<bool> = const { Cell::new(f
 fn with_physical_input<T>(
     work: impl FnOnce() -> Result<T, ProtocolError>,
 ) -> Result<T, ProtocolError> {
+    #[cfg(windows)]
+    windows_bridge::foreground::ensure_activation_safe()?;
     if IN_PHYSICAL_TRANSACTION.with(Cell::get) {
         return work();
     }
     let _guard = physical_input_lock()
         .lock()
         .map_err(|_| internal("physical input lock poisoned"))?;
+    #[cfg(windows)]
+    windows_bridge::foreground::ensure_activation_safe()?;
     IN_PHYSICAL_TRANSACTION.with(|flag| flag.set(true));
     let result = work();
     IN_PHYSICAL_TRANSACTION.with(|flag| flag.set(false));
@@ -126,6 +131,18 @@ fn with_physical_input<T>(
 }
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--foreground-uia") {
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() != 5 { std::process::exit(2); }
+        let parsed = (args[2].parse::<isize>(),args[3].parse::<u32>(),args[4].parse::<u32>());
+        if let (Ok(hwnd),Ok(pid),Ok(tid)) = parsed {
+            println!("{}", windows_bridge::foreground::uia_worker(hwnd,pid,tid));
+            return;
+        }
+        std::process::exit(2);
+    }
+
     #[cfg(windows)]
     set_dpi_awareness();
     window::start_root_event_journal();
@@ -242,7 +259,8 @@ fn diagnostics() -> Value {
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "accessibility": true,
-        "screenRecording": true
+        "screenRecording": true,
+        "optionalImageFailure": true
     })
 }
 
@@ -281,10 +299,22 @@ fn handle_focus_window(args: &Value) -> Result<Value, ProtocolError> {
         .ok_or_else(|| invalid("focusWindow requires rootRef"))?;
     let wref = windows_bridge::refs::WindowRef::parse(root_ref)
         .ok_or_else(|| invalid(format!("Invalid root ref '{root_ref}'")))?;
-    let state = helper_state()
-        .lock()
-        .map_err(|_| internal("helper state lock poisoned"))?;
-    window::focus_window(&state.store, &wref)
+    let (store, expected_pid) = {
+        let state = helper_state().lock().map_err(|_| internal("helper state lock poisoned"))?;
+        let expected_pid = state.roots.values()
+            .find(|root| root["rootRef"].as_str() == Some(root_ref) || root["windowRef"].as_str() == Some(root_ref))
+            .and_then(|root| root["pid"].as_u64())
+            .ok_or_else(|| ProtocolError::new("Window reference is stale", ErrorCode::StaleRef))?;
+        (state.store.clone(), expected_pid)
+    };
+    if args["pid"].as_u64().is_some_and(|pid| pid != expected_pid) {
+        return Err(ProtocolError::new("Window reference process ownership changed", ErrorCode::StaleRef));
+    }
+    with_physical_input(|| window::focus_window(&store, &wref, expected_pid))
+}
+
+fn optional_capture_failure(allowed: bool, code: ErrorCode) -> bool {
+    allowed && code == ErrorCode::CaptureFailed
 }
 
 fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
@@ -358,12 +388,15 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
         .get("framePoints")
         .cloned()
         .unwrap_or_else(|| json!({"x":0,"y":0,"w":1,"h":1}));
-    let fx = number_at(&frame, "x", 0.0);
-    let fy = number_at(&frame, "y", 0.0);
-    let fw = number_at(&frame, "w", number_at(&frame, "width", 1.0)).max(1.0);
-    let fh = number_at(&frame, "h", number_at(&frame, "height", 1.0)).max(1.0);
+    let mut fx = number_at(&frame, "x", 0.0);
+    let mut fy = number_at(&frame, "y", 0.0);
+    let mut fw = number_at(&frame, "w", number_at(&frame, "width", 1.0)).max(1.0);
+    let mut fh = number_at(&frame, "h", number_at(&frame, "height", 1.0)).max(1.0);
 
+    let allow_image_failure = args.get("allowImageFailure").and_then(Value::as_bool).unwrap_or(false);
+    let mut image_error = None;
     let mut image_payload = None;
+    let mut capture_stage_timings = None;
     let mut elements = Vec::new();
     let mut image_w = fw;
     let mut image_h = fh;
@@ -372,8 +405,17 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     if !is_outline_only {
         let wref = windows_bridge::refs::WindowRef::parse(&root_ref)
             .ok_or_else(|| invalid(format!("Invalid root ref '{root_ref}'")))?;
-        let shot = capture::screenshot(&mut store, &wref, scope_ref.is_none(), max_dimension)?;
+        let shot = match capture::screenshot(&mut store, &wref, scope_ref.is_none(), max_dimension) {
+            Ok(shot) => shot,
+            Err(error) if optional_capture_failure(allow_image_failure, error.code) => {
+                image_error = Some(error.to_string());
+                json!({})
+            }
+            Err(error) => return Err(error),
+        };
+        capture_stage_timings = shot.get("timings").cloned();
         if let Some(capture) = shot.get("capture") {
+            (fx, fy, fw, fh) = capture_frame(capture, (fx, fy, fw, fh));
             image_w = number_at(capture, "width", fw).max(1.0);
             image_h = number_at(capture, "height", fh).max(1.0);
             if let Some(encoded) = capture.get("imageBase64").and_then(Value::as_str) {
@@ -387,7 +429,10 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-    } else {
+    } else if scope_ref.is_none() {
+        // A scoped semantic look resolves and extracts its exact subtree below.
+        // Enumerating the whole window here would discard that expensive result
+        // and can hide the desired branch behind the root's element budget.
         #[cfg(windows)]
         {
             if let Some(wref) = windows_bridge::refs::WindowRef::parse(&root_ref) {
@@ -400,6 +445,15 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
         }
     }
 
+    // A confirmed pixel-capture failure may return fresh semantic evidence in
+    // the same request. Invalid/stale roots and all other errors remain fatal.
+    if image_error.is_some() && scope_ref.is_none() {
+        #[cfg(windows)]
+        if let Some(native) = store.get_window(&windows_bridge::refs::WindowRef::parse(&root_ref)
+            .ok_or_else(|| invalid("Invalid root ref"))?) {
+            elements = windows_bridge::uia::extract_elements(&mut store, native.raw());
+        }
+    }
     let capture_ms = capture_started.elapsed().as_millis() as u64;
     let root_hwnd = root.get("windowId").and_then(Value::as_i64).unwrap_or(0) as isize;
     let mut base_look = None;
@@ -450,6 +504,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     }
     let describe_ms = describe_started.elapsed().as_millis() as u64;
     let record = LookRecord {
+        window_ref: root_ref.clone(),
         pid: root.get("pid").and_then(Value::as_u64).unwrap_or(0),
         hwnd: root_hwnd,
         frame_x: base_look.as_ref().map(|look| look.frame_x).unwrap_or(fx),
@@ -489,8 +544,26 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
         "timings": { "captureMs": capture_ms, "describeMs": describe_ms, "readTextMs": 0, "totalMs": started_at.elapsed().as_millis() as u64 },
         "readText": { "requested": read_text, "executed": false }
     });
+    if let Some(timings) = capture_stage_timings {
+        for name in ["imageCaptureMs", "uiaExtractionMs"] {
+            // Scoped UIA extraction happens after screenshot(), so its duration
+            // must not be represented by the screenshot's unrequested stage.
+            if name == "uiaExtractionMs" && scope_ref.is_some() {
+                continue;
+            }
+            if let Some(value) = timings.get(name).and_then(Value::as_u64) {
+                response["timings"][name] = json!(value);
+            }
+        }
+    }
+    if let Some(diagnostics) = elements.first().and_then(|raw| raw.get("extractionDiagnostics")) {
+        response["uiaDiagnostics"] = diagnostics.clone();
+    }
     if let Some(metadata) = root.get("metadata") {
         response["window"]["metadata"] = metadata.clone();
+    }
+    if let Some(error) = image_error {
+        response["imageError"] = json!(error);
     }
     if let Some(image) = image_payload {
         response["image"] = image;
@@ -776,8 +849,17 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
                     .get("preserveFocus")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if !preserve_focus {
-                    window::ensure_foreground(record.hwnd)?;
+                if preserve_focus {
+                    window::require_foreground(record.hwnd, record.pid)?;
+                } else {
+                    window::ensure_foreground(record.hwnd, record.pid)?;
+                }
+                if !matches!(parsed.action.as_str(), "typeText" | "keypress") {
+                    window::require_capture_bounds(
+                        record.hwnd,
+                        record.pid,
+                        (record.frame_x, record.frame_y, record.frame_w, record.frame_h),
+                    )?;
                 }
                 input::act(&executable)
             })?
@@ -793,6 +875,30 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
         );
     }
     Ok(response)
+}
+
+fn execute_checked_batch(
+    actions: &[Value],
+    mut dispatch: impl FnMut(&Value) -> Result<Value, ProtocolError>,
+) -> (Vec<Value>, Option<usize>) {
+    let mut steps = Vec::new();
+    for (index, action) in actions.iter().enumerate() {
+        let mut deferred = action.clone();
+        deferred["deferRootDelta"] = json!(true);
+        let step = match dispatch(&deferred) {
+            Ok(step) => step,
+            Err(error) => {
+                steps.push(json!({"outcome":"didnt","error":{"code":error.code.to_string(),"message":error.message}}));
+                return (steps, Some(index));
+            }
+        };
+        let worked = step.get("outcome").and_then(Value::as_str) == Some("worked");
+        steps.push(step);
+        if !worked {
+            return (steps, Some(index));
+        }
+    }
+    (steps, None)
 }
 
 fn handle_act_batch(args: &Value) -> Result<Value, ProtocolError> {
@@ -830,27 +936,7 @@ fn handle_act_batch(args: &Value) -> Result<Value, ProtocolError> {
         .iter()
         .any(|action| action_may_use_physical_input(action, &record));
     let execute = || -> Result<(Vec<Value>, Option<usize>), ProtocolError> {
-        let mut steps = Vec::new();
-        let mut stopped_at = None;
-        for (index, action) in actions.iter().enumerate() {
-            let mut deferred = action.clone();
-            deferred["deferRootDelta"] = json!(true);
-            let step = match handle_act(&deferred) {
-                Ok(step) => step,
-                Err(error) => {
-                    steps.push(json!({ "outcome": "didnt", "error": { "code": error.code.to_string(), "message": error.message } }));
-                    stopped_at = Some(index);
-                    break;
-                }
-            };
-            let didnt = step.get("outcome").and_then(Value::as_str) == Some("didnt");
-            steps.push(step);
-            if didnt {
-                stopped_at = Some(index);
-                break;
-            }
-        }
-        Ok((steps, stopped_at))
+        Ok(execute_checked_batch(&actions, handle_act))
     };
     let executed = if requires_physical {
         let _physical_guard = physical_input_lock()
@@ -900,6 +986,9 @@ fn action_may_use_physical_input(action: &Value, record: &LookRecord) -> bool {
     let input::ActTarget::Ref(reference) = &parsed.target else {
         return true;
     };
+    if reference == &record.window_ref {
+        return parsed.action == "keypress";
+    }
     let Some(element) = record.elements.get(reference) else {
         return false;
     };
@@ -911,12 +1000,28 @@ fn action_may_use_physical_input(action: &Value, record: &LookRecord) -> bool {
     }
 }
 
+// The synthetic window node is an observed HWND target, not a UIA element.
+// Only keyboard actions can use it; clicks still need an element or image point.
+fn validate_window_action(parsed: &input::ParsedActRequest) -> Result<(), ProtocolError> {
+    if parsed.action != "keypress" {
+        return Err(invalid("Window references support keypress only; use an element or image point for other actions"));
+    }
+    input::policy_allows_raw_input(parsed)
+}
+
 fn act_on_ref(
     args: &Value,
     parsed: &input::ParsedActRequest,
     record: &LookRecord,
     reference: &str,
 ) -> Result<Value, ProtocolError> {
+    if reference == record.window_ref {
+        validate_window_action(parsed)?;
+        return with_physical_input(|| {
+            window::ensure_foreground(record.hwnd, record.pid)?;
+            input::act(args)
+        });
+    }
     let element = record
         .elements
         .get(reference)
@@ -926,7 +1031,7 @@ fn act_on_ref(
         && is_web_backed(&element)
         && matches!(parsed.action.as_str(), "press" | "click" | "setText")
     {
-        return coordinate_fallback(args, parsed, &element);
+        return coordinate_fallback(args, parsed, &element, record.pid);
     }
     match parsed.action.as_str() {
         "press" | "click" => match windows_bridge::uia::press(
@@ -952,7 +1057,7 @@ fn act_on_ref(
                 json!({ "outcome": "worked", "performed": { "grounding": "description", "delivery": "ax" } }),
             ),
             windows_bridge::uia::PressResult::NoPattern => {
-                coordinate_fallback(args, parsed, &element)
+                coordinate_fallback(args, parsed, &element, record.pid)
             }
         },
         "setText" => {
@@ -987,7 +1092,7 @@ fn act_on_ref(
                         &element.runtime_id,
                         &element.automation_id,
                     );
-                    coordinate_fallback(args, parsed, &element)
+                    coordinate_fallback(args, parsed, &element, record.pid)
                 }
             }
         }
@@ -1015,11 +1120,11 @@ fn act_on_ref(
                     json!({ "outcome": "unknown", "performed": { "grounding": "description", "delivery": "ax" } }),
                 ),
                 windows_bridge::uia::ScrollResult::NoPattern => {
-                    coordinate_fallback(args, parsed, &element)
+                    coordinate_fallback(args, parsed, &element, record.pid)
                 }
             }
         }
-        _ => coordinate_fallback(args, parsed, &element),
+        _ => coordinate_fallback(args, parsed, &element, record.pid),
     }
 }
 
@@ -1027,23 +1132,19 @@ fn coordinate_fallback(
     args: &Value,
     parsed: &input::ParsedActRequest,
     element: &ElementRecord,
+    expected_pid: u64,
 ) -> Result<Value, ProtocolError> {
     input::policy_allows_raw_input(parsed)?;
     with_physical_input(|| {
-        window::ensure_foreground(element.hwnd)?;
+        window::ensure_foreground(element.hwnd, expected_pid)?;
         let snapshot = windows_bridge::uia::snapshot(
             element.hwnd,
             &element.runtime_id,
             &element.automation_id,
         )
-        .map_err(stale_ref_from_uia)
-        .unwrap_or(windows_bridge::uia::ElementSnapshot {
-            rect: (element.x, element.y, element.w, element.h),
-            runtime_id: element.runtime_id.clone(),
-        });
+        .map_err(stale_ref_from_uia)?;
         let x = snapshot.rect.0 + snapshot.rect.2 / 2.0;
         let y = snapshot.rect.1 + snapshot.rect.3 / 2.0;
-        let mut occlusion_unknown = false;
         let mut clear = false;
         for attempt in 0..3 {
             match windows_bridge::uia::occlusion_ok(
@@ -1059,11 +1160,7 @@ fn coordinate_fallback(
                 }
                 Ok(false) if attempt < 2 => sleep(Duration::from_millis(20)),
                 Ok(false) => break,
-                Err(_) => {
-                    occlusion_unknown = true;
-                    clear = true;
-                    break;
-                }
+                Err(message) => return Err(stale_ref_from_uia(message)),
             }
         }
         if !clear {
@@ -1074,12 +1171,7 @@ fn coordinate_fallback(
         }
         let mut executable = args.clone();
         executable["resolvedPoint"] = json!({ "x": x, "y": y });
-        let mut response = input::act(&executable)?;
-        if occlusion_unknown {
-            response["outcome"] = json!("unknown");
-            response["evidence"]["preflight"] = json!("unknown");
-        }
-        Ok(response)
+        input::act(&executable)
     })
 }
 
@@ -1096,6 +1188,25 @@ fn stale_ref_from_uia(message: String) -> ProtocolError {
         ProtocolError::new("Element reference is stale", ErrorCode::StaleRef)
     } else {
         ProtocolError::new(message, ErrorCode::InternalError)
+    }
+}
+
+// Capture may restore or move a window after listRoots. Map image points
+// through the rectangle that produced those pixels, rather than cached roots.
+fn capture_frame(capture: &Value, fallback: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let Some(bounds) = capture.get("sourceBounds") else {
+        return fallback;
+    };
+    let frame = (
+        number_at(bounds, "x", fallback.0),
+        number_at(bounds, "y", fallback.1),
+        number_at(bounds, "width", 0.0),
+        number_at(bounds, "height", 0.0),
+    );
+    if frame.2 > 0.0 && frame.3 > 0.0 {
+        frame
+    } else {
+        fallback
     }
 }
 
@@ -1424,7 +1535,7 @@ fn handle_open_browser_location(args: &Value) -> Result<Value, ProtocolError> {
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("openBrowserLocation requires url"))?;
         with_physical_input(|| {
-            window::ensure_foreground(hwnd)?;
+            window::ensure_foreground(hwnd, root["pid"].as_u64().unwrap_or(0))?;
             input::open_browser_location(url)
         })?;
         Ok(json!({ "opened": true }))
@@ -1478,6 +1589,25 @@ fn emit_response(response: &Response) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_image_failure_only_degrades_confirmed_capture_errors() {
+        assert!(super::optional_capture_failure(true, ErrorCode::CaptureFailed));
+        assert!(!super::optional_capture_failure(false, ErrorCode::CaptureFailed));
+        for code in [ErrorCode::TargetNotFound, ErrorCode::StaleRef, ErrorCode::StaleLook,
+            ErrorCode::InternalError, ErrorCode::UnsupportedPlatform, ErrorCode::ForegroundRequired] {
+            assert!(!super::optional_capture_failure(true, code));
+        }
+    }
+    #[test]
+    fn scaled_capture_coordinates_use_the_actual_source_rectangle() {
+        let cached = (10.0, 20.0, 700.0, 350.0);
+        let capture = serde_json::json!({"width":1200,"height":600,
+            "sourceBounds":{"x":100,"y":200,"width":1600,"height":800}});
+        assert_eq!(super::capture_frame(&capture, cached), (100.0,200.0,1600.0,800.0));
+        assert_eq!(super::capture_frame(&serde_json::json!({"width":1200,"height":600}), cached), cached);
+        assert_eq!(super::capture_frame(&serde_json::json!({"sourceBounds":{"width":0,"height":0}}), cached), cached);
+    }
+
     use super::*;
 
     fn root(id: i64, pid: u64, title: &str, focused: bool) -> Value {
@@ -1566,6 +1696,31 @@ mod tests {
     }
 
     #[test]
+    fn checked_batch_never_dispatches_after_unverified_effect() {
+        let actions = vec![json!({"index":0}), json!({"index":1}), json!({"index":2})];
+        for outcome in ["unknown", "didnt"] {
+            let mut calls = 0;
+            let (steps, stopped) = execute_checked_batch(&actions, |action| {
+                assert!(calls < 2, "later action must not be dispatched");
+                assert_eq!(action["deferRootDelta"], true);
+                calls += 1;
+                Ok(json!({"outcome":if calls == 1 {"worked"} else {outcome}}))
+            });
+            assert_eq!(calls, 2);
+            assert_eq!(stopped, Some(1));
+            assert_eq!(steps[1]["outcome"], outcome);
+        }
+        let mut calls = 0;
+        let (steps, stopped) = execute_checked_batch(&actions, |_| {
+            calls += 1;
+            Ok(json!({"outcome":"worked"}))
+        });
+        assert_eq!(calls, 3);
+        assert_eq!(steps.len(), 3);
+        assert_eq!(stopped, None);
+    }
+
+    #[test]
     fn action_batch_rejects_empty_transactions() {
         let error = handle_act_batch(&json!({ "actions": [] })).expect_err("empty batch must fail");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
@@ -1573,6 +1728,7 @@ mod tests {
 
     fn look_with_element(x: f64) -> LookRecord {
         LookRecord {
+            window_ref: "@w1".to_owned(),
             pid: 1,
             hwnd: 1,
             frame_x: 0.0,
@@ -1600,6 +1756,32 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn fresh_synthetic_window_keyboard_target_is_physical() {
+        let record = look_with_element(1.0);
+        let action = json!({"lookId":"look-a","action":"keypress","policy":"foreground","target":{"ref":"@w1"},"params":{"keys":["ALT","TAB"]}});
+        let parsed = input::parse_act_request(&action).unwrap();
+        assert!(validate_window_action(&parsed).is_ok());
+        assert!(action_may_use_physical_input(&action, &record));
+        assert!(!record.elements.contains_key("@w1"));
+        for policy in ["default", "ax_only"] {
+            let mut blocked = action.clone();
+            blocked["policy"] = json!(policy);
+            assert!(validate_window_action(&input::parse_act_request(&blocked).unwrap()).is_err());
+        }
+        let mut click = action.clone();
+        click["action"] = json!("click");
+        assert_eq!(validate_window_action(&input::parse_act_request(&click).unwrap()).unwrap_err().code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn unknown_window_reference_stays_stale() {
+        let record = look_with_element(1.0);
+        let action = json!({"lookId":"look-a","action":"keypress","policy":"foreground","target":{"ref":"@w999"},"params":{"keys":["ESC"]}});
+        let parsed = input::parse_act_request(&action).unwrap();
+        assert_eq!(act_on_ref(&action, &parsed, &record, "@w999").unwrap_err().code, ErrorCode::StaleRef);
     }
 
     #[test]

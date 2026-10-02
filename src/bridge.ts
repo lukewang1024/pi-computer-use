@@ -6,11 +6,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, preflightActionSequence, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, preflightActionSequence, type ActionState, type PreparedAction } from "./actions.ts";
+import { validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
-import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
+import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type FocusWindowParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
@@ -88,7 +88,9 @@ interface ExecutionTrace {
 }
 
 interface ComputerUseDetails {
-	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "unconfirmed" };
+	/** Helper observation-stage timings; captureMs may include UIA extraction. */
+	observationTimings?: Record<string, number>;
+	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "completed" | "unconfirmed" };
 	tool: string;
 	target: {
 		app: string;
@@ -111,7 +113,7 @@ interface ComputerUseDetails {
 	view: "full" | "diff";
 	baseStateId?: string;
 	changes?: OutlineChange[];
-	viewReason?: "root_replaced" | "change_budget_exceeded" | "identity_confidence_low";
+	viewReason?: OutlineDiff["reason"];
 	renderedOutline?: string;
 	outline?: SerializedOutline;
 	note?: WindowNote;
@@ -201,6 +203,7 @@ interface ListWindowsDetails {
 		isMain: boolean;
 		isFocused: boolean;
 		isModal: boolean;
+		interaction?: { enabled?: boolean; ownerHwnd?: number; ownerEnabled?: boolean; ownerDisabled?: boolean };
 		sheetCount?: number;
 		role?: string;
 		subrole?: string;
@@ -217,6 +220,8 @@ interface ListWindowsDetails {
 }
 
 interface BrowserObservationDetails {
+	diagnostics?: CdpPageSnapshot["diagnostics"];
+	capture?: { stateId: string; width: number; height: number; cssWidth: number; cssHeight: number; pixelScale: number; coordinateSpace: "browser-viewport-screenshot-pixels" };
 	tool: string;
 	kind: "browser_page";
 	stateId: string;
@@ -641,12 +646,26 @@ function platformRootPairing(window: Pick<HelperWindow, "metadata">): { confiden
 	return { confidence: pairing.confidence, score: typeof pairing.score === "number" && Number.isFinite(pairing.score) ? pairing.score : Number.NEGATIVE_INFINITY };
 }
 
+function platformRootInteraction(window: Pick<HelperWindow, "metadata">): ListWindowsDetails["windows"][number]["interaction"] {
+	const value = window.metadata?.interaction;
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const fields = value as Record<string, unknown>;
+	return {
+		enabled: typeof fields.enabled === "boolean" ? fields.enabled : undefined,
+		ownerHwnd: typeof fields.ownerHwnd === "number" && Number.isSafeInteger(fields.ownerHwnd) && fields.ownerHwnd > 0 ? fields.ownerHwnd : undefined,
+		ownerEnabled: typeof fields.ownerEnabled === "boolean" ? fields.ownerEnabled : undefined,
+		ownerDisabled: typeof fields.ownerDisabled === "boolean" ? fields.ownerDisabled : undefined,
+	};
+}
+
 function formatWindowLine(window: ListWindowsDetails["windows"][number]): string {
 	if (window.kind === "browser_page") return `- ${window.windowRef} browser_page ${JSON.stringify(window.windowTitle)}${window.url ? ` — ${window.url}` : ""}`;
 	const flags = [
 		window.isFocused ? "focused" : undefined,
 		window.isMain ? "main" : undefined,
 		window.isModal ? "modal" : undefined,
+		window.interaction?.enabled === false ? "disabled" : undefined,
+		window.interaction?.ownerDisabled ? `owner_disabled=${window.interaction.ownerHwnd ?? "unknown"}` : undefined,
 		window.sheetCount ? `sheets=${window.sheetCount}` : undefined,
 		window.isOnscreen ? "onscreen" : undefined,
 		window.isMinimized ? "minimized" : undefined,
@@ -1009,7 +1028,7 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
 	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find_roots and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
@@ -1018,6 +1037,7 @@ async function performLook(target: ResolvedTarget, options: { readText: "auto" |
 		scopeRef: options.scopeRef,
 		maxDimension: options.maxDimension,
 		includeImage: options.includeImage,
+		allowImageFailure: options.allowImageFailure,
 	}, { signal, timeoutMs: LOOK_TIMEOUT_MS });
 }
 
@@ -1030,13 +1050,13 @@ function noteWindowForTarget(target: ResolvedTarget | CurrentTarget, look?: Look
 	};
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true): Promise<CaptureResult> {
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false): Promise<CaptureResult> {
 	const state = operationState();
 	const baseOutline = state.currentOutline;
 	const baseTarget = state.currentTarget;
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const look = await performLook(target, { maxDimension, readText, includeImage }, signal);
+	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure }, signal);
 	// An optional read may finish after its caller timed out. Never adopt that late look.
 	throwIfAborted(signal);
 	const outline = stabilizeRefs(baseTarget && sameRootIdentity(baseTarget, target) ? baseOutline : undefined, look.parsedOutline!);
@@ -1098,6 +1118,7 @@ async function buildToolResult(
 			coordinateSpace: "window-relative-screenshot-pixels",
 		},
 		lookId: result.look.lookId,
+		observationTimings: result.look.timings,
 		view: useDiff ? "diff" : "full",
 		baseStateId: transition ? base?.stateId : undefined,
 		changes: useDiff ? transition?.changes : undefined,
@@ -1379,6 +1400,7 @@ function windowDetails(app: HelperApp, window: HelperWindow, config: ReturnType<
 		isMain: window.isMain,
 		isFocused: window.isFocused,
 		isModal: window.isModal,
+		interaction: platformRootInteraction(window),
 		sheetCount: platformRootSheetCount(window),
 		role: window.role,
 		subrole: window.subrole,
@@ -1469,7 +1491,7 @@ async function performFocusWindow(params: FocusWindowParams, signal?: AbortSigna
 	const record = runtimeState.windowRefs.get(params.root);
 	if (!record || record.pid <= 0) throw new Error(`Root ref '${params.root}' is unavailable. Call find_roots again.`);
 	const target = await ensureTargetWindowId(await resolveTargetByWindowSelector(params.root, signal), signal);
-	if (target.isMinimized || !target.isOnscreen) throw new Error("focus_window only activates a currently onscreen, non-minimized root; it does not restore hidden windows.");
+	if (process.platform !== "win32" && (target.isMinimized || !target.isOnscreen)) throw new Error("focus_window only activates a currently onscreen, non-minimized root; it does not restore hidden windows.");
 	return await withWindowWriteLock(target, async () => {
 		const started = performance.now();
 		// A transport failure here remains genuinely uncertain; do not catch it as an observation failure.
@@ -1485,7 +1507,7 @@ async function performFocusWindow(params: FocusWindowParams, signal?: AbortSigna
 		const verification = verifyFocusedWindow(target, roots, frontmost);
 		const verifiedAt = performance.now();
 		const focusWindow = {
-			requested: true, alreadyFocused: native.alreadyFocused, activated: native.activated,
+			requested: true, activationDiagnostics: native.activationDiagnostics, alreadyFocused: native.alreadyFocused, activated: native.activated,
 			setMain: native.setMain, setFocused: native.setFocused, raised: native.raised,
 			reason: native.reason ?? (probeErrors.length ? probeErrors.join("; ") : undefined), ...verification,
 			frontmostPid: frontmost?.pid, frontmostWindowId: frontmost?.windowId,
@@ -1521,7 +1543,7 @@ async function performFocusWindow(params: FocusWindowParams, signal?: AbortSigna
 		}
 		return { content: [{ type: "text", text: `${summary} Observation ${observation.status}; no new image or stateId. Use a fresh semantic observation or other valid grounding for subsequent actions.` }], details: {
 			tool: "focus_window", target: { app: target.appName, bundleId: target.bundleId, pid: target.pid, windowTitle: target.windowTitle, windowId: target.windowId, windowRef: target.windowRef, nativeWindowRef: target.nativeWindowRef },
-			activation: { activated: native.activated === true, raised: native.raised === true, unminimized: false }, execution, focusWindow, observation,
+			activation: { activated: native.activated === true, raised: native.raised === true, unminimized: native.unminimized === true }, execution, focusWindow, observation,
 			timings: { nativeFocusMs: focusedAt-started, verificationMs: verifiedAt-focusedAt, captureMs: params.capture ? performance.now()-verifiedAt : 0 },
 		} };
 	});
@@ -1535,13 +1557,13 @@ function isBrowserContextId(contextId: string | undefined): contextId is string 
 	return Boolean(contextId?.startsWith(BROWSER_CONTEXT_PREFIX));
 }
 
-function browserSnapshotTarget(snapshotId: string | undefined, ref: string | undefined): { contextId: string; backendNodeId?: number } | undefined {
+function browserSnapshotTarget(snapshotId: string | undefined, ref: string | undefined): { contextId: string; backendNodeId?: number; frameRoute?: CdpRemoteFrameRoute } | undefined {
 	if (!snapshotId || !ref) return undefined;
 	const record = savedStates.get(snapshotId);
 	const snapshot = record?.value.kind === "browser" ? record.value.snapshot : undefined;
 	const target = snapshot?.targets.find((candidate) => candidate.ref === ref);
 	if (!snapshot || !target) return undefined;
-	return { contextId: snapshot.contextId, backendNodeId: target.backendNodeId };
+	return { contextId: snapshot.contextId, backendNodeId: target.backendNodeId, frameRoute: target.frameRoute };
 }
 
 function browserContextForOperation(): string | undefined {
@@ -1563,17 +1585,23 @@ async function withBrowserWrite<T>(contextId: string, work: () => Promise<T>): P
 }
 
 function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string, epoch: number, tool: string, base?: { stateId: string; outline: SerializedOutline }): AgentToolResult<BrowserObservationDetails> {
-	savedStates.set({ stateId: browser.snapshotId, resourceKey, epoch, value: { kind: "browser", snapshot: browser, outline: browser.outline } });
+	const { image: _image, ...snapshot } = browser;
+	savedStates.set({ stateId: browser.snapshotId, resourceKey, epoch, value: { kind: "browser", snapshot, outline: browser.outline } });
 	const currentOutline = restoreOutline(browser.outline);
-	const transition = base ? changesBetween(restoreOutline(base.outline), currentOutline) : undefined;
+	const transition = base ? changesBetween(restoreOutline(base.outline), currentOutline, "wire") : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
 	const folded = foldToBudget(currentOutline);
 	const root = { ref: storeBrowserRootRef(browser.contextId), kind: "browser_page" as const, title: browser.title, url: browser.url };
-	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text };
+	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text, diagnostics: browser.diagnostics };
 	const viewText = useDiff
-		? `Changes (${transition!.changedNodeCount}, ${base!.stateId} → ${browser.snapshotId}):\n${renderChanges(transition!.changes) || "(no element changes)"}\nUse stateId ${browser.snapshotId} for subsequent actions and queries.`
+		? `Changes (${transition!.changedNodeCount}, ${base!.stateId} → ${browser.snapshotId}):\n${renderChanges(transition!.changes) || "(no element changes)"}\nUse stateId ${browser.snapshotId} for subsequent actions and queries.${tool === "evaluate_browser" ? " Get action refs from this state; do not reuse refs cached before evaluation." : ""}`
 		: folded.text;
-	return { content: [{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}` }], details };
+	const coverage = browser.diagnostics.accessibilityCoverage;
+	const partial = coverage && (coverage.failed || coverage.framesUnavailable > 0 || coverage.framesTruncated)
+		? `\nAccessibility coverage is partial: ${coverage.framesObserved} embedded frames observed, ${coverage.framesUnavailable} unavailable${coverage.framesTruncated ? ", bounded collection truncated" : ""}${coverage.failed ? ", main tree unavailable" : ""}.` : "";
+	const remoteControls = coverage?.readOnlyFrames
+		? `\n${coverage.readOnlyFrames} cross-process frames observed read-only. Input into these frames is unavailable.` : "";
+	return { content: [{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}${partial}${remoteControls}` }], details };
 }
 
 async function refreshBrowserSnapshot(contextId: string, tool: string, base?: { stateId: string; outline: SerializedOutline }): Promise<AgentToolResult<BrowserObservationDetails>> {
@@ -1719,7 +1747,7 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 			if (!lastSnapshot) throw new Error("Browser wait completed without an observation.");
 			savedStates.set({ stateId: lastSnapshot.snapshotId, resourceKey: state.resourceKey!, epoch: lastEpoch, value: { kind: "browser", snapshot: lastSnapshot, outline: lastSnapshot.outline } });
 			const successorOutline = restoreOutline(lastSnapshot.outline);
-			const transition = changesBetween(restoreOutline(baseSnapshot.outline), successorOutline);
+			const transition = changesBetween(restoreOutline(baseSnapshot.outline), successorOutline, "wire");
 			const useDiff = !transition.useFullView;
 			const renderedOutline = foldToBudget(successorOutline).text;
 			const details: WaitForDetails = { tool: "wait_for", stateId: lastSnapshot.snapshotId, baseStateId: baseSnapshot.snapshotId, view: useDiff ? "diff" : "full", changes: useDiff ? transition.changes : undefined, found, gone: found && gone || undefined, timedOut, nodeCount: lastSnapshot.targets.length, text, role, value, scopeRef, outline: lastSnapshot.outline, renderedOutline };
@@ -1734,7 +1762,9 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 			if (!lastSnapshot) throw new Error(`Browser root '${contextId}' is no longer available. Call find_roots and observe_ui again.`);
 			const present = outlineConditionPresent(restoreOutline(lastSnapshot.outline), condition);
 			if (present !== gone) return finish(true);
-			await sleep(200, signal);
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) break;
+			await sleep(Math.min(200, remaining), signal);
 		} while (Date.now() < deadline);
 		return finish(false, true);
 	}
@@ -1799,10 +1829,21 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	if (isBrowserContextId(browserContextId)) {
 		const targetId = browserContextId.slice(BROWSER_CONTEXT_PREFIX.length);
 		const resourceKey = `cdp:${targetId}`;
-		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(browserContextId));
+		const scheduled = await resourceScheduler.read(resourceKey, async () =>
+			await cdpSnapshotForContext(browserContextId, { includeImage: params.mode !== "semantic" }));
 		const browser = scheduled.value;
+		const image = browser?.image;
 		if (!browser) throw new Error(`Browser context '${browserContextId}' is no longer available. Call find_roots again.`);
-		return browserObservationResult(browser, resourceKey, scheduled.epoch, "observe_ui");
+		if (params.mode !== "semantic" && !image) throw new Error(`Browser viewport capture unavailable for '${browserContextId}'.`);
+		const result = browserObservationResult(browser, resourceKey, scheduled.epoch, "observe_ui");
+		if (image) {
+			result.content.push({ type: "image", mimeType: image.mimeType, data: image.data });
+			result.details.capture = { stateId: browser.snapshotId, width: image.width, height: image.height,
+				cssWidth: image.cssWidth, cssHeight: image.cssHeight, pixelScale: image.pixelScale,
+				coordinateSpace: "browser-viewport-screenshot-pixels" };
+			result.content.push({ type: "text", text: "Captured this CDP page viewport. Browser coordinate actions use CSS pixels; divide image coordinates by capture.pixelScale, or prefer grounded element refs." });
+		}
+		return result;
 	}
 	const state = operationState();
 	const mode = params.mode ?? "fused";
@@ -1817,12 +1858,27 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const imageMode = normalizeImageMode(image);
 	const resourceKey = desktopResourceKey(requestedTarget);
 	let imageError: string | undefined;
+	let imageCompletion: "completed" | "unconfirmed" = "unconfirmed";
+	const observationStarted = performance.now();
+	let semanticObservationMs = 0;
+	let imageObservationMs = 0;
 	const scheduled = await resourceScheduler.read(resourceKey, async (epoch) => {
 		state.resourceKey = resourceKey;
 		state.epoch = epoch;
+		if (imageMode !== "never" && runtimeState.helperDiagnostics?.optionalImageFailure === true) {
+			const imageStarted = performance.now();
+			const combined = await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true, true);
+			imageObservationMs = performance.now() - imageStarted;
+			imageError = combined.look.imageError;
+			imageCompletion = "completed";
+			return combined;
+		}
 		// Publish real semantic evidence first; optional image failure cannot erase it.
+		const semanticStarted = performance.now();
 		const semantic = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, requestedTarget, false);
+		semanticObservationMs = performance.now() - semanticStarted;
 		if (imageMode === "never") return semantic;
+		const imageStarted = performance.now();
 		try {
 			return await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true);
 		} catch (error) {
@@ -1830,9 +1886,12 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 			imageError = (error instanceof Error ? error.message : String(error)).slice(0, 1024);
 			// Native work may still be pending: a returned error is not cancellation completion.
 			return semantic;
+		} finally {
+			imageObservationMs = performance.now() - imageStarted;
 		}
 	});
 	const captureResult = scheduled.value;
+	Object.assign(captureResult.look.timings, { semanticObservationMs, imageObservationMs, observationPipelineMs: performance.now() - observationStarted });
 	// Model @r refs are re-minted on re-resolution, so ref string equality
 	// alone false-positives as drift for the same root; compare stable
 	// identity against the resolved request too.
@@ -1844,8 +1903,8 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const summary = `Observed ${mode} ${captureResult.target.windowRef ? `${captureResult.target.windowRef} ` : ""}${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned the latest outline state.`;
 	const result = await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageError ? "never" : imageMode);
 	if (imageError) {
-		result.details.observation = { status: "semantic_only", readOnly: true, imageError, nativeCompletion: "unconfirmed" };
-		result.content.unshift({ type: "text", text: "Image observation failed; fresh semantic evidence remains valid. Native capture completion is unconfirmed; no image was returned." });
+		result.details.observation = { status: "semantic_only", readOnly: true, imageError, nativeCompletion: imageCompletion };
+		result.content.unshift({ type: "text", text: `Image observation failed; fresh semantic evidence remains valid. Native capture completion: ${imageCompletion}; no image was returned.` });
 	}
 	return result;
 }
@@ -1879,7 +1938,9 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	let matches = ranked.matches;
 	let escalatedOCR = false;
 	const look = state.currentLook;
-	if (shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && state.lastSearchOcrEscalatedLookId !== look.lookId) {
+	// Browser observations have their own CDP resource identity and no native
+	// target HWND. An empty AX tree must not trigger desktop OCR or focus.
+	if (!isBrowserContextId(state.contextId) && shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && state.lastSearchOcrEscalatedLookId !== look.lookId) {
 		state.lastSearchOcrEscalatedLookId = look.lookId;
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		// captureCurrentTarget adopts the new look/outline/capture into
@@ -2221,7 +2282,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}
-			return await buildToolResult("act_ui", `Executed ${executedActions.length} checked UI action${executedActions.length === 1 ? "" : "s"} in ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			return await buildToolResult("act_ui", `${describeActionExecution(executedActions.length, actions.length, execution.outcome ?? "unknown")} Target: ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
 		} catch (error) {
 			if (signal?.aborted) {
 				clearDesktopOperationState(state);
@@ -2251,9 +2312,10 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 	if (condition) conditionScopeNode(restoreOutline(baseSnapshot.outline), condition);
 	const prepared = actions.map((action) => {
 		if (!BROWSER_TRANSACTION_ACTIONS.has(action.action)) throw new Error(`Browser transactions do not support '${action.action}'.`);
-		if (action.action === "click" && action.ref && action.button && action.button !== "left") throw new Error("Browser ref clicks support only the left button; use coordinate clicks for right or middle buttons.");
+		if (action.action === "keypress") validateCdpKeypressKeys(action.keys);
 		const target = browserSnapshotTarget(params.stateId, trimOrUndefined(action.ref));
-		if ((action.action === "press" || action.action === "setText" || (action.action === "click" && action.ref) || (action.action === "typeText" && action.ref)) && !Number.isFinite(target?.backendNodeId)) {
+		if (target?.frameRoute && !["press", "click", "keypress", "setText", "typeText", "scroll"].includes(action.action)) throw new Error("Remote frame references do not support this action.");
+		if ((action.action === "press" || action.action === "setText" || action.action === "keypress" || (action.action === "click" && action.ref) || (action.action === "typeText" && action.ref)) && !Number.isFinite(target?.backendNodeId)) {
 			throw new Error(`Browser ${action.action} requires an actionable @e ref owned by ${params.stateId}.`);
 		}
 		if (action.ref && (!target || target.contextId !== contextId)) throw new Error(`Browser ${action.action} ref must be owned by ${params.stateId}.`);
@@ -2262,18 +2324,22 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 	return await withBrowserWrite(contextId, async () => {
 		for (const { action, target } of prepared) {
 			let worked = false;
-			if (action.action === "press" || (action.action === "click" && action.ref)) {
+			if (action.action === "press" && target?.frameRoute) {
+				worked = await cdpPointerClickForContext(contextId, target.backendNodeId!, "left", action.clickCount ?? 1, target.frameRoute);
+			} else if (action.action === "press") {
 				worked = true;
 				for (let count = 0; count < (action.clickCount ?? 1); count += 1) worked = await cdpClickForContext(contextId, target!.backendNodeId!) && worked;
+			} else if (action.action === "click" && action.ref) {
+				worked = await cdpPointerClickForContext(contextId, target!.backendNodeId!, action.button ?? "left", action.clickCount ?? 1, target!.frameRoute);
 			} else if (action.action === "click") {
 				worked = await cdpMouseForContext(contextId, action.x!, action.y!, "mousePressed", action.button ?? "left", action.clickCount ?? 1)
 					&& await cdpMouseForContext(contextId, action.x!, action.y!, "mouseReleased", action.button ?? "left", action.clickCount ?? 1);
-			} else if (action.action === "setText") worked = await cdpTypeForContext(contextId, target!.backendNodeId!, action.text ?? "", true);
+			} else if (action.action === "setText") worked = await cdpTypeForContext(contextId, target!.backendNodeId!, action.text ?? "", true, target!.frameRoute);
 			else if (action.action === "typeText") worked = target?.backendNodeId
-				? await cdpTypeForContext(contextId, target.backendNodeId, action.text ?? "", false)
+				? await cdpTypeForContext(contextId, target.backendNodeId, action.text ?? "", false, target.frameRoute)
 				: await cdpTypeFocusedForContext(contextId, action.text ?? "");
-			else if (action.action === "keypress") worked = await cdpKeypressForContext(contextId, action.keys ?? []);
-			else if (action.action === "scroll") worked = await cdpScrollForContext(contextId, toFiniteNumber(action.scrollX, 0), toFiniteNumber(action.scrollY, 0), target?.backendNodeId);
+			else if (action.action === "keypress") worked = await cdpKeypressForContext(contextId, action.keys ?? [], target!.backendNodeId!, target!.frameRoute);
+			else if (action.action === "scroll") worked = await cdpScrollForContext(contextId, toFiniteNumber(action.scrollX, 0), toFiniteNumber(action.scrollY, 0), target?.backendNodeId, target?.frameRoute);
 			else if (action.action === "drag") worked = await cdpDragForContext(contextId, normalizeActionPath(action.path));
 			else if (action.action === "moveMouse") worked = await cdpMouseForContext(contextId, action.x!, action.y!, "mouseMoved");
 			if (!worked) throw new Error("The browser root became unavailable during the action transaction. Observe it again.");
@@ -2286,7 +2352,8 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 				if (!snapshot) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
 				const present = outlineConditionPresent(restoreOutline(snapshot.outline), condition);
 				satisfied = present !== condition.gone;
-				if (!satisfied) await sleep(100, signal);
+				const remaining = deadline - Date.now();
+				if (!satisfied && remaining > 0) await sleep(Math.min(100, remaining), signal);
 			} while (!satisfied && Date.now() < deadline);
 			if (!satisfied) throw new Error(`The browser action was delivered but its postcondition was not satisfied within ${condition.timeoutMs}ms.`);
 		}

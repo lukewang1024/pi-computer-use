@@ -1,0 +1,150 @@
+name: Candidate package
+
+# Read-only build validation: no npm publication, tag, release or installation.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-package-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: Candidate helper (${{ matrix.platform }} / ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            arch: x64
+            runner: windows-latest
+            binary: prebuilt/windows/windows-bridge.exe
+          - platform: linux
+            arch: x64
+            runner: ubuntu-latest
+            binary: prebuilt/linux/x64/linux-bridge
+          - platform: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            binary: prebuilt/linux/arm64/linux-bridge
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test Windows helper
+        if: matrix.platform == 'windows'
+        run: cargo test --locked --manifest-path native/windows/bridge-rs/Cargo.toml
+      - name: Build selected source helper
+        run: node scripts/build-native.mjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: candidate-${{ github.sha }}-${{ matrix.platform }}-${{ matrix.arch }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: Assemble and validate exact candidate
+    needs: native
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build universal helper from selected source
+        run: node scripts/build-native.mjs --arch universal --no-sign
+      - name: Assemble candidate app and verify ad-hoc signature
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, pathlib, plistlib, shutil, subprocess
+          root = pathlib.Path('prebuilt/macos/universal')
+          app = root / 'pi-computer-use.app'
+          app.mkdir(parents=True, exist_ok=True)
+          executable = app / 'Contents/MacOS/bridge'
+          executable.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(root / 'bridge', executable)
+          executable.chmod(0o755)
+          version = json.loads(pathlib.Path('package.json').read_text())['version']
+          info = dict(CFBundleIdentifier='com.injaneity.pi-computer-use',
+              CFBundleName='pi-computer-use', CFBundleDisplayName='pi-computer-use',
+              CFBundleExecutable='bridge', CFBundlePackageType='APPL',
+              CFBundleShortVersionString=version, CFBundleVersion=version,
+              LSMinimumSystemVersion='14.0', LSUIElement=True)
+          with (app / 'Contents/Info.plist').open('wb') as stream:
+              plistlib.dump(info, stream)
+          subprocess.run(['codesign', '--force', '--deep', '--sign', '-',
+              '--identifier', 'com.injaneity.pi-computer-use',
+              '--entitlements', 'scripts/pi-computer-use.entitlements', str(app)], check=True)
+          subprocess.run(['codesign', '--verify', '--strict', str(app)], check=True)
+          subprocess.run(['lipo', str(executable), '-verify_arch', 'x86_64', 'arm64'], check=True)
+          PYTHON
+      - uses: actions/download-artifact@v8
+        with:
+          name: candidate-${{ github.sha }}-windows-x64
+          path: prebuilt/windows
+      - uses: actions/download-artifact@v8
+        with:
+          name: candidate-${{ github.sha }}-linux-x64
+          path: prebuilt/linux/x64
+      - uses: actions/download-artifact@v8
+        with:
+          name: candidate-${{ github.sha }}-linux-arm64
+          path: prebuilt/linux/arm64
+      - name: Restore executable modes and run complete checks
+        run: |
+          chmod 755 prebuilt/linux/x64/linux-bridge prebuilt/linux/arm64/linux-bridge
+          npm test
+          npm run test:platform
+          npm run test:windows-scripts
+      - name: Check commit messages
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: npm run test:commits
+      - name: Pack checked candidate and record source and hashes
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+          CANDIDATE_RUN_ID: ${{ github.run_id }}
+        run: |
+          npm pack --ignore-scripts --silent > candidate-tarball.txt
+          node scripts/check-package-assets.mjs "$(tail -n 1 candidate-tarball.txt)"
+          python3 - <<'PYTHON'
+          import hashlib, json, os, pathlib
+          package = pathlib.Path('candidate-tarball.txt').read_text().strip().splitlines()[-1]
+          files = [package,
+              'prebuilt/macos/universal/pi-computer-use.app/Contents/MacOS/bridge',
+              'prebuilt/windows/windows-bridge.exe',
+              'prebuilt/linux/x64/linux-bridge', 'prebuilt/linux/arm64/linux-bridge']
+          receipt = dict(sourceCommit=os.environ['CANDIDATE_SHA'],
+              runId=os.environ['CANDIDATE_RUN_ID'],
+              signing='macOS ad-hoc candidate; not official release signing',
+              published=False, files={name: hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() for name in files})
+          pathlib.Path('candidate-build-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          PYTHON
+      - uses: actions/upload-artifact@v7
+        with:
+          name: checked-candidate-${{ github.sha }}
+          path: |
+            *.tgz
+            candidate-build-receipt.json
+          if-no-files-found: error
+          retention-days: 14

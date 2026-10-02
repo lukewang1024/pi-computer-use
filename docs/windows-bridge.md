@@ -1,6 +1,6 @@
 # Windows Bridge
 
-`windows-bridge.exe` is the native helper for the root-forest Windows backend. It is spawned by the TypeScript helper client and speaks stdin/stdout JSON-lines protocol version **3**.
+`windows-bridge.exe` is the native helper for the root-forest Windows backend. It is spawned by the TypeScript helper client and speaks stdin/stdout JSON-lines protocol version **4**.
 
 ## Backend contract
 
@@ -20,6 +20,8 @@ Windows roots are top-level HWNDs:
 - owned popups => `kind: "popover"`
 - other HWNDs => `kind: "window"`
 
+`metadata.interaction` reports window `enabled`, valid `ownerHwnd`, `ownerEnabled`, and `ownerDisabled` observations. Registered `find_roots` returns these bounded fields as `interaction`, with `disabled` and `owner_disabled` text flags. An enabled owned window can block a disabled document owner. Inspect that exact surface; these fields do not permit redirecting physical input or treating every owned window as modal.
+
 The helper declares per-monitor-v2 DPI awareness at startup and reports `scaleFactor = GetDpiForWindow(hwnd) / 96`.
 
 ## Refs, actions, and deltas
@@ -33,20 +35,20 @@ Observed `@e` refs store UIA RuntimeId and AutomationId metadata. Ref-targeted a
 
 `readText` resolves the live element and reads TextPattern → ValuePattern → CurrentName. `waitFor` polls the live UIA subtree at about 150ms intervals.
 
-Root deltas are baselined at act time. The helper polls a cheap top-level HWND signature for early settle (`deltaSource: "win-poll"`), then takes short catch-up snapshots before returning the final full before/after diff. If no change is seen before the cap, it returns the full snapshot timeout path (`"snapshot"`).
+Root deltas are baselined at act time. Bounded WinEvent observations are combined with HWND snapshots (`deltaSource: "win-event+snapshot"`), with snapshot fallback when events are unavailable.
 
 ## Protocol
 
 Request envelope:
 
 ```json
-{ "protocolVersion": 3, "id": "req_1", "cmd": "listRoots", "args": {} }
+{ "protocolVersion": 4, "id": "req_1", "cmd": "listRoots", "args": {} }
 ```
 
 Response envelope:
 
 ```json
-{ "protocolVersion": 3, "id": "req_1", "ok": true, "result": { } }
+{ "protocolVersion": 4, "id": "req_1", "ok": true, "result": { } }
 ```
 
 Diagnostics (`cmd: "diagnostics"`) returns the protocol version and helper process metadata. The TypeScript backend rejects a mismatched version with a “Restart Pi …” error.
@@ -63,3 +65,16 @@ Diagnostics (`cmd: "diagnostics"`) returns the protocol version and helper proce
 - Local child process only; no service, socket, or network listener.
 - Helper path: `%USERPROFILE%\.pi\agent\helpers\pi-computer-use\windows-bridge.exe`.
 - UIAccess/elevated-window limitations are reported as errors; there is no interactive permission grant loop.
+
+## Word workflow observations
+
+On Word 16.0.20430.20092, the caption dialog exposes its editable field as `document/_WwG`, with text-input capability. Its node value can be empty while `read_text` returns the generated caption prefix. Check actual capabilities and current path instead of assuming all text inputs have role `edit`. A semantic `setText` attempt did not change this field; freshly grounded click, End, and suffix typing did. Preserve the generated prefix and its whitespace.
+
+Word's TextPattern omitted a supplementary emoji that was visible in the current caption image and present in saved OOXML as a symbol with a Unicode text fallback. Repeated text polling did not recover it. This is one observed Word configuration, not a general provider guarantee. When necessary, combine exact textual evidence with independently inspected current visual evidence; do not automatically accept a BMP projection as complete Unicode verification. Verify the saved document's full requested text. Caption sequence fields may appear as `fldSimple` instructions or complex `instrText` fields.
+
+The native picture menu and OfficePLUS can both be named 图片. Resolve the current 插图 group path to distinguish the native entry. Use canonical Windows file paths for the file dialog; a mixed-separator test path was rejected as 文件名无效. A delivered insert action followed by an error dialog is not proof of image insertion.
+
+
+Word's native Accept/Reject split buttons exposed a parent rectangle covering both halves and a default-action child covering the upper half. Parent `press` did not expand the menu. A click in the remaining lower region, computed from freshly inspected rectangles and a current image, opened it. Do not reuse coordinates from a previous observation.
+
+In the tested Word configuration, the menu's `Net UI Tool Window` root had no UIA children although its screenshot showed the menu. The exact menu entries were available under the owning document's UIA tree. After independently confirming the popup's exact owner, one semantic owner-root observation without refocusing found Accept/Reject All Changes. Both saved-document checks passed: acceptance retained the inserted marker; rejection removed it; both removed revision nodes and preserved original contents. These are single-trial observations, not a general provider guarantee.

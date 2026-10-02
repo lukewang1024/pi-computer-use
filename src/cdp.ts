@@ -1049,11 +1049,28 @@ async function cdpPageForContext(contextId: string): Promise<CdpPageTarget | und
 async function cdpPages(): Promise<CdpPageTarget[]> {
 	if (!cdpEnabled()) return [];
 	const port = process.env.PI_COMPUTER_USE_CDP_PORT;
-	const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2_000) });
-	const targets = (await response.json()) as CdpPageTarget[];
-	return targets.filter((target) =>
-		target.type === "page" && target.webSocketDebuggerUrl && isLocalDebuggerWebSocket(target.webSocketDebuggerUrl, port),
-	);
+	return discoverLocalCdpPages(port!);
+}
+
+/** Discovery alone may fall back between numeric loopback families; input is never replayed. */
+export async function discoverLocalCdpPages(port: string): Promise<CdpPageTarget[]> {
+	if (!/^[0-9]+$/.test(port) || Number(port) < 1 || Number(port) > 65535) throw new Error("Invalid CDP port");
+	let lastError: unknown;
+	for (const host of ["127.0.0.1", "[::1]"]) {
+		try {
+			const response = await fetch(`http://${host}:${port}/json/list`, { signal: AbortSignal.timeout(1_000), redirect: "error" });
+			if (!response.ok) throw new Error(`CDP discovery HTTP ${response.status}`);
+			const targets = (await response.json()) as CdpPageTarget[];
+			if (!Array.isArray(targets)) throw new Error("Invalid CDP target list");
+			return targets.filter(target => target.type === "page" && target.webSocketDebuggerUrl && isLocalDebuggerWebSocket(target.webSocketDebuggerUrl, port)).map(target => {
+				const url = new URL(target.webSocketDebuggerUrl!);
+				url.hostname = host;
+				return {...target, webSocketDebuggerUrl: url.toString()};
+			});
+		} catch (error) { lastError = error; }
+	}
+	throw lastError;
+
 }
 
 function cdpContextId(targetId: string): string {

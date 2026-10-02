@@ -1916,13 +1916,11 @@ function currentOutlineOrThrow(stateId?: string): Outline {
 	return outline;
 }
 
-function matchIsNonActionableStatic(match: OutlineSearchMatch): boolean {
-	const node = match.node;
-	return !node.canPress && !node.canFocus && !node.canSetValue && node.actions.length === 0 && !node.pictureOnly;
-}
-
-function shouldEscalateSearchOCR(matches: OutlineSearchMatch[], _text?: string): boolean {
-	return matches.length === 0 || matches.every(matchIsNonActionableStatic);
+function shouldEscalateSearchOCR(matches: OutlineSearchMatch[], text?: string): boolean {
+	// Structural and read-only matches are useful results too. OCR cannot
+	// improve a role-only query, and should not replace an exact cached match
+	// merely because it is not an input control.
+	return Boolean(text) && matches.length === 0;
 }
 
 /** Pure outline query unless a window selector is supplied, in which case current target selection may change. */

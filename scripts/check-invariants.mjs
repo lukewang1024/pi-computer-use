@@ -293,6 +293,7 @@ checkMacos("INV-8 swift typecheck", () => {
 		"native/macos/agent_cursor.swift",
 		"native/macos/agent_cursor_motion.swift",
 		"native/macos/foreground_gate.swift",
+		"native/macos/text_input_source.swift",
 		"native/macos/bridge.swift",
 	], { cwd: root, stdio: "pipe" });
 });

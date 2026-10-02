@@ -148,6 +148,33 @@ private struct ForegroundGateTests {
 		precondition(chord.sink == [.keyDown(0, modifiers: [55])])
 		assertPartial(chord.result, count: 1, keys: [0, 55])
 
+		var transient = gateReport(ForegroundActualIdentity(pid: correct.pid, windowId: nil), focused: false)
+		transient.secondDiagnostics = ["mappingStage": "ax_read_failed"]
+		precondition(shouldReobserveForegroundRead(transient))
+		transient.frontmostPidStable = false
+		precondition(!shouldReobserveForegroundRead(transient), "foreground PID races must stop")
+		transient = gateReport(ForegroundActualIdentity(pid: 888, windowId: nil), focused: false)
+		transient.secondDiagnostics = ["mappingStage": "ax_read_failed"]
+		precondition(!shouldReobserveForegroundRead(transient), "another application must stop")
+		precondition(!shouldReobserveForegroundRead(gateReport(ForegroundActualIdentity(pid: correct.pid, windowId: 999), focused: false)), "resolved same-PID wrong window must stop")
+		precondition(!shouldReobserveForegroundRead(gateReport(correct)))
+		transient = gateReport(ForegroundActualIdentity(pid: correct.pid, windowId: nil), focused: false)
+		transient.firstActual = ForegroundActualIdentity(pid: correct.pid, windowId: 999)
+		transient.secondDiagnostics = ["mappingStage": "ax_read_failed"]
+		precondition(!shouldReobserveForegroundRead(transient), "a resolved wrong first window cannot be hidden by a later transient read")
+		let boundFrame = CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 800, height: 600))
+		let candidate = FocusedCGCandidateSnapshot(windowId: target.windowId, ownerPid: target.pid, frame: boundFrame, title: "Owned", isOnscreen: true)
+		func bound(_ matches: Bool = true, role: String = "AXWindow", frame: CGRect? = CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 800, height: 600)), candidates: [FocusedCGCandidateSnapshot]? = nil) -> FocusedMappingDecision? {
+			decideBoundFocusedMapping(focusMatchesTarget: matches, focusedRole: role, target: target, frame: frame, title: "Owned", candidates: candidates ?? [candidate])
+		}
+		precondition(bound()?.selectedWindowId == target.windowId)
+		precondition(bound(false) == nil, "same PID does not establish exact focused AX identity")
+		precondition(bound(role: "AXGroup") == nil)
+		precondition(bound(frame: nil)?.selectedWindowId == nil)
+		precondition(bound(candidates: [candidate, candidate])?.selectedWindowId == nil)
+		precondition(bound(candidates: [FocusedCGCandidateSnapshot(windowId: target.windowId + 1, ownerPid: target.pid, frame: boundFrame, title: "Owned", isOnscreen: true)])?.selectedWindowId == nil)
+		precondition(bound(candidates: [FocusedCGCandidateSnapshot(windowId: target.windowId, ownerPid: 888, frame: boundFrame, title: "Owned", isOnscreen: true)])?.selectedWindowId == nil)
+		precondition(bound(candidates: [FocusedCGCandidateSnapshot(windowId: target.windowId, ownerPid: target.pid, frame: boundFrame, title: "Owned", isOnscreen: false)])?.selectedWindowId == nil)
 		print("native foreground gate tests passed")
 	}
 }

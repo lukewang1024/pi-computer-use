@@ -96,7 +96,7 @@ jobs:
               '--identifier', 'com.injaneity.pi-computer-use',
               '--entitlements', 'scripts/pi-computer-use.entitlements', str(app)], check=True)
           subprocess.run(['codesign', '--verify', '--strict', str(app)], check=True)
-          subprocess.run(['lipo', '-verify_arch', 'x86_64', 'arm64', str(executable)], check=True)
+          subprocess.run(['lipo', str(executable), '-verify_arch', 'x86_64', 'arm64'], check=True)
           PYTHON
       - uses: actions/download-artifact@v8
         with:

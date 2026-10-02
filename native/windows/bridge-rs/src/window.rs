@@ -51,6 +51,13 @@ pub fn classify_browser(process_name: &str) -> (bool, Option<&'static str>) {
     }
 }
 
+// Office creates visible top-level HWNDs solely to draw its window borders.
+// They are not application roots, even when they share the document's PID.
+#[cfg(any(windows, test))]
+fn is_presentation_window(class_name: &str) -> bool {
+    class_name.eq_ignore_ascii_case("MSO_BORDEREFFECT_WINDOW_CLASS")
+}
+
 // ---------------------------------------------------------------------------
 // Window enumeration
 // ---------------------------------------------------------------------------
@@ -87,8 +94,6 @@ pub fn list_windows(store: &mut RefStore, filter_pid: Option<u64>) -> Result<Val
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-use std::{thread, time::Duration};
-#[cfg(windows)]
 use windows::core::PWSTR;
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT, TRUE};
@@ -101,12 +106,14 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 #[cfg(windows)]
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 #[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SetForegroundWindow, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
-    EVENT_OBJECT_HIDE, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWL_EXSTYLE, GW_OWNER, MSG,
-    WINEVENT_OUTOFCONTEXT, WS_EX_DLGMODALFRAME,
+    IsWindow, IsWindowVisible, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
+    EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWL_EXSTYLE, GW_OWNER, MSG, WINEVENT_OUTOFCONTEXT,
+    WS_EX_DLGMODALFRAME,
 };
 
 #[cfg(windows)]
@@ -264,6 +271,20 @@ unsafe extern "system" fn root_event_callback(
     }
 }
 
+// Interaction relationships are observations, not permission to redirect input.
+// Custom Office dialogs may block their owner without using #32770.
+#[cfg(windows)]
+unsafe fn interaction_metadata(hwnd: HWND, owner: Option<HWND>) -> Value {
+    let owner = owner.filter(|owner| !owner.0.is_null() && IsWindow(*owner).as_bool());
+    let owner_enabled = owner.map(|owner| IsWindowEnabled(owner).as_bool());
+    json!({
+        "enabled": IsWindowEnabled(hwnd).as_bool(),
+        "ownerHwnd": owner.map(|owner| owner.0 as isize),
+        "ownerEnabled": owner_enabled,
+        "ownerDisabled": owner_enabled.map(|enabled| !enabled),
+    })
+}
+
 #[cfg(windows)]
 unsafe fn event_root_payload(hwnd: HWND, pid: u32) -> Value {
     let class_name = get_window_class(hwnd);
@@ -285,7 +306,7 @@ unsafe fn event_root_payload(hwnd: HWND, pid: u32) -> Value {
         "pid": pid,
         "windowId": hwnd.0 as isize,
         "isModal": class_name == "#32770" || (ex_style & WS_EX_DLGMODALFRAME.0) != 0,
-        "metadata": { "className": class_name, "exStyle": ex_style }
+        "metadata": { "className": class_name, "exStyle": ex_style, "interaction": interaction_metadata(hwnd, owner) }
     })
 }
 
@@ -385,6 +406,11 @@ fn list_windows_impl(
             continue;
         }
 
+        let class_name = unsafe { get_window_class(hwnd) };
+        if is_presentation_window(&class_name) {
+            continue;
+        }
+
         let title = unsafe { get_window_title(hwnd) };
         let mut pid = 0u32;
         unsafe {
@@ -403,7 +429,6 @@ fn list_windows_impl(
             String::new()
         };
         let bounds = unsafe { get_window_bounds_json(hwnd) };
-        let class_name = unsafe { get_window_class(hwnd) };
         let (is_browser, browser_family) = classify_browser(&process_name);
         let wref = store.insert_window(NativeHandle::new(hwnd.0 as isize));
         let dpi = unsafe { GetDpiForWindow(hwnd) };
@@ -444,7 +469,7 @@ fn list_windows_impl(
             "isMinimized": is_minimized,
             "isOnscreen": !is_minimized,
             "isModal": is_modal,
-            "metadata": { "className": class_name, "exStyle": ex_style, "isBrowser": is_browser, "browserFamily": browser_family },
+            "metadata": { "className": class_name, "exStyle": ex_style, "isBrowser": is_browser, "browserFamily": browser_family, "interaction": unsafe { interaction_metadata(hwnd, owner) } },
             "isBrowser": is_browser,
             "browserFamily": browser_family,
         }));
@@ -479,11 +504,12 @@ pub fn foreground_pid() -> Option<u64> {
 pub fn focus_window(
     store: &RefStore,
     target_ref: &crate::refs::WindowRef,
+    expected_pid: u64,
 ) -> Result<Value, ProtocolError> {
     #[cfg(not(windows))]
     {
         let _ = store;
-        let _ = target_ref;
+        let _ = (target_ref, expected_pid);
         Err(ProtocolError::new(
             "Window focus is only supported on Windows",
             ErrorCode::UnsupportedPlatform,
@@ -499,19 +525,55 @@ pub fn focus_window(
             )
         })?;
         let hwnd = HWND(native.raw() as *mut _);
-        let already_focused = unsafe { GetForegroundWindow() == hwnd };
-        let focused = already_focused || unsafe { SetForegroundWindow(hwnd).as_bool() };
-        Ok(json!({ "focused": focused, "alreadyFocused": already_focused }))
+        crate::foreground::activate(hwnd.0 as isize, expected_pid)
+    }
+}
+
+/// Reject image coordinates whose source window moved or resized. The caller
+/// must obtain a fresh look; never compensate an old point against a new frame.
+pub fn require_capture_bounds(
+    hwnd: isize,
+    expected_pid: u64,
+    expected: (f64, f64, f64, f64),
+) -> Result<(), ProtocolError> {
+    require_foreground(hwnd, expected_pid)?;
+    #[cfg(not(windows))]
+    {
+        let _ = expected;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(HWND(hwnd as *mut _), &mut rect) }.map_err(|_| {
+            ProtocolError::new(
+                "Captured window bounds are unavailable; physical input was not sent",
+                ErrorCode::StaleLook,
+            )
+        })?;
+        let actual = (
+            rect.left as f64,
+            rect.top as f64,
+            (rect.right - rect.left) as f64,
+            (rect.bottom - rect.top) as f64,
+        );
+        if actual != expected {
+            return Err(ProtocolError::new(
+                format!("Target moved or resized since the captured look; physical input was not sent; captured={expected:?}; current={actual:?}"),
+                ErrorCode::StaleLook,
+            ));
+        }
+        Ok(())
     }
 }
 
 /// Bring an HWND to the foreground and confirm ownership before physical input.
 /// Windows can reject SetForegroundWindow, so success is based on observation,
 /// not the API's advisory return value.
-pub fn ensure_foreground(hwnd: isize) -> Result<(), ProtocolError> {
+pub fn require_foreground(hwnd: isize, expected_pid: u64) -> Result<(), ProtocolError> {
     #[cfg(not(windows))]
     {
-        let _ = hwnd;
+        let _ = (hwnd, expected_pid);
         Err(ProtocolError::new(
             "Window focus is only supported on Windows",
             ErrorCode::UnsupportedPlatform,
@@ -519,20 +581,31 @@ pub fn ensure_foreground(hwnd: isize) -> Result<(), ProtocolError> {
     }
     #[cfg(windows)]
     {
-        let target = HWND(hwnd as *mut _);
-        for _ in 0..4 {
-            if unsafe { GetForegroundWindow() == target } {
-                return Ok(());
-            }
-            let _ = unsafe { SetForegroundWindow(target) };
-            thread::sleep(Duration::from_millis(20));
-        }
-        if unsafe { GetForegroundWindow() == target } {
+        crate::foreground::require_foreground(hwnd, expected_pid)
+    }
+}
+
+pub fn ensure_foreground(hwnd: isize, expected_pid: u64) -> Result<(), ProtocolError> {
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, expected_pid);
+        Err(ProtocolError::new(
+            "Window focus is only supported on Windows",
+            ErrorCode::UnsupportedPlatform,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let result = crate::foreground::activate(hwnd, expected_pid)?;
+        if result["focused"] == true {
             Ok(())
         } else {
             Err(ProtocolError::new(
-                "Windows refused to foreground the target; physical input was not sent",
-                ErrorCode::TargetNotFound,
+                format!(
+                    "Windows refused to foreground the target; physical input was not sent: {}",
+                    result
+                ),
+                ErrorCode::ForegroundRequired,
             ))
         }
     }
@@ -545,7 +618,23 @@ pub fn ensure_foreground(hwnd: isize) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    #[cfg(not(windows))]
     use crate::error::ErrorCode;
+
+    #[test]
+    fn excludes_office_border_hwnds_without_excluding_document_or_helper_windows() {
+        assert!(is_presentation_window("MSO_BORDEREFFECT_WINDOW_CLASS"));
+        assert!(is_presentation_window("mso_bordereffect_window_class"));
+        for class in [
+            "OpusApp",
+            "Chrome_WidgetWin_1",
+            "AssistantViewV2",
+            "#32770",
+            "",
+        ] {
+            assert!(!is_presentation_window(class), "{class}");
+        }
+    }
 
     // -- Browser classification (cross-platform) ----------------------------
 

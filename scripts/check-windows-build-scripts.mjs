@@ -198,7 +198,7 @@ console.log(`\n${LABEL} build-native.mjs (no args, platform detection)`);
     tapMatch(result.stdout, /Building .*native helper|Built .*helper/, "builds macOS helper on darwin");
   } else {
     tap(result.code, 0, "no-args exits 0 on Linux");
-    tapMatch(result.stdout, /Skipping native build/, "prints platform-skip message");
+    tapMatch(result.stdout, /Building Linux helper/, "builds Linux helper on linux");
   }
 }
 
@@ -255,6 +255,10 @@ console.log(`\n${LABEL} setup-helper.mjs (no args, platform detection)`);
     const combined = result.stderr + result.stdout;
     tap(/installed|current|unavailable|EPERM/i.test(combined) || signedSourceRefused, true, "reports exact install or fail-closed unsigned-source status");
     if (signedSourceRefused) tap(fs.existsSync(TEST_HELPER_APP), false, "refused source never creates installed app");
+  } else if (process.platform === "linux") {
+    const prebuilt = fs.existsSync(path.join(ROOT, "prebuilt", "linux", process.arch, "linux-bridge"));
+    tap(result.code, prebuilt ? 0 : 1, "Linux auto-detection respects actual prebuilt availability");
+    tapMatch(result.stdout + result.stderr, prebuilt ? /installed|current/i : /No Linux prebuilt helper found/, "reports Linux installation or exact missing-prebuilt error");
   } else {
     tap(result.code, 1, "no-args exits 1 on non-Windows/non-macOS");
     tapMatch(result.stderr, /only supported on macOS/, "prints macOS-only error");
@@ -276,6 +280,9 @@ console.log(`\n${LABEL} setup-helper.mjs --postinstall (platform detection)`);
     tap(result.code, 0, "--postinstall exits 0 on macOS");
     const combined = result.stderr + result.stdout;
     tap(/installed|current|unavailable|skipped|EPERM/i.test(combined), true, "prints macOS install/current/sandbox status");
+  } else if (process.platform === "linux") {
+    tap(result.code, 0, "--postinstall exits 0 on Linux");
+    tapMatch(result.stdout + result.stderr, /installed|current|skipped/i, "reports Linux postinstall outcome");
   } else {
     tap(result.code, 0, "--postinstall exits 0 on non-Windows/non-macOS");
     tapMatch(result.stderr, /skipping helper setup/, "prints skip warning");

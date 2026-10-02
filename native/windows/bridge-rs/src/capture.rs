@@ -88,7 +88,7 @@ use windows::Win32::Foundation::{HWND, RECT};
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HGDIOBJ,
     SRCCOPY,
 };
 #[cfg(windows)]
@@ -123,6 +123,7 @@ fn screenshot_impl(
     include_elements: bool,
     max_dimension: Option<u32>,
 ) -> Result<Value, ProtocolError> {
+    let image_started = std::time::Instant::now();
     // 1. Look up the window handle.
     let native = store.get_window(target_ref).ok_or_else(|| {
         ProtocolError::new(
@@ -141,7 +142,7 @@ fn screenshot_impl(
     }
 
     // 3. Get the window rect so we know capture dimensions.
-    let (x, y, width, height) = unsafe {
+    let (mut x, mut y, mut width, mut height) = unsafe {
         let mut rect = RECT::default();
         if GetWindowRect(hwnd, &mut rect).is_err() {
             return Err(ProtocolError::new(
@@ -177,8 +178,30 @@ fn screenshot_impl(
     // SAFETY: All GDI objects are created and destroyed within this
     // function.  Object lifetimes follow the Acquire → Use → Release
     // pattern with proper cleanup on every error path.
-    let (png_base64, output_width, output_height) =
-        unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension) }?;
+    // Restoring a GPU window can expose its iconic bounds or an unpainted
+    // surface briefly. Retry only capture failures on an available target,
+    // refreshing geometry each time; never accept a blank image as success.
+    let mut captured = unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension) };
+    for _ in 0..3 {
+        if captured.is_ok() || crate::foreground::capture_state(hwnd.0 as isize)["eligible"] != true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(75));
+        unsafe {
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect).is_err() || IsIconic(hwnd).as_bool() {
+                break;
+            }
+            x = rect.left;
+            y = rect.top;
+            width = (rect.right - rect.left).max(0);
+            height = (rect.bottom - rect.top).max(0);
+        }
+        if width == 0 || height == 0 { break; }
+        captured = unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension) };
+    }
+    let (png_base64, output_width, output_height) = captured?;
+    let image_capture_ms = image_started.elapsed().as_millis() as u64;
 
     let state_id = StateId::fresh("s");
 
@@ -189,6 +212,7 @@ fn screenshot_impl(
             "stateId": state_id,
             "x": x,
             "y": y,
+            "sourceBounds": { "x": x, "y": y, "width": width, "height": height },
             "width": output_width,
             "height": output_height,
             "imageFormat": "png",
@@ -198,6 +222,7 @@ fn screenshot_impl(
     });
 
     // 5. Optionally extract UIA accessibility elements.
+    let uia_started = std::time::Instant::now();
     if include_elements {
         let elements = crate::uia::extract_elements(store, hwnd.0 as isize);
         if !elements.is_empty() {
@@ -206,6 +231,12 @@ fn screenshot_impl(
             }
         }
     }
+
+    result["timings"] = json!({
+        "imageCaptureMs": image_capture_ms,
+        "uiaExtractionMs": uia_started.elapsed().as_millis() as u64,
+        "uiaExtractionRequested": include_elements,
+    });
 
     Ok(result)
 }
@@ -284,6 +315,8 @@ unsafe fn gdi_capture_to_base64(
     let buf_size = (width as usize) * (height as usize) * 4;
     let mut bits: Vec<u8> = vec![0u8; buf_size];
 
+    // GetDIBits requires the bitmap to be deselected from every DC.
+    SelectObject(hdc_mem, old_bitmap);
     let mut dib_ok = GetDIBits(
         hdc_mem,
         hbitmap,
@@ -297,14 +330,21 @@ unsafe fn gdi_capture_to_base64(
     // PrintWindow can succeed with uniform black, white, or gray GPU surfaces.
     // Fall back to compositor-visible pixels when it carries no useful detail.
     let print_window_blank = is_effectively_blank_bgra(&bits);
+    let mut fallback_result = None;
+    let mut fallback_gate = None;
     if !pw_ok.as_bool() || dib_ok == 0 || print_window_blank {
-        let screen_dc = GetDC(HWND(std::ptr::null_mut()));
+        let mut screen_read_ok = false;
+        let gate = crate::foreground::capture_state(hwnd.0 as isize);
+        let screen_dc = if gate["focused"] == true { GetDC(HWND(std::ptr::null_mut())) } else { HDC::default() };
+        fallback_gate = Some(gate.clone());
+        SelectObject(hdc_mem, hbitmap);
         if !screen_dc.is_invalid()
             && BitBlt(
                 hdc_mem, 0, 0, width, height, screen_dc, window_x, window_y, SRCCOPY,
             )
             .is_ok()
         {
+            SelectObject(hdc_mem, old_bitmap);
             dib_ok = GetDIBits(
                 hdc_mem,
                 hbitmap,
@@ -314,7 +354,18 @@ unsafe fn gdi_capture_to_base64(
                 &mut bmi,
                 DIB_RGB_COLORS,
             );
+            let after = crate::foreground::capture_state(hwnd.0 as isize);
+            let mut rect = RECT::default();
+            let geometry_matches = GetWindowRect(hwnd, &mut rect).is_ok()
+                && (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+                    == (window_x, window_y, width, height);
+            screen_read_ok = dib_ok == height && after["focused"] == true
+                && after["target"]["pid"] == gate["target"]["pid"]
+                && after["target"]["threadId"] == gate["target"]["threadId"]
+                && geometry_matches;
+            fallback_gate = Some(json!({"before":gate,"after":after,"geometryMatches":geometry_matches}));
         }
+        fallback_result = Some(screen_read_ok && !is_effectively_blank_bgra(&bits));
         if !screen_dc.is_invalid() {
             ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
         }
@@ -326,13 +377,19 @@ unsafe fn gdi_capture_to_base64(
     let _ = DeleteDC(hdc_mem);
     ReleaseDC(hwnd, hdc_window);
 
-    if dib_ok == 0 {
+    if dib_ok != height {
         return Err(ProtocolError::new(
             "GetDIBits failed to retrieve bitmap data",
             ErrorCode::CaptureFailed,
         ));
     }
 
+    if fallback_result == Some(false) {
+        return Err(ProtocolError::new(
+            format!("Window capture has no useful pixels: hwnd={}, PrintWindow={}, printWindowBlank={}, screenFallbackValid=false, foregroundGate={}; this is capture evidence, not a product white-screen diagnosis", hwnd.0 as isize, pw_ok.as_bool(), print_window_blank, serde_json::to_string(&fallback_gate).unwrap_or_default()),
+            ErrorCode::CaptureFailed,
+        ));
+    }
     bgrx_to_opaque_rgba(&mut bits);
 
     let source_width = width as u32;

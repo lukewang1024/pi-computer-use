@@ -15,7 +15,14 @@ assert.deepEqual(
 	helperSourceRelativePaths,
 	"the real LOCAL_BUILD source path resolver must map exactly to the package's complete Swift source manifest",
 );
+const requiredPrebuilt = [
+	"prebuilt/macos/universal/pi-computer-use.app/Contents/MacOS/bridge",
+	"prebuilt/windows/windows-bridge.exe",
+	"prebuilt/linux/x64/linux-bridge",
+	"prebuilt/linux/arm64/linux-bridge",
+];
 const expected = [
+	...requiredPrebuilt,
 	...await listFiles(path.join(rootDir, "prebuilt"), "prebuilt"),
 	...helperSourceRelativePaths,
 ].map((file) => `package/${file}`);

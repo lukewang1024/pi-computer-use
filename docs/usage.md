@@ -74,6 +74,16 @@ condition means the requested end state holds, but is not evidence that the
 action caused it. Use `ref` for one exact element or `scopeRef` for a subtree;
 role-only conditions must be scoped, and value checks require an exact `ref`.
 
+For CDP browser pages, `press` invokes the element's JavaScript activation.
+`click` with an exact reference instead sends browser pointer events, including
+right/middle buttons and double/triple clicks. It resolves current layout and
+checks that the hit element belongs to the referenced target before dispatch.
+A disabled, detached, covered or moving target rejects pointer delivery.
+Repeated clicks recheck the target between clicks: a failure can mean the first
+click already occurred, so inspect the resulting state and never replay the
+whole action automatically. Semantic `press` events are untrusted and do not
+provide evidence of a physical interaction or an INP measurement.
+
 Batch steps only when the second step does not need to inspect the result of the first:
 
 ```ts

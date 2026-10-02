@@ -1,105 +1,37 @@
-import assert from "node:assert/strict";
-import { ensurePermissions, requestPermissions } from "../src/permissions.ts";
-
-const requestOption = "Request missing macOS permissions";
-const grantedStatus = { accessibility: true, screenRecording: true };
-const missingStatus = { accessibility: false, screenRecording: false };
-let status = missingStatus;
-let registerCount = 0;
-let openPaneCount = 0;
-let restartCount = 0;
-let selectCount = 0;
-let notifyCount = 0;
-let selectedOption = requestOption;
-
-const bridge = {
-	kinds: [
-		{ kind: "accessibility", openOption: "Open Accessibility Settings (missing)" },
-		{ kind: "screenRecording", openOption: "Open Screen Recording Settings (missing)" },
-	],
-	copy: {
-		nonInteractiveError: () => "Use the explicit permission command in an interactive session.",
-		prompt: () => "Choose an explicit permission action.",
-		incompleteError: () => "Permissions are missing; readiness did not request them.",
-		requestOption,
-		recheckOption: "Recheck permissions (restart helper)",
-		readyMessage: "ready",
-		stillMissing: () => "still missing",
-	},
-	async checkPermissions() {
-		return status;
-	},
-	async registerPermissions() {
-		registerCount += 1;
-		status = grantedStatus;
-	},
-	async openPermissionPane() {
-		openPaneCount += 1;
-	},
-	async restartHelper() {
-		restartCount += 1;
-	},
-};
-
-function context({ hasUI = true } = {}) {
-	return {
-		hasUI,
-		ui: {
-			async select(_prompt, options) {
-				selectCount += 1;
-				assert(options.includes(selectedOption), "explicit option should be presented");
-				return selectedOption;
-			},
-			notify() {
-				notifyCount += 1;
-			},
-		},
-	};
+// Newly authored regressions for the current permission readiness contract.
+import assert from 'node:assert/strict';
+import {ensurePermissions,requestPermissions} from '../src/permissions.ts';
+let status={accessibility:false,screenRecording:false},choice='Cancel';
+const calls=[];
+const bridge={kinds:[{kind:'accessibility',openOption:'Open accessibility'},{kind:'screenRecording',openOption:'Open recording'}],
+ copy:{nonInteractiveError:()=> 'Missing permissions in noninteractive mode',incompleteError:()=> 'Missing permissions',prompt:()=> 'Permission prompt',requestOption:'Request',recheckOption:'Recheck',readyMessage:'Ready',stillMissing:()=> 'Still missing'},
+ async checkPermissions(){calls.push('check');return {...status};},
+ async registerPermissions(){calls.push('register');},
+ async openPermissionPane(kind){calls.push('open:'+kind);},
+ async restartHelper(){calls.push('restart');status={accessibility:true,screenRecording:true};}};
+const ui={async select(){calls.push('select');return choice;},notify(){calls.push('notify');}};
+for(const hasUI of [false,true]){
+ calls.length=0;
+ await assert.rejects(()=>ensurePermissions({hasUI,ui},bridge,'helper'),/Missing permissions/);
+ assert.deepEqual(calls,['check'],'readiness must not register, restart, prompt or open settings');
 }
-
-for (let session = 0; session < 3; session += 1) {
-	status = missingStatus;
-	await assert.rejects(
-		ensurePermissions(context(), bridge, "/test/pi-computer-use.app"),
-		/Permissions are missing; readiness did not request them\./,
-		`missing permissions in session ${session + 1} should return an actionable error`,
-	);
-}
-	assert.equal(registerCount, 0, "ordinary readiness across sessions must never register permissions");
-	assert.equal(openPaneCount, 0, "ordinary readiness must never open System Settings");
-	assert.equal(restartCount, 0, "ordinary readiness must never restart the helper");
-assert.equal(selectCount, 0, "ordinary readiness must not show a permission selection prompt");
-
-await assert.rejects(
-	ensurePermissions(context({ hasUI: false }), bridge, "/test/pi-computer-use.app"),
-	/explicit permission command/,
-);
-assert.equal(registerCount, 0, "headless readiness must not request permissions");
-
-status = missingStatus;
-selectedOption = requestOption;
-const afterExplicitRequest = await requestPermissions(context(), bridge, "/test/pi-computer-use.app");
-assert.deepEqual(afterExplicitRequest, grantedStatus);
-assert.equal(registerCount, 1, "the explicit request choice should issue exactly one request");
-assert.equal(selectCount, 1, "the explicit permission command should show one action choice");
-assert.equal(notifyCount, 1, "successful explicit request should notify readiness");
-
-status = missingStatus;
-selectedOption = "Open Accessibility Settings (missing)";
-await requestPermissions(context(), bridge, "/test/pi-computer-use.app");
-assert.equal(registerCount, 1, "opening Settings must not invoke permission request APIs");
-assert.equal(openPaneCount, 1, "an explicit Settings action opens only the selected pane");
-
-status = missingStatus;
-selectedOption = "Cancel";
-await requestPermissions(context(), bridge, "/test/pi-computer-use.app");
-assert.equal(registerCount, 1, "cancel must not invoke permission request APIs");
-assert.equal(openPaneCount, 1, "cancel must not open System Settings");
-
-status = missingStatus;
-selectedOption = "Recheck permissions (restart helper)";
-await requestPermissions(context(), bridge, "/test/pi-computer-use.app");
-assert.equal(registerCount, 1, "recheck must not invoke permission request APIs");
-assert.equal(restartCount, 1, "only an explicit recheck action restarts the helper");
-
-console.log("[check-permission-readiness] passive readiness and explicit permission actions passed");
+status={accessibility:true,screenRecording:false};
+await assert.rejects(()=>ensurePermissions({hasUI:false},bridge,'helper'),/Missing/);
+status={accessibility:true,screenRecording:true,source:{attribution:'caller',pid:99}};
+assert.deepEqual(await ensurePermissions({hasUI:false},bridge,'helper'),status);
+status={accessibility:false,screenRecording:false};calls.length=0;
+await requestPermissions({hasUI:true,ui},bridge,'helper');
+assert.deepEqual(calls,['check','select'],'cancelling must preserve helper/settings');
+choice='Recheck';calls.length=0;
+assert.equal((await requestPermissions({hasUI:true,ui},bridge,'helper')).screenRecording,true);
+assert.deepEqual(calls,['check','select','restart','check','notify']);
+status={accessibility:false,screenRecording:false};choice='Request';calls.length=0;
+await requestPermissions({hasUI:true,ui},bridge,'helper');
+assert.deepEqual(calls,['check','select','register','check','notify']);
+choice='Open recording';calls.length=0;
+await requestPermissions({hasUI:true,ui},bridge,'helper');
+assert.deepEqual(calls,['check','select','open:screenRecording','check','notify']);
+const controller=new AbortController();controller.abort();calls.length=0;
+await assert.rejects(()=>requestPermissions({hasUI:true,ui},bridge,'helper',controller.signal),/aborted/);
+assert(!calls.some(c=>c==='select'||c==='register'||c==='restart'||c.startsWith('open:')));
+console.log('Permission readiness regression checks passed (new coverage; no input or settings changes)');

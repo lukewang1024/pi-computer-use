@@ -111,7 +111,7 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 	},
 	async getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult> {
 		const roots = parseRoots(await windowsHelper.command("listRoots", {}, { signal }));
-		const focused = roots.find((root) => root.isFocused) ?? roots[0];
+		const focused = roots.find((root) => root.isFocused);
 		if (!focused?.pid) throw new Error("No frontmost window was available.");
 		return { appName: focused.appName ?? "Unknown", bundleId: focused.bundleId, pid: focused.pid, windowTitle: focused.title, windowId: focused.windowId, rootRef: focused.rootRef };
 	},
@@ -119,7 +119,7 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 		return await windowsHelper.command<PlatformFocusWindowResult>("focusWindow", { ...target }, { signal });
 	},
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
-		return parseLookResponse(await windowsHelper.command("look", { ...request.target, baseLookId: request.baseLookId, maxDimension: request.maxDimension, readText: request.readText, scopeRef: request.scopeRef, includeImage: request.includeImage }, options));
+		return parseLookResponse(await windowsHelper.command("look", { ...request.target, baseLookId: request.baseLookId, maxDimension: request.maxDimension, readText: request.readText, scopeRef: request.scopeRef, includeImage: request.includeImage, allowImageFailure: request.allowImageFailure }, options));
 	},
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
 		return await windowsHelper.command<HelperActResult>("act", helperAction(request), options);

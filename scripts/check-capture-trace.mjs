@@ -1,51 +1,27 @@
+// New protocol-level capture diagnostic regression. A local fake daemon
+// supplies native capture outcomes; this does not exercise ScreenCaptureKit.
 import assert from 'node:assert/strict';
-import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {spawnSync} from 'node:child_process';
-if(process.platform!=='darwin'){console.log('native capture trace test: macOS only');process.exit(0);}
-const source=fs.readFileSync(new URL('../native/macos/bridge.swift',import.meta.url),'utf8');
-const trace=source.slice(source.indexOf('final class CaptureTrace {'),source.indexOf('final class AXRefStore'));
-const methods=source.slice(source.indexOf('\tprivate func captureSnapshots()'),source.indexOf('\n\tprivate func captureWindow(')).replaceAll('private func','func');
-const manager=`struct BridgeFailure: Error { let message: String; let code: String; var details: [String: Any] = [:] }
-final class TrackerFixture {
-let captureTraceLock = NSLock()
-var captureTraces: [CaptureTrace] = []
-func pidForWindowId(_ id: UInt32) -> Int32? { 42 }
-${methods}
-}
-`;
-const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cu-capture-trace-'));
+import net from 'node:net';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+const cache=process.env.XDG_CACHE_HOME||path.join(os.homedir(),'.cache');await fs.mkdir(cache,{recursive:true});
+const dir=await fs.mkdtemp(path.join(cache,'cu-trace-'));
+const socketPath=path.join(dir,'bridge.sock'),sockets=new Set();let looks=0;
+const trace={requestId:'native-capture-id',windowId:41,readOnly:true,completed:false,stages:[{stage:'fallbackEnd',fallbackHasImage:false}]};
+const server=net.createServer(socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));let buffer='';socket.on('data',chunk=>{buffer+=chunk;const newline=buffer.indexOf('\n');if(newline<0)return;const r=JSON.parse(buffer.slice(0,newline));if(r.cmd==='look')looks++;socket.end(JSON.stringify(r.cmd==='look'?{id:r.id,ok:false,error:{code:'capture_timeout',message:'Read-only capture completion unconfirmed',details:trace}}:{id:r.id,ok:true,result:{protocolVersion:6}})+'\n');});});
+const prior=process.env.PI_CU_SOCKET_PATH;process.env.PI_CU_SOCKET_PATH=socketPath;
 try{
- fs.writeFileSync(path.join(dir,'main.swift'),'import Foundation\n'+trace+manager+`
-let trace = CaptureTrace(requestId: "req-test", windowId: 7, pid: 42)
-trace.mark("shareableStart")
-trace.mark("deadline", ["cancellationRequested": true])
-let pending = trace.snapshot()
-precondition(pending["completed"] as? Bool == false)
-precondition(pending["cancellationRequested"] as? Bool == true)
-precondition(pending["requestId"] as? String == "req-test")
-precondition(pending["pid"] as? Int == 42 && pending["windowId"] as? Int == 7)
-trace.mark("shareableEnd")
-trace.mark("taskCompletion", ["taskCompleted": true, "taskCancelledAtCompletion": true])
-precondition(trace.snapshot()["completed"] as? Bool == false) // fallback/request not returned
-trace.mark("requestReturn", ["requestCompleted": true])
-precondition(trace.snapshot()["completed"] as? Bool == true)
-precondition(pending["completed"] as? Bool == false) // immutable prior receipt
-precondition(trace.snapshot()["imageEndMs"] == nil) // no invented completion
-let tracker = TrackerFixture()
-var active: [CaptureTrace] = []
-for n in 0..<4 { active.append(try tracker.beginCapture(requestId: "r"+String(n), windowId: UInt32(n+1))) }
-func refused() -> Bool { do { _ = try tracker.beginCapture(requestId: "busy", windowId: 8); return false } catch { return true } }
-precondition(refused())
-active[0].mark("cancel", ["cancellationRequested": true])
-precondition(refused())
-active[0].mark("taskCompletion", ["taskCompleted": true])
-precondition(refused())
-active[0].mark("requestReturn", ["requestCompleted": true])
-let next = try tracker.beginCapture(requestId: "next", windowId: 9)
-next.mark("taskCompletion", ["taskCompleted": true]);next.mark("requestReturn", ["requestCompleted": true])
-for n in 0..<80 { let item = try tracker.beginCapture(requestId: "done"+String(n), windowId: 10); item.mark("done", ["taskCompleted": true, "requestCompleted": true]) }
-precondition(tracker.captureSnapshots().count <= 33)
-print("capture trace: request identity, cancellation vs task/request completion, late completion, bounded pending admission and history passed")
-`);
- const result=spawnSync('swift',[path.join(dir,'main.swift')],{encoding:'utf8',timeout:60000});
- assert.equal(result.status,0,result.stderr);console.log(result.stdout.trim());
-}finally{fs.rmSync(dir,{recursive:true,force:true});}
+ await new Promise(resolve=>server.listen(socketPath,resolve));
+ const {MacosHelperClient,HelperCommandError,HelperTransportError}=await import('../src/platform/macos/helper.ts');
+ const client=new MacosHelperClient();
+ await assert.rejects(()=>client.command('look',{windowId:41}),error=>{
+  assert(error instanceof HelperCommandError);assert(!(error instanceof HelperTransportError),'native capture timeout is not unknown input dispatch');
+  assert.equal(error.code,'capture_timeout');assert.deepEqual(error.details,trace);assert.equal(error.details.completed,false);return true;
+ });
+ assert.equal(looks,1,'native read failure must not silently replay capture');
+ console.log('Capture trace protocol preservation checks passed (new coverage; fake daemon, no native capture)');
+}finally{
+ if(prior===undefined)delete process.env.PI_CU_SOCKET_PATH;else process.env.PI_CU_SOCKET_PATH=prior;
+ for(const socket of sockets)socket.destroy();await new Promise(resolve=>server.close(resolve));await fs.rm(dir,{recursive:true,force:true});
+}

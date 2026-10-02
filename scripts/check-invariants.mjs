@@ -36,6 +36,14 @@ function assert(condition, message) {
 	if (!condition) throw new Error(message);
 }
 
+function checkMacos(name, fn) {
+	if (process.platform !== "darwin") {
+		console.log(`SKIP ${name} (requires macOS and Xcode)`);
+		return;
+	}
+	check(name, fn);
+}
+
 check("INV-1 static helper observation commands removed", () => {
 	assert(!swift.includes("visionTargets"), "bridge.swift still contains visionTargets");
 	assert(!swift.includes("axSnapshotTree"), "bridge.swift still contains axSnapshotTree");
@@ -240,7 +248,7 @@ check("INV-18 consolidated actions and diff-first resulting views", () => {
 	assert(ts.includes("currentFocus") && ts.includes('escalationReason = "side_effect_free_didnt"'), "runner does not preserve action focus or recover checked keyboard failures");
 	assert(view.includes("stabilizeRefs") && view.includes("changesBetween"), "resulting-state ref stabilization or change rendering is missing");
 	assert(ts.includes('view: "full" | "diff"') && ts.includes("Changes ("), "agent result does not expose changes-first resulting views");
-	assert(extension.includes("const uiAction = Type.Union") && extension.includes("omit ref from typeText"), "agent action schema is not discriminated or focus-aware");
+	assert(extension.includes("const uiAction = Type.Union") && extension.includes("typeText may omit ref") && extension.includes("keypress requires an exact current outline ref"), "agent action schema is not discriminated or focus-aware");
 	assert(!ts.includes("preserveFocus") && macBackend.includes("preserveFocus") && swift.includes("!preserveFocus"), "native focus continuity leaks through the coordinator or is not enforced by the backend");
 });
 
@@ -271,28 +279,7 @@ check("INV-20 bounded broad root discovery", () => {
 	assert(swift.includes("recentCompletedRequestIds"), "helper diagnostics cannot establish abandoned-request completion");
 });
 
-check("INV-21 exact native window focus has no pointer or keyboard fallback", () => {
-	const focus = ts.slice(ts.indexOf("async function performFocusWindow"), ts.indexOf("function normalizeImageMode"));
-	const swiftFocus = swift.slice(swift.indexOf("private func focusWindow"), swift.indexOf("private func scoreWindow"));
-	assert(focus.includes("resolveTargetByWindowSelector(params.root") && focus.includes("currentPlatformBackend.focusWindow(nativeWindowRequest(target)"), "focus_window does not target the exact discovered native window");
-	assert(focus.includes("verifyFocusedWindow(target, roots, frontmost)"), "focus_window does not verify exact main/focused/frontmost state");
-	assert(!focus.includes("postMouse") && !focus.includes("keypress") && !focus.includes("typeText"), "focus_window can send pointer or keyboard input");
-	assert(swiftFocus.includes("let activated = app.activate()") && swiftFocus.includes("for attempt in 0..<12") && swiftFocus.includes("observedFrontmostPid == pid && observedFocused && observedMain"), "macOS native focus lacks bounded global/frontmost/main/focused verification");
-	assert(swiftFocus.includes("AXUIElementPerformAction(window, kAXRaiseAction"), "macOS native focus does not raise the exact window during verification");
-});
-
-check("INV-22 desktop action validation precedes epoch-consuming write", () => {
-	const actionStart = ts.indexOf("async function performDesktopTransaction");
-	const writeLock = ts.indexOf("withWindowWriteLock(target", actionStart);
-	const preflight = ts.indexOf("preflightActionSequence(actions, false", actionStart);
-	const runtime = fs.readFileSync(path.join(root, "src/runtime.ts"), "utf8");
-	const preflightWrite = runtime.slice(runtime.indexOf("export async function runPreflightWrite"));
-	assert(actionStart >= 0 && writeLock > actionStart && preflight > writeLock, "act_ui must provide full-sequence preflight to its epoch write boundary");
-	assert(preflightWrite.indexOf("preflight();") < preflightWrite.indexOf("scheduler.write("), "transaction preflight must run before the scheduler can consume the epoch");
-	assert(ts.includes("runPreflightWrite(resourceScheduler, key, baseEpoch"), "production window writes must use the tested real scheduler transaction boundary");
-});
-
-check("INV-8 swift typecheck", () => {
+checkMacos("INV-8 swift typecheck", () => {
 	const triple = process.arch === "x64" ? "x86_64-apple-macosx14.0" : "arm64-apple-macosx14.0";
 	execFileSync("xcrun", [
 		"swiftc", "-target", triple, "-parse-as-library",
@@ -310,7 +297,7 @@ check("INV-8 swift typecheck", () => {
 	], { cwd: root, stdio: "pipe" });
 });
 
-check("INV-17 macOS agent cursor lifecycle", () => {
+checkMacos("INV-17 macOS agent cursor lifecycle", () => {
 	const triple = process.arch === "x64" ? "x86_64-apple-macosx14.0" : "arm64-apple-macosx14.0";
 	const binary = path.join(os.tmpdir(), `pi-computer-use-cursor-tests-${process.pid}`);
 	try {

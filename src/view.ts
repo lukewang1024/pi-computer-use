@@ -100,23 +100,34 @@ function refPath(node: OutlineNode): string[] {
 	return refs;
 }
 
-export function changesBetween(base: Outline, next: Outline): OutlineDiff {
+export function changesBetween(base: Outline, next: Outline, identity: "ref" | "wire" = "ref"): OutlineDiff {
 	if (base.root.role !== next.root.role || base.root.subrole !== next.root.subrole) {
 		return { changes: [], changedNodeCount: next.nodes.length, fullNodeCount: next.nodes.length, useFullView: true, reason: "root_replaced" };
 	}
-	const before = new Map(base.nodes.map((node) => [node.ref, node]));
-	const after = new Map(next.nodes.map((node) => [node.ref, node]));
+	const key = (node: OutlineNode, root: OutlineNode) => identity === "wire" ? (node === root ? "root" : `wire:${node.wireRef || node.ref}`) : node.ref;
+	const before = new Map(base.nodes.map((node) => [key(node, base.root), node]));
+	const after = new Map(next.nodes.map((node) => [key(node, next.root), node]));
 	const changes: OutlineChange[] = [];
+	let structureChanged = false;
 	for (const node of next.nodes) {
-		const previous = before.get(node.ref);
+		const previous = before.get(key(node, next.root));
 		if (!previous) changes.push({ type: "added", ref: node.ref, parent: node.parent?.ref, node: { ...serializeOutlineNode(node), children: [] } });
 		else {
+			if (identity === "wire") {
+				const oldParent = previous.parent ? key(previous.parent, base.root) : undefined;
+				const newParent = node.parent ? key(node.parent, next.root) : undefined;
+				const oldChildren = previous.children.map(child => key(child, base.root));
+				const newChildren = node.children.map(child => key(child, next.root));
+				const newChildKeys = new Set(newChildren);
+				const reordered = oldChildren.length === newChildren.length && oldChildren.every(child => newChildKeys.has(child)) && oldChildren.some((child, index) => child !== newChildren[index]);
+				structureChanged ||= oldParent !== newParent || reordered;
+			}
 			const fields = changedFields(previous, node);
 			if (Object.keys(fields).length > 0) changes.push({ type: "updated", ref: node.ref, path: refPath(node), fields });
 		}
 	}
-	for (const node of base.nodes) if (!after.has(node.ref)) changes.push({ type: "removed", ref: node.ref, parent: node.parent?.ref });
-	const identityConfidence = next.nodes.length === 0 ? 1 : next.nodes.filter((node) => before.has(node.ref)).length / next.nodes.length;
+	for (const node of base.nodes) if (!after.has(key(node, base.root))) changes.push({ type: "removed", ref: node.ref, parent: node.parent?.ref });
+	const identityConfidence = next.nodes.length === 0 ? 1 : next.nodes.filter((node) => before.has(key(node, next.root))).length / next.nodes.length;
 	const changeRatio = changes.length / Math.max(1, Math.max(base.nodes.length, next.nodes.length));
 	const identityLow = next.nodes.length > 8 && identityConfidence < 0.4;
 	const overBudget = changes.length > 100 || (changes.length > 20 && changeRatio > 0.65);
@@ -124,8 +135,8 @@ export function changesBetween(base: Outline, next: Outline): OutlineDiff {
 		changes,
 		changedNodeCount: changes.length,
 		fullNodeCount: next.nodes.length,
-		useFullView: identityLow || overBudget,
-		reason: identityLow ? "identity_confidence_low" : overBudget ? "change_budget_exceeded" : undefined,
+		useFullView: structureChanged || identityLow || overBudget,
+		reason: structureChanged ? "structure_changed" : identityLow ? "identity_confidence_low" : overBudget ? "change_budget_exceeded" : undefined,
 	};
 }
 

@@ -46,6 +46,7 @@ export interface OutlineNode {
 
 export interface Outline {
 	lookId: string;
+	refHighWaterMark?: number;
 	root: OutlineNode;
 	nodes: OutlineNode[];
 	refToWireRef: Map<string, string>;
@@ -121,6 +122,7 @@ export type SerializedOutlineNode = Omit<OutlineNode, "parent" | "children"> & {
 
 export interface SerializedOutline {
 	lookId: string;
+	refHighWaterMark?: number;
 	root: SerializedOutlineNode;
 }
 
@@ -506,7 +508,7 @@ export function countOutlineNodes(root: OutlineNode): number {
 }
 
 export function serializeOutline(outline: Outline): SerializedOutline {
-	return { lookId: outline.lookId, root: serializeOutlineNode(outline.root) };
+	return { lookId: outline.lookId, refHighWaterMark: outline.refHighWaterMark, root: serializeOutlineNode(outline.root) };
 }
 
 export function serializeOutlineNode(node: OutlineNode): SerializedOutlineNode {
@@ -534,7 +536,7 @@ export function restoreOutline(serialized: SerializedOutline): Outline {
 		return node;
 	};
 	const root = restoreNode(serialized.root);
-	return { lookId: serialized.lookId, root, nodes, refToWireRef, wireRefToRef };
+	return { lookId: serialized.lookId, refHighWaterMark: serialized.refHighWaterMark, root, nodes, refToWireRef, wireRefToRef };
 }
 
 function outlineRefNumber(ref: string): number {
@@ -588,24 +590,14 @@ function copyNodeFields(target: OutlineNode, source: OutlineNode, preserveWireRe
 	target.focused = source.focused;
 	target.offscreen = source.offscreen;
 	target.pictureOnly = source.pictureOnly;
-	target.truncated = false;
+	target.truncated = source.truncated;
 	target.scrollExtent = source.scrollExtent ? { ...source.scrollExtent } : undefined;
 	target.text = source.text.map((text) => ({ ...text, rect: text.rect ? { ...text.rect } : undefined }));
-}
-
-function preserveUnreused(node: OutlineNode, parent: OutlineNode, used: Set<OutlineNode>): OutlineNode | undefined {
-	if (used.has(node)) return undefined;
-	node.parent = parent;
-	node.children = node.children
-		.map((child) => preserveUnreused(child, node, used))
-		.filter((child): child is OutlineNode => Boolean(child));
-	return node;
 }
 
 function cloneForGraft(source: OutlineNode, parent: OutlineNode, nextRef: () => string, reusableByWireRef: Map<string, OutlineNode>, used: Set<OutlineNode>): OutlineNode {
 	const existing = source.wireRef ? reusableByWireRef.get(source.wireRef) : undefined;
 	if (existing) used.add(existing);
-	const oldChildren = existing?.children ?? [];
 	const node: OutlineNode = existing ?? {
 		...source,
 		ref: nextRef(),
@@ -618,10 +610,9 @@ function cloneForGraft(source: OutlineNode, parent: OutlineNode, nextRef: () => 
 	copyNodeFields(node, source, Boolean(existing));
 	node.parent = parent;
 	const graftedChildren = source.children.map((child) => cloneForGraft(child, node, nextRef, reusableByWireRef, used));
-	const preservedChildren = oldChildren
-		.map((child) => preserveUnreused(child, node, used))
-		.filter((child): child is OutlineNode => Boolean(child));
-	node.children = [...graftedChildren, ...preservedChildren];
+	// A fresh scoped observation replaces its descendants. Missing nodes may have
+	// been removed or replaced; retaining them creates stale searchable references.
+	node.children = graftedChildren;
 	return node;
 }
 
@@ -635,18 +626,15 @@ export function graftScopedOutline(outline: Outline, targetRef: string, scoped: 
 		for (const child of node.children) collect(child);
 	};
 	collect(target);
-	let nextNumber = Math.max(...outline.nodes.map((node) => outlineRefNumber(node.ref)), 0) + 1;
+	let nextNumber = Math.max(...outline.nodes.map((node) => outlineRefNumber(node.ref)), outline.refHighWaterMark ?? 0) + 1;
 	const nextRef = () => `@e${nextNumber++}`;
-	const oldChildren = target.children;
 	const used = new Set<OutlineNode>([target]);
 	copyNodeFields(target, scoped.root, true);
 	target.ref = targetRef;
 	target.rect = targetRect;
 	const graftedChildren = scoped.root.children.map((child) => cloneForGraft(child, target, nextRef, reusableByWireRef, used));
-	const preservedChildren = oldChildren
-		.map((child) => preserveUnreused(child, target, used))
-		.filter((child): child is OutlineNode => Boolean(child));
-	target.children = [...graftedChildren, ...preservedChildren];
+	target.children = graftedChildren;
+	outline.refHighWaterMark = nextNumber - 1;
 	for (const child of target.children) clearScopedRects(child);
 	rebuildIndexes(outline);
 	return target;

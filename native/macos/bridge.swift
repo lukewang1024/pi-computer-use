@@ -5,6 +5,7 @@ import Darwin
 import Vision
 import ImageIO
 import ScreenCaptureKit
+import Carbon
 
 struct BridgeFailure: Error {
 	let message: String
@@ -684,6 +685,8 @@ final class Bridge {
 				return try act(request)
 			} catch let failure as ForegroundGateFailure {
 				return foregroundRejectedActResult(details: failure.details)
+			} catch let failure as TextInputSourceDispatchFailure {
+				return textInputSourceRejectedActResult(failure.inputDispatch)
 			}
 		case "actBatch":
 			return try actBatch(request)
@@ -2345,6 +2348,10 @@ final class Bridge {
 				steps.append(foregroundRejectedActResult(details: failure.details))
 				stoppedAt = index
 				break
+			} catch let failure as TextInputSourceDispatchFailure {
+				steps.append(textInputSourceRejectedActResult(failure.inputDispatch))
+				stoppedAt = index
+				break
 			}
 		}
 		let outcomes = steps.compactMap { $0["outcome"] as? String }
@@ -3528,7 +3535,7 @@ final class Bridge {
 		return (element, resolution.windowId, resolution.windowRef)
 	}
 
-	private func focusedWindowResolution(pid: Int32, focused suppliedFocused: AXUIElement? = nil) -> FocusedWindowResolution {
+	private func focusedWindowResolution(pid: Int32, focused suppliedFocused: AXUIElement? = nil, physicalTarget: PhysicalInputTarget? = nil) -> FocusedWindowResolution {
 		let started = DispatchTime.now().uptimeNanoseconds
 		let app = AXUIElementCreateApplication(pid)
 		AXUIElementSetMessagingTimeout(app, 0.25)
@@ -3538,6 +3545,27 @@ final class Bridge {
 			: .success
 		let focused = suppliedFocused ?? focusedValue.flatMap(asAXElement)
 		let focusedElapsed = elapsedMilliseconds(since: started)
+		// The physical target is already bound to an exact AX window and CG ID.
+		// Re-read focused AX identity, geometry, title and CG ownership instead of
+		// enumerating every window/sheet on each key-down and key-up.
+		if focusedStatus == .success, let focused, let physicalTarget, physicalTarget.pid == pid, let bound = physicalTarget.axWindow {
+			let candidates = cgWindowCandidates(pid: pid).map {
+				FocusedCGCandidateSnapshot(windowId: $0.windowId, ownerPid: pid, frame: $0.bounds, title: $0.title, isOnscreen: $0.isOnscreen)
+			}
+			if let decision = decideBoundFocusedMapping(focusMatchesTarget: sameElement(focused, bound),
+				focusedRole: stringAttribute(focused, attribute: kAXRoleAttribute as CFString) ?? "",
+				target: ForegroundTargetIdentity(pid: pid, windowId: physicalTarget.windowId),
+				frame: strictFrameForWindow(focused), title: stringAttribute(focused, attribute: kAXTitleAttribute as CFString), candidates: candidates) {
+				let verifiedId = decision.selectedWindowId.flatMap { windowInfo(windowId: $0)?.pid == pid ? $0 : nil }
+				var diagnostics = decision.diagnostics
+				diagnostics["boundTarget"] = true
+				diagnostics["focusedReadStatus"] = Int(focusedStatus.rawValue)
+				diagnostics["focusedReadMs"] = focusedElapsed
+				diagnostics["selectedCgPresent"] = verifiedId != nil
+				diagnostics["elapsedMs"] = elapsedMilliseconds(since: started)
+				return FocusedWindowResolution(element: focused, windowId: verifiedId, windowRef: nil, diagnostics: diagnostics)
+			}
+		}
 		var windowsValue: AnyObject?
 		let windowsStarted = DispatchTime.now().uptimeNanoseconds
 		let windowsStatus = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsValue)
@@ -3617,8 +3645,31 @@ final class Bridge {
 			)
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
+		let report = foregroundReport(target: target)
+		// AppKit views can ignore pid-targeted events, so verified foreground
+		// input is posted globally only after the exact PID and window recheck.
+		guard dispatchForegroundEventIfVerified(report, event: foregroundInputEvent(event), dispatch: target.dispatchState, emit: {
+			event.post(tap: .cghidEventTap)
+		}) else {
+			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState))
+		}
+	}
+
+	private func foregroundReport(target: PhysicalInputTarget) -> ForegroundGateReport {
+		var report = readForegroundReport(target: target)
+		for _ in 0..<2 {
+			guard shouldReobserveForegroundRead(report) else { break }
+			// Only repeat observation; this event has not been posted. A different
+			// foreground application or a resolved wrong window stops immediately.
+			usleep(20_000)
+			report = readForegroundReport(target: target)
+		}
+		return report
+	}
+
+	private func readForegroundReport(target: PhysicalInputTarget) -> ForegroundGateReport {
 		let firstPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
-		let firstResolution = firstPid.map { focusedWindowResolution(pid: $0) }
+		let firstResolution = firstPid.map { focusedWindowResolution(pid: $0, physicalTarget: target) }
 		let firstFocused = firstResolution?.element
 		let firstActual = ForegroundActualIdentity(pid: firstPid, windowId: firstResolution?.windowId)
 		let firstFocusedMatches = firstFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
@@ -3629,7 +3680,7 @@ final class Bridge {
 		// races immediately before emit; this cannot make the OS operation atomic.
 		let secondPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
 		let secondTargetIsMain = target.axWindow.flatMap { boolAttribute($0, attribute: kAXMainAttribute as CFString) } ?? false
-		let secondResolution = secondPid.map { focusedWindowResolution(pid: $0) }
+		let secondResolution = secondPid.map { focusedWindowResolution(pid: $0, physicalTarget: target) }
 		let secondFocused = secondResolution?.element
 		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
 		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
@@ -3644,13 +3695,7 @@ final class Bridge {
 			firstDiagnostics: firstResolution?.diagnostics,
 			secondDiagnostics: secondResolution?.diagnostics
 		)
-		// AppKit views can ignore pid-targeted events, so verified foreground
-		// input is posted globally only after the exact PID and window recheck.
-		guard dispatchForegroundEventIfVerified(report, event: foregroundInputEvent(event), dispatch: target.dispatchState, emit: {
-			event.post(tap: .cghidEventTap)
-		}) else {
-			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState))
-		}
+		return report
 	}
 
 	private func foregroundInputEvent(_ event: CGEvent) -> ForegroundInputEvent {
@@ -3951,7 +3996,41 @@ final class Bridge {
 	private func postUnicodeText(_ text: String, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
+		if text.isEmpty { return }
+		let wordText = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier?.lowercased() == "com.microsoft.word"
+		if wordText, text.unicodeScalars.contains(where: { $0.value < 32 && ![9, 10, 13].contains($0.value) }) {
+			throw BridgeFailure(message: "Word text contains an unsupported control character; text was not sent", code: "invalid_args")
+		}
+		// Physical ASCII key codes depend on the input source. A composing IME
+		// can transform even an ASCII marker and consume synthesized Unicode.
+		// Escalate before posting anything, then select a canonical layout only
+		// while the exact foreground target owns physical input.
+		if delivery != "hid", wordText || !canonicalTextInputSourceId(currentTextInputSourceId()) {
+			throw BridgeFailure(message: "Exact text with the active input source requires foreground delivery", code: "foreground_required")
+		}
+		if delivery == "hid" {
+			guard let target else { throw BridgeFailure(message: "Exact foreground text has no target identity", code: "input_source_unavailable") }
+			let report = foregroundReport(target: target)
+			guard report.verified else { throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState)) }
+		}
+		let sourceLease = delivery == "hid" ? try acquireTextInputSourceLease() : nil
+		defer { sourceLease?.restoreIfOwned() }
+		if wordText {
+			// Word accepts Unicode text payloads. Use bounded chunks to avoid
+			// hundreds of accessibility/foreground walks for one paragraph.
+			for event in exactWordTextEvents(text) {
+				do { try sourceLease?.assertOwned() }
+				catch { throw TextInputSourceDispatchFailure(inputDispatch: target?.dispatchState.details ?? [:]) }
+				switch event {
+				case let .unicode(chunk): try postAtomicUnicodeText(chunk, pid: pid, target: target, delivery: delivery)
+				case let .key(key): try postKey(key, flags: [], pid: pid, target: target, delivery: delivery)
+				}
+			}
+			return
+		}
 		for scalar in text.unicodeScalars {
+			do { try sourceLease?.assertOwned() }
+			catch { throw TextInputSourceDispatchFailure(inputDispatch: target?.dispatchState.details ?? [:]) }
 			let char = String(scalar)
 			if let stroke = physicalKeyStroke(for: char) {
 				try postKey(stroke.key, flags: stroke.flags, pid: pid, target: target, delivery: delivery)
@@ -3967,6 +4046,42 @@ final class Bridge {
 			try postEvent(down, pid: pid, target: target, delivery: delivery)
 			try postEvent(up, pid: pid, target: target, delivery: delivery)
 			usleep(8_000)
+		}
+	}
+
+	private func currentTextInputSourceId() -> String? {
+		guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
+		return textInputSourceId(source)
+	}
+
+	private func textInputSourceId(_ source: TISInputSource) -> String? {
+		guard let value = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
+		return Unmanaged<CFString>.fromOpaque(value).takeUnretainedValue() as String
+	}
+
+	private func canonicalTextInputSourceId(_ id: String?) -> Bool {
+		return id == "com.apple.keylayout.US" || id == "com.apple.keylayout.ABC"
+	}
+
+	private func acquireTextInputSourceLease() throws -> TextInputSourceLease {
+		guard let original = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(), let originalId = textInputSourceId(original),
+			let list = TISCreateInputSourceList(nil, false)?.takeRetainedValue()
+		else { throw BridgeFailure(message: "The interactive keyboard input source is unavailable", code: "input_source_unavailable") }
+		var sources: [String: TISInputSource] = [originalId: original]
+		for index in 0..<CFArrayGetCount(list) {
+			guard let pointer = CFArrayGetValueAtIndex(list, index) else { continue }
+			let source = Unmanaged<TISInputSource>.fromOpaque(pointer).takeUnretainedValue()
+			if let id = textInputSourceId(source), canonicalTextInputSourceId(id) { sources[id] = source }
+		}
+		guard let selectedId = canonicalTextInputSourceId(originalId) ? originalId : ["com.apple.keylayout.ABC", "com.apple.keylayout.US"].first(where: { sources[$0] != nil })
+		else { throw BridgeFailure(message: "No standard US/ABC keyboard layout is available; text was not sent", code: "input_source_unavailable") }
+		do {
+			return try TextInputSourceLease(original: originalId, selected: selectedId, current: { self.currentTextInputSourceId() }, select: { id in
+				guard let source = sources[id] else { return false }
+				return TISSelectInputSource(source) == noErr
+			})
+		} catch {
+			throw BridgeFailure(message: "Could not acquire the standard keyboard layout; text was not sent", code: "input_source_unavailable")
 		}
 	}
 

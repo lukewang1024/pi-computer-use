@@ -36,7 +36,7 @@ def main():
             if hashlib.sha256(archive.extractfile('package/' + name).read()).hexdigest() != digest:
                 raise RuntimeError('packaged helper digest mismatch: ' + name)
         for name in ['src/bridge.ts', 'scripts/setup-helper.mjs', 'src/platform/macos/helper-path.mjs',
-                     'native/macos/foreground_gate.swift', 'native/macos/bridge.swift',
+                     'native/macos/foreground_gate.swift', 'native/macos/text_input_source.swift', 'native/macos/bridge.swift',
                      'native/macos/agent_cursor.swift', 'native/macos/agent_cursor_motion.swift']:
             if archive.extractfile('package/' + name).read() != (ROOT / name).read_bytes():
                 raise RuntimeError('packaged source mismatch: ' + name)

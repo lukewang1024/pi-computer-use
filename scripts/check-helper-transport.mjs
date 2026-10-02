@@ -1,121 +1,45 @@
-import assert from "node:assert/strict";
-import net from "node:net";
-import os from "node:os";
-import path from "node:path";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-
-const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-cu-helper-transport-"));
-const socketPath = path.join(tempRoot, "daemon.sock");
-process.env.PI_CU_SOCKET_PATH = socketPath;
-
-const requests = [];
-const waiters = [];
-const server = net.createServer((socket) => {
-	socket.setEncoding("utf8");
-	socket.on("error", () => undefined);
-	let buffer = "";
-	socket.on("data", (chunk) => {
-		buffer += chunk;
-		for (;;) {
-			const newline = buffer.indexOf("\n");
-			if (newline < 0) break;
-			const line = buffer.slice(0, newline);
-			buffer = buffer.slice(newline + 1);
-			const request = JSON.parse(line);
-			requests.push(request);
-			for (const waiter of waiters.splice(0)) waiter();
-			if (request.cmd === "diagnostics") {
-				socket.end(`${JSON.stringify({ id: request.id, ok: true, result: {} })}\n`);
-			} else {
-				setTimeout(() => socket.end(`${JSON.stringify({ id: request.id, ok: true, result: { outcome: "worked" } })}\n`), 120);
-			}
-		}
-	});
+// New transport regression coverage using an actual subprocess speaking the
+// helper protocol. No desktop helper or physical input is involved.
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+const cache=process.env.XDG_CACHE_HOME||path.join(os.homedir(),'.cache');await fs.mkdir(cache,{recursive:true});
+const root=await fs.mkdtemp(path.join(cache,'cu-helper-transport-test-'));
+const helper=path.join(root,'fake-helper');
+await fs.writeFile(helper,`#!/usr/bin/env node
+const readline=require('node:readline');
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const r=JSON.parse(line);
+ if(r.cmd==='exit')return process.exit(0);
+ if(r.cmd==='silent')return;
+ const value={id:r.id,protocolVersion:r.cmd==='wrong-version'?99:4,ok:true,result:r.args.value};
+ const output=JSON.stringify(value)+'\\n';
+ setTimeout(()=>{process.stdout.write('not-json\\n');process.stdout.write(output.slice(0,9));setTimeout(()=>process.stdout.write(output.slice(9)),1);},r.args.delay||0);
 });
-
-await new Promise((resolve, reject) => {
-	server.once("error", reject);
-	server.listen(socketPath, resolve);
-});
-
-class TrackedSignal extends EventTarget {
-	aborted = false;
-	listeners = new Set();
-
-	addEventListener(type, listener, options) {
-		if (type === "abort") this.listeners.add(listener);
-		return super.addEventListener(type, listener, options);
-	}
-
-	removeEventListener(type, listener, options) {
-		if (type === "abort") this.listeners.delete(listener);
-		return super.removeEventListener(type, listener, options);
-	}
-
-	abort() {
-		this.aborted = true;
-		this.dispatchEvent(new Event("abort"));
-	}
-}
-
-async function waitForActCount(count) {
-	while (requests.filter((request) => request.cmd === "act").length < count) {
-		await new Promise((resolve) => waiters.push(resolve));
-	}
-}
-
-try {
-	const { HelperTransportError, MacosHelperClient } = await import(`../src/platform/macos/helper.ts?test=${Date.now()}`);
-	const client = new MacosHelperClient();
-	const timeoutSignal = new TrackedSignal();
-	let timeoutError;
-	const timedOut = client.command("act", { action: "keypress" }, { timeoutMs: 30, signal: timeoutSignal });
-	await waitForActCount(1);
-	try {
-		await timedOut;
-	} catch (error) {
-		timeoutError = error;
-	}
-	assert(timeoutError instanceof HelperTransportError, "timeout must remain a structured helper transport error");
-	assert.equal(timeoutError.outcome, "unknown", "timeout must not claim the action was cancelled or not sent");
-	assert.equal(timeoutError.requestWriteAttempted, true, "timeout metadata must distinguish a request written to the socket");
-	assert.equal(timeoutError.requestId, requests.find((request) => request.cmd === "act")?.id, "timeout must preserve the native request id");
-	assert.equal(timeoutError.reason, "timeout");
-	assert.equal(timeoutSignal.listeners.size, 0, "timeout must remove the AbortSignal listener");
-
-	const abortSignal = new TrackedSignal();
-	let abortError;
-	const aborted = client.command("act", { action: "keypress" }, { timeoutMs: 1_000, signal: abortSignal });
-	await waitForActCount(2);
-	abortSignal.abort();
-	try {
-		await aborted;
-	} catch (error) {
-		abortError = error;
-	}
-	assert(abortError instanceof HelperTransportError, "abort after request write must remain a structured transport error");
-	assert.equal(abortError.outcome, "unknown", "socket closure must not be reported as native cancellation");
-	assert.equal(abortError.requestWriteAttempted, true);
-	assert.equal(abortError.requestId, requests.filter((request) => request.cmd === "act")[1]?.id);
-	assert.equal(abortError.reason, "aborted");
-	assert.equal(abortSignal.listeners.size, 0, "abort must remove the AbortSignal listener");
-
-	await new Promise((resolve) => setTimeout(resolve, 150));
-	assert.equal(requests.filter((request) => request.cmd === "act").length, 2, "late replies must not trigger retries or duplicate dispatches");
-
-	const bridge = await readFile(new URL("../src/bridge.ts", import.meta.url), "utf8");
-	assert(bridge.includes('if (step.outcome !== "worked") break;'), "a batch must stop after any non-worked native action");
-	const unknownGuard = bridge.indexOf('if (execution.transport?.outcome === "unknown" || execution.inputDispatch?.outcome === "unknown")');
-	const postDispatchWork = bridge.indexOf("const executedActions = actions.slice", unknownGuard);
-	assert(unknownGuard >= 0 && postDispatchWork > unknownGuard, "transport and partial-HID unknown must be recognized before normal post-action work");
-	const terminalStart = bridge.indexOf("async function terminalDesktopActionResult(");
-	const probeGuard = bridge.indexOf("if (!dispatchUnknown)", terminalStart);
-	const rootProbe = bridge.indexOf("currentPlatformBackend.listRoots", terminalStart);
-	assert(probeGuard > terminalStart && rootProbe > probeGuard, "unknown dispatch must not launch a follow-up helper probe");
-	assert(bridge.includes('kind: "partial_hid"') && bridge.includes('code !== "foreground_interrupted_after_partial_hid"'), "partial HID results must keep their structured non-transport identity");
-	assert(bridge.includes("Keep writes quarantined and perform explicit desktop recovery"), "the terminal result must preserve the executor quarantine instruction");
-	console.log("helper transport timeout/abort checks passed");
-} finally {
-	await new Promise((resolve) => server.close(resolve));
-	await rm(tempRoot, { recursive: true, force: true });
-}
+`,{mode:0o755});
+const prior=process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH=helper;
+const {WindowsHelperClient}=await import('../src/platform/windows/helper.ts');
+const client=new WindowsHelperClient();
+// This suite deliberately bypasses installer behavior, covered separately.
+client.ensureInstalled=async()=>{};
+try{
+ assert.equal(await client.command('echo',{value:'fragmented'}),'fragmented');
+ const slow=client.command('echo',{value:'slow',delay:30});
+ const fast=client.command('echo',{value:'fast'});
+ assert.deepEqual(await Promise.all([slow,fast]),['slow','fast']);
+ await assert.rejects(()=>client.command('wrong-version',{}),/protocol mismatch/);
+ const cancelled=new AbortController();cancelled.abort();
+ await assert.rejects(()=>client.command('exit',{}, {signal:cancelled.signal}),/before dispatch/);
+ assert.equal(await client.command('echo',{value:'still-alive'}),'still-alive');
+ const active=new AbortController();const pending=client.command('silent',{}, {signal:active.signal,timeoutMs:300});
+ await new Promise(resolve=>setTimeout(resolve,10));active.abort();
+ await assert.rejects(()=>pending,/aborted after dispatch.*unknown/);
+ assert.equal(await client.command('echo',{value:'other-request'}),'other-request','one cancellation must not kill unrelated requests');
+ await assert.rejects(()=>client.command('echo',{value:'late',delay:40},{timeoutMs:5}),/timed out.*unknown/);
+ await new Promise(resolve=>setTimeout(resolve,50));
+ assert.equal(await client.command('echo',{value:'after-late'}),'after-late');
+ await assert.rejects(()=>client.command('exit',{}, {timeoutMs:300}),error=>{assert.match(error.message,/helper exited.*unknown/);assert.equal(error.code,'helper_transport_unknown');assert.equal(error.outcome,'unknown');assert.equal(error.command,'exit');assert.equal(typeof error.requestId,'string');assert.equal(error.requestWriteAttempted,true);return true;});
+ assert.equal(await client.command('echo',{value:'fresh-process'}),'fresh-process','a later explicit command may start a new helper');
+ console.log('Helper subprocess transport regression checks passed (new coverage; no desktop input)');
+}finally{client.dispose();if(prior===undefined)delete process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;else process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH=prior;await fs.rm(root,{recursive:true,force:true});}

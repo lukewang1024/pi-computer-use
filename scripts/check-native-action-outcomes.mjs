@@ -11,12 +11,12 @@ import {Value} from 'typebox/value';
 const original={...currentPlatformBackend};
 const root={kind:'window',rootRef:'native-outcome-root',windowId:71,pid:100071,appName:'Outcome fixture',title:'Owned outcome fixture',zOrder:0,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isOnscreen:true,isFocused:true,isMinimized:false,isMain:true,isModal:false,metadata:{interaction:{enabled:true,ownerHwnd:72,ownerEnabled:false,ownerDisabled:true,unexpected:'must not leak'}}};
 const make=(ref,role,title,extra={})=>({ref,role,title,subrole:'',identifier:'',description:'',value:'',actions:[],canPress:false,canFocus:false,canSetValue:false,canScroll:false,canIncrement:false,canDecrement:false,isTextInput:false,focused:false,offscreen:false,pictureOnly:false,truncated:false,text:[],children:[],rect:{x:0,y:0,w:20,h:20},...extra});
-let outcome='didnt',calls=[],value='old',presses=0,look=0;
+let outcome='didnt',calls=[],value='old',presses=0,look=0,enabled=true;
 Object.assign(currentPlatformBackend,{
  ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:root.appName,pid:root.pid,isFrontmost:true}],listRoots:async()=>[root],
  getFrontmost:async()=>({appName:root.appName,pid:root.pid,windowTitle:root.title,windowId:root.windowId,rootRef:root.rootRef}),
  isBrowserApp:()=>false,isChromeFamilyApp:()=>false,
- observe:async()=>parseLookResponse({lookId:'outcome-look-'+(++look),capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isModal:false,role:'window',subrole:''},outline:make('@w1','window',root.title,{children:[make('native-field','textbox','Field',{value,canSetValue:true,isTextInput:true,actions:['set_text']}),make('native-commit','button','Commit',{canPress:true,actions:['press']})]}),timings:{captureMs:57,describeMs:3,readTextMs:0,totalMs:60}}),
+ observe:async()=>parseLookResponse({lookId:'outcome-look-'+(++look),capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isModal:false,role:'window',subrole:''},outline:make('@w1','window',root.title,{children:[make('native-field','textbox','Field',{value,canSetValue:true,isTextInput:true,actions:['set_text']}),make('native-commit','button','Commit',{isEnabled:enabled,canPress:enabled,actions:enabled?['press']:[]})]}),timings:{captureMs:57,describeMs:3,readTextMs:0,totalMs:60}}),
  act:async(request)=>{calls.push(request);if(request.action==='setText'&&outcome==='worked')value=request.params.text;if(request.action==='press')presses++;return {outcome,performed:{grounding:'description',delivery:'ax'}};},shutdown:async()=>{},
 });
 const directory=await mkdtemp(path.join(os.tmpdir(),'cu-outcomes-'));
@@ -52,6 +52,17 @@ try{
   if(expected==='unknown')assert.match(text,/Do not automatically repeat/);
   if(expected==='didnt')assert.match(text,/no effect was observed/);
  }
+ enabled=false;
+ const disabledFound=await call('find_roots',{text:root.title});
+ const disabledObserved=await call('observe_ui',{root:disabledFound.details.windows[0].windowRef});
+ const disabledMatch=await call('search_ui',{stateId:disabledObserved.details.capture.stateId,text:'Commit',role:'button'});
+ const disabledRef=disabledMatch.details.matches.find(m=>m.matchReason==='exact').ref;
+ const beforeDisabled=calls.length;
+ for(const action of ['press','click']){
+  await assert.rejects(call('act_ui',{stateId:disabledObserved.details.capture.stateId,actions:[{action,ref:disabledRef}]}),/disabled; input was not sent/);
+  assert.equal(calls.length,beforeDisabled);
+ }
+ enabled=true;
  const found=await call('find_roots',{text:root.title});
  const targetRoot=found.details.windows[0].windowRef;
  const semantic=await call('observe_ui',{root:targetRoot,mode:'semantic'});
@@ -101,3 +112,12 @@ try{
  Object.assign(currentPlatformBackend,original);
  await rm(directory,{recursive:true,force:true});
 }
+
+// Provider failures remain explicit without fabricating a child action target.
+const partialLook = parseLookResponse({lookId: 'provider-timeout', capturedAt: 1,
+    window: {}, outline: {ref: '@w1', role: 'Window', truncated: true, children: []},
+    uiaDiagnostics: {status: 'incomplete', reason: 'provider_error', error: 'x'.repeat(2000)}});
+assert.equal(partialLook.uiaDiagnostics.status, 'incomplete');
+assert.equal(partialLook.uiaDiagnostics.error.length, 1024);
+assert.equal(partialLook.outline.truncated, true);
+assert.equal(partialLook.outline.children.length, 0);

@@ -23,6 +23,18 @@ fn extraction_diagnostics(total_found: usize, raw_visited: usize, visible_retain
 
 
 #[cfg(any(windows, test))]
+fn failed_extraction(error: &str) -> Vec<Value> {
+    vec![serde_json::json!({
+        "diagnosticOnly": true,
+        "extractionDiagnostics": {
+            "status": "incomplete", "reason": "provider_error", "error": error,
+            "rawTruncated": true, "rawVisited": 0, "visibleRetained": 0
+        }
+    })]
+}
+
+
+#[cfg(any(windows, test))]
 fn retained_ancestor<T>(
     mut current: T,
     retained: &std::collections::HashSet<String>,
@@ -83,7 +95,7 @@ pub fn extract_elements(store: &mut RefStore, hwnd: isize) -> Vec<Value> {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[uia] WARN extraction skipped: {e}");
-                Vec::new()
+                failed_extraction(&e)
             }
         }
     }
@@ -256,7 +268,7 @@ mod native {
     };
     use crate::refs::{NativeHandle, RefStore};
 
-    use windows::core::{BSTR, VARIANT};
+    use windows::core::{BSTR, VARIANT, Interface};
     use windows::Win32::Foundation::*;
     use windows::Win32::System::Com::*;
     use windows::Win32::System::Ole::{
@@ -265,16 +277,27 @@ mod native {
     use windows::Win32::UI::Accessibility::*;
 
     const MAX_ELEMENTS: usize = 200;
+    const EXTRACTION_BUDGET_MS: u64 = 8_000;
     const MAX_TRUNCATION_SCAN: usize = 1_000;
 
     /// Entry point called from the public stub on cfg(windows).
     pub fn uia_extract(store: &mut RefStore, hwnd: isize) -> Result<Vec<Value>, String> {
         let _com = ComGuard::new()?;
 
-        let uia: IUIAutomation = unsafe {
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| format!("CoCreateInstance IUIAutomation: {e}"))?
+        // Read-only extraction uses the modern provider client with finite per-call
+        // timeouts. Do not silently fall back to an unbounded older client.
+        let modern: IUIAutomation2 = unsafe {
+            CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| format!("CoCreateInstance IUIAutomation2: {e}"))?
         };
+        unsafe {
+            modern.SetConnectionTimeout(2_000)
+                .map_err(|e| format!("SetConnectionTimeout: {e}"))?;
+            modern.SetTransactionTimeout(3_000)
+                .map_err(|e| format!("SetTransactionTimeout: {e}"))?;
+        }
+        let uia: IUIAutomation = modern.cast()
+            .map_err(|e| format!("IUIAutomation2 base interface: {e}"))?;
 
         let root = unsafe {
             uia.ElementFromHandle(HWND(hwnd as *mut _))
@@ -299,6 +322,10 @@ mod native {
         uia: &IUIAutomation,
         root: &IUIAutomationElement,
     ) -> Result<Vec<Value>, String> {
+        // Cooperative whole-extraction budget: never begin another provider
+        // traversal after expiry. An in-flight COM call still has its own timeout.
+        let extraction_started = Instant::now();
+        let budget_expired = || extraction_started.elapsed().as_millis() >= EXTRACTION_BUDGET_MS as u128;
         let condition = unsafe {
             uia.CreateTrueCondition()
                 .map_err(|e| format!("CreateTrueCondition: {e}"))?
@@ -347,18 +374,27 @@ mod native {
         };
 
         let retained_started = Instant::now();
+        let mut visited = 0usize;
+        let mut cache_failures = 0usize;
         for i in 0..limit {
+            if budget_expired() { break; }
             let element = unsafe {
                 found
                     .GetElement(i as _)
                     .map_err(|e| format!("GetElement({i}): {e}"))?
             };
+            visited += 1;
             let parent_runtime_id = unsafe { walker.GetParentElement(&element).ok() }
                 .and_then(|parent| runtime_id(&parent))
                 .unwrap_or_default();
-            let observed = property_cache.as_ref()
-                .and_then(|cache| unsafe { element.BuildUpdatedCache(cache).ok() })
-                .unwrap_or_else(|| element.clone());
+            if budget_expired() { break; }
+            // A failed cache must not fan out into many live property requests.
+            // Keep already observed nodes and explicitly report the missing ones.
+            let Some(observed) = property_cache.as_ref()
+                .and_then(|cache| unsafe { element.BuildUpdatedCache(cache).ok() }) else {
+                    cache_failures += 1;
+                    continue;
+                };
             if let Some(json_val) = element_to_json(store, &observed, parent_runtime_id) {
                 elements.push(json_val);
             }
@@ -385,13 +421,15 @@ mod native {
             let mut truncated = HashSet::new();
             let mut ancestry_cache = HashMap::new();
             for i in limit..count.min(limit + MAX_TRUNCATION_SCAN) {
+                if budget_expired() { break; }
                 let Some(candidate) = (unsafe { found.GetElement(i as _).ok() }) else { continue };
                 ancestry_candidates += 1;
                 if let Some(key) = super::retained_ancestor(
                     candidate, &retained, &mut ancestry_cache,
-                    |element| runtime_id(element).map(|ids| ids.iter()
-                        .map(i32::to_string).collect::<Vec<_>>().join(".")),
+                    |element| if budget_expired() { None } else { runtime_id(element).map(|ids| ids.iter()
+                        .map(i32::to_string).collect::<Vec<_>>().join(".")) },
                     |element| {
+                        if budget_expired() { return None; }
                         ancestry_reads += 1;
                         unsafe { walker.GetParentElement(element).ok() }
                     },
@@ -430,7 +468,15 @@ mod native {
             }
         }
 
-        let mut diagnostics = super::extraction_diagnostics(count, limit, elements.len());
+        let mut diagnostics = super::extraction_diagnostics(count, visited, elements.len());
+        diagnostics["budgetMs"] = json!(EXTRACTION_BUDGET_MS);
+        diagnostics["elapsedMs"] = json!(extraction_started.elapsed().as_millis() as u64);
+        diagnostics["cacheFailures"] = json!(cache_failures);
+        if budget_expired() || cache_failures > 0 {
+            diagnostics["status"] = json!("incomplete");
+            diagnostics["reason"] = json!(if budget_expired() { "budget_exceeded" } else { "cache_unavailable" });
+            diagnostics["rawTruncated"] = json!(true);
+        }
         diagnostics["stages"] = json!({
             "findAllMs": find_ms, "retainedElementsMs": retained_ms,
             "truncationMs": truncation_started.elapsed().as_millis() as u64
@@ -441,6 +487,8 @@ mod native {
         });
         if let Some(first) = elements.first_mut() {
             first["extractionDiagnostics"] = diagnostics;
+        } else if diagnostics["status"] == "incomplete" {
+            elements.push(json!({ "diagnosticOnly": true, "extractionDiagnostics": diagnostics }));
         }
         Ok(elements)
     }
@@ -515,7 +563,7 @@ mod native {
             element
                 .CachedIsEnabled().or_else(|_| element.CurrentIsEnabled())
                 .map(|value| value.as_bool())
-                .unwrap_or(true)
+                .unwrap_or(false)
         };
         let is_keyboard_focusable = unsafe {
             element
@@ -559,8 +607,8 @@ mod native {
             text: pattern_available(element, UIA_IsTextPatternAvailablePropertyId),
             value_read_only,
         };
-        let can_press = annotation_can_press(&signals);
-        let can_set_value = annotation_can_set_text(&signals);
+        let can_press = is_enabled && annotation_can_press(&signals);
+        let can_set_value = is_enabled && annotation_can_set_text(&signals);
         let can_scroll = pattern_available(element, UIA_IsScrollPatternAvailablePropertyId);
 
         let eref = store.insert_element(NativeHandle::new(0));
@@ -653,12 +701,27 @@ mod native {
         })
     }
 
+    pub fn ensure_enabled(hwnd: isize, runtime_id_target: &[i32], automation_id: &str) -> Result<(), String> {
+        let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        ensure_element_enabled(&element)
+    }
+
+    fn ensure_element_enabled(element: &IUIAutomationElement) -> Result<(), String> {
+        let enabled = unsafe { element.CurrentIsEnabled() }
+            .map_err(|e| format!("Cannot verify control enabled state before input: {e}"))?;
+        if !enabled.as_bool() {
+            return Err("Target control is disabled; input was not sent".to_owned());
+        }
+        Ok(())
+    }
+
     pub fn press(
         hwnd: isize,
         runtime_id_target: &[i32],
         automation_id: &str,
     ) -> Result<PressResult, String> {
         let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        ensure_element_enabled(&element)?;
         if let Ok(pattern) = unsafe {
             element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
@@ -1021,7 +1084,7 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    focus, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
+    ensure_enabled, focus, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
 
@@ -1068,6 +1131,10 @@ pub fn snapshot(
     _runtime_id: &[i32],
     _automation_id: &str,
 ) -> Result<ElementSnapshot, String> {
+    Err("UIA is only supported on Windows".to_owned())
+}
+#[cfg(not(windows))]
+pub fn ensure_enabled(_hwnd: isize, _runtime_id: &[i32], _automation_id: &str) -> Result<(), String> {
     Err("UIA is only supported on Windows".to_owned())
 }
 #[cfg(not(windows))]
@@ -1121,6 +1188,16 @@ mod unit_tests {
     use super::*;
     use crate::refs::NativeHandle;
     use serde_json::json;
+
+    #[test]
+    fn provider_failure_is_explicit_and_never_creates_an_element_ref() {
+        let failed = failed_extraction("FindAll: provider timed out");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0]["diagnosticOnly"], true);
+        assert_eq!(failed[0]["extractionDiagnostics"]["status"], "incomplete");
+        assert_eq!(failed[0]["extractionDiagnostics"]["rawTruncated"], true);
+        assert!(failed[0].get("ref").is_none());
+    }
 
     #[test]
     fn retained_count_does_not_hide_raw_extraction_truncation() {

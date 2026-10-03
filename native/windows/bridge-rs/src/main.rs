@@ -496,6 +496,10 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
         fw,
         fh,
     );
+    if elements.first().and_then(|raw| raw.get("extractionDiagnostics"))
+        .and_then(|diagnostics| diagnostics.get("status")).and_then(Value::as_str) == Some("incomplete") {
+        outline["truncated"] = json!(true);
+    }
     if let Some(scope_ref) = scope_ref.as_deref() {
         outline = scoped_outline_root(outline, scope_ref);
     }
@@ -588,7 +592,7 @@ fn outline_from_elements(
     let mut records = HashMap::new();
     let sx = image_w / fw.max(1.0);
     let sy = image_h / fh.max(1.0);
-    let nodes = elements.iter().map(|raw| {
+    let nodes = elements.iter().filter(|raw| raw.get("diagnosticOnly").and_then(Value::as_bool) != Some(true)).map(|raw| {
         let bounds = raw.get("bounds").unwrap_or(&Value::Null);
         let screen_x = number_at(bounds, "x", 0.0);
         let screen_y = number_at(bounds, "y", 0.0);
@@ -614,8 +618,9 @@ fn outline_from_elements(
         let text = if displayed_value.is_empty() { raw.get("label").and_then(Value::as_str).unwrap_or("") } else { displayed_value }.to_owned();
         let hwnd = root.get("windowId").and_then(Value::as_i64).unwrap_or(0) as isize;
         let caps = raw.get("capabilities").unwrap_or(&Value::Null);
-        let can_press = caps.get("canPress").or_else(|| caps.get("canInvoke")).and_then(Value::as_bool).unwrap_or(false);
-        let can_set_value = caps.get("canSetValue").or_else(|| caps.get("canEditText")).and_then(Value::as_bool).unwrap_or(false);
+        let is_enabled = caps.get("isEnabled").and_then(Value::as_bool).unwrap_or(false);
+        let can_press = is_enabled && caps.get("canPress").or_else(|| caps.get("canInvoke")).and_then(Value::as_bool).unwrap_or(false);
+        let can_set_value = is_enabled && caps.get("canSetValue").or_else(|| caps.get("canEditText")).and_then(Value::as_bool).unwrap_or(false);
         let can_scroll = caps.get("canScroll").and_then(Value::as_bool).unwrap_or(false);
         if !reference.is_empty() { records.insert(reference.clone(), ElementRecord { hwnd, x: screen_x, y: screen_y, w: screen_w, h: screen_h, automation_id: automation_id.clone(), class_name, is_secure, can_press, can_set_value, can_scroll, runtime_id: runtime_id.clone() }); }
         let node = json!({
@@ -627,8 +632,9 @@ fn outline_from_elements(
             "description": raw.get("className").and_then(Value::as_str).unwrap_or(""),
             "value": displayed_value,
             "actions": [],
+            "isEnabled": is_enabled,
             "canPress": can_press,
-            "canFocus": caps.get("isKeyboardFocusable").and_then(Value::as_bool).unwrap_or(false),
+            "canFocus": is_enabled && caps.get("isKeyboardFocusable").and_then(Value::as_bool).unwrap_or(false),
             "canSetValue": can_set_value,
             "canScroll": can_scroll,
             "canIncrement": false,
@@ -1027,6 +1033,11 @@ fn act_on_ref(
         .get(reference)
         .cloned()
         .ok_or_else(|| ProtocolError::new("Element reference is stale", ErrorCode::StaleRef))?;
+    if parsed.policy != "ax_only" && is_web_backed(&element)
+        && matches!(parsed.action.as_str(), "press" | "click") {
+        windows_bridge::uia::ensure_enabled(element.hwnd, &element.runtime_id, &element.automation_id)
+            .map_err(stale_ref_from_uia)?;
+    }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
         && matches!(parsed.action.as_str(), "press" | "click" | "setText")
@@ -1589,6 +1600,34 @@ fn emit_response(response: &Response) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabled_control_does_not_advertise_input_capabilities() {
+        for enabled in [false, true] {
+            let root = serde_json::json!({"windowId": 1, "title": "owned"});
+            let elements = vec![serde_json::json!({"ref": "@e1", "role": "button",
+                "capabilities": {"isEnabled": enabled, "canPress": true,
+                    "canSetValue": true, "isKeyboardFocusable": true}})];
+            let (outline, records) = super::outline_from_elements("@w1", "test", "window",
+                &root, &elements, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0);
+            let child = &outline["children"][0];
+            assert_eq!(child["canPress"], enabled);
+            assert_eq!(child["canSetValue"], enabled);
+            assert_eq!(child["canFocus"], enabled);
+            assert_eq!(records.values().next().unwrap().can_press, enabled);
+        }
+    }
+
+    #[test]
+    fn diagnostic_only_payload_never_creates_actionable_outline_nodes() {
+        let root = serde_json::json!({"windowId": 1, "title": "owned"});
+        let elements = vec![serde_json::json!({"diagnosticOnly": true,
+            "extractionDiagnostics": {"status": "incomplete", "rawTruncated": true}})];
+        let (outline, records) = super::outline_from_elements("@w1", "test", "window",
+            &root, &elements, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0);
+        assert!(records.is_empty());
+        assert!(outline["children"].as_array().unwrap().is_empty());
+    }
+
     #[test]
     fn optional_image_failure_only_degrades_confirmed_capture_errors() {
         assert!(super::optional_capture_failure(true, ErrorCode::CaptureFailed));

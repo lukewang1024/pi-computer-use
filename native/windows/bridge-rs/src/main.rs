@@ -14,9 +14,14 @@ use windows_bridge::{
 #[derive(Clone, Debug)]
 struct ElementRecord {
     hwnd: isize,
+    // Element geometry is consumed by Windows UIA dispatch; non-Windows builds test the protocol.
+    #[cfg_attr(not(windows), allow(dead_code))]
     x: f64,
+    #[cfg_attr(not(windows), allow(dead_code))]
     y: f64,
+    #[cfg_attr(not(windows), allow(dead_code))]
     w: f64,
+    #[cfg_attr(not(windows), allow(dead_code))]
     h: f64,
     automation_id: String,
     class_name: String,
@@ -317,7 +322,22 @@ fn optional_capture_failure(allowed: bool, code: ErrorCode) -> bool {
     allowed && code == ErrorCode::CaptureFailed
 }
 
+fn include_look_elements(args: &Value) -> Result<bool, ProtocolError> {
+    let include = match args.get("includeElements") {
+        None => true,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(invalid("includeElements must be boolean")),
+    };
+    if !include && (args.get("includeImage") == Some(&json!(false))
+        || args.get("scopeRef").is_some_and(|value| !value.is_null())
+        || args.get("allowImageFailure") == Some(&json!(true))) {
+        return Err(invalid("Pixel-only look requires an image, no scope, and no semantic fallback"));
+    }
+    Ok(include)
+}
+
 fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
+    let include_elements = include_look_elements(args)?;
     let started_at = Instant::now();
     let root_ref = args
         .get("rootRef")
@@ -405,7 +425,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     if !is_outline_only {
         let wref = windows_bridge::refs::WindowRef::parse(&root_ref)
             .ok_or_else(|| invalid(format!("Invalid root ref '{root_ref}'")))?;
-        let shot = match capture::screenshot(&mut store, &wref, scope_ref.is_none(), max_dimension) {
+        let shot = match capture::screenshot(&mut store, &wref, scope_ref.is_none() && include_elements, max_dimension) {
             Ok(shot) => shot,
             Err(error) if optional_capture_failure(allow_image_failure, error.code) => {
                 image_error = Some(error.to_string());
@@ -429,7 +449,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-    } else if scope_ref.is_none() {
+    } else if scope_ref.is_none() && include_elements {
         // A scoped semantic look resolves and extracts its exact subtree below.
         // Enumerating the whole window here would discard that expensive result
         // and can hide the desired branch behind the root's element budget.
@@ -447,7 +467,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
 
     // A confirmed pixel-capture failure may return fresh semantic evidence in
     // the same request. Invalid/stale roots and all other errors remain fatal.
-    if image_error.is_some() && scope_ref.is_none() {
+    if image_error.is_some() && scope_ref.is_none() && include_elements {
         #[cfg(windows)]
         if let Some(native) = store.get_window(&windows_bridge::refs::WindowRef::parse(&root_ref)
             .ok_or_else(|| invalid("Invalid root ref"))?) {
@@ -499,6 +519,11 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     if elements.first().and_then(|raw| raw.get("extractionDiagnostics"))
         .and_then(|diagnostics| diagnostics.get("status")).and_then(Value::as_str) == Some("incomplete") {
         outline["truncated"] = json!(true);
+    }
+    if !include_elements {
+        // An intentionally unobserved subtree cannot establish unique elements.
+        outline["truncated"] = json!(true);
+        outline["pictureOnly"] = json!(true);
     }
     if let Some(scope_ref) = scope_ref.as_deref() {
         outline = scoped_outline_root(outline, scope_ref);
@@ -559,6 +584,9 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
                 response["timings"][name] = json!(value);
             }
         }
+    }
+    if !include_elements {
+        response["uiaDiagnostics"] = json!({"status":"skipped", "reason":"pixel_only_observation"});
     }
     if let Some(diagnostics) = elements.first().and_then(|raw| raw.get("extractionDiagnostics")) {
         response["uiaDiagnostics"] = diagnostics.clone();
@@ -942,7 +970,7 @@ fn handle_act_batch(args: &Value) -> Result<Value, ProtocolError> {
         .iter()
         .any(|action| action_may_use_physical_input(action, &record));
     let execute = || -> Result<(Vec<Value>, Option<usize>), ProtocolError> {
-        Ok(execute_checked_batch(&actions, handle_act))
+        Ok(execute_checked_batch(actions, handle_act))
     };
     let executed = if requires_physical {
         let _physical_guard = physical_input_lock()
@@ -1600,6 +1628,19 @@ fn emit_response(response: &Response) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pixel_only_policy_requires_capture_without_scope_or_semantic_fallback() {
+        use serde_json::json;
+        assert!(super::include_look_elements(&json!({})).unwrap());
+        assert!(super::include_look_elements(&json!({"includeImage":false})).unwrap());
+        assert!(!super::include_look_elements(&json!({"includeElements":false,"includeImage":true})).unwrap());
+        for value in [json!({"includeElements":"false"}),
+            json!({"includeElements":false,"includeImage":false}),
+            json!({"includeElements":false,"scopeRef":"@e1"}),
+            json!({"includeElements":false,"allowImageFailure":true})] {
+            assert!(super::include_look_elements(&value).is_err());
+        }
+    }
     #[test]
     fn disabled_control_does_not_advertise_input_capabilities() {
         for enabled in [false, true] {

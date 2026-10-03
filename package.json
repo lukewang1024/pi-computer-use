@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.2-workbench.14",
+	"version": "0.5.2-workbench.15",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -95,7 +95,7 @@
 		"test:cdp-input": "tsx scripts/check-cdp-input.mjs",
 		"test:cdp-frames": "tsx scripts/check-cdp-frames.mjs",
 		"test:cdp-sessions": "tsx scripts/check-cdp-sessions.mjs && tsx scripts/check-cdp-ancestor-routes.mjs",
-		"test:native-action-outcomes": "tsx scripts/check-native-action-outcomes.mjs && tsx scripts/check-search-ocr-escalation.mjs",
+		"test:native-action-outcomes": "tsx scripts/check-native-action-outcomes.mjs && tsx scripts/check-search-ocr-escalation.mjs && tsx scripts/check-pixel-observe.mjs",
 		"test:scoped-outline": "tsx scripts/check-scoped-outline.mjs",
 		"test:text-input-source": "node scripts/check-text-input-source.mjs",
 		"test:macos-identity": "tsx scripts/check-macos-helper-identity.mjs && tsx scripts/check-macos-helper-owned-restart.mjs",

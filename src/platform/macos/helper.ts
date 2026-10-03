@@ -8,9 +8,9 @@ import { fileURLToPath } from "node:url";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { PlatformDiagnostics } from "../types.ts";
 import { resolveMacosHelperAppPath } from "./helper-path.mjs";
+import { HELPER_PROTOCOL_VERSION, executableSha256, helperIdentityMatches, packagedHelperSha256 } from "./helper-identity.ts";
 
 const COMMAND_TIMEOUT_MS = 15_000;
-const HELPER_PROTOCOL_VERSION = 6;
 const HELPER_SETUP_TIMEOUT_MS = 60_000;
 
 export const HELPER_BUNDLE_ID = "com.injaneity.pi-computer-use";
@@ -82,7 +82,7 @@ async function isExecutable(filePath: string): Promise<boolean> {
 }
 
 async function isResolvedHelperExecutable(filePath?: string): Promise<boolean> {
-	if (!filePath) return true;
+	if (!filePath) return false;
 	const [actualPath, expectedPath] = await Promise.all([
 		realpath(filePath).catch(() => path.resolve(filePath)),
 		realpath(HELPER_APP_EXECUTABLE_PATH).catch(() => path.resolve(HELPER_APP_EXECUTABLE_PATH)),
@@ -156,6 +156,11 @@ export class MacosHelperClient {
 	private daemonAvailable = false;
 	private requestSequence = 0;
 	private diagnosticsCache?: PlatformDiagnostics;
+	private expectedSha256?: Promise<string>;
+
+	private expectedHelperSha256(): Promise<string> {
+		return this.expectedSha256 ??= packagedHelperSha256(PACKAGE_ROOT);
+	}
 
 	private nextRequestId(): string {
 		return `req_${++this.requestSequence}`;
@@ -167,10 +172,12 @@ export class MacosHelperClient {
 
 	async ensureInstalled(signal?: AbortSignal): Promise<void> {
 		if (usingExternalHelperSocket) return;
-		// Installation is a deployment/repair operation, not part of every new
-		// agent process's hot path. Protocol compatibility is checked against the
-		// live daemon immediately afterwards.
+		// Existing apps must match this package, not merely share a path/protocol.
+		// Upgrades belong to managed deployment, never to an active input session.
 		if (await isExecutable(HELPER_APP_EXECUTABLE_PATH)) {
+			if (await executableSha256(HELPER_APP_EXECUTABLE_PATH) !== await this.expectedHelperSha256()) {
+				throw new Error(`Installed macOS helper build is stale at ${HELPER_APP_PATH}. Run scripts/setup-helper.mjs --runtime from this package at a desktop deployment safe point; physical input was not sent.`);
+			}
 			return;
 		}
 
@@ -183,6 +190,9 @@ export class MacosHelperClient {
 
 		if (!(await isExecutable(HELPER_APP_EXECUTABLE_PATH))) {
 			throw new Error(`Failed to install pi-computer-use helper app at ${HELPER_APP_PATH}.`);
+		}
+		if (await executableSha256(HELPER_APP_EXECUTABLE_PATH) !== await this.expectedHelperSha256()) {
+			throw new Error(`Installed macOS helper does not match this package at ${HELPER_APP_PATH}; physical input was not sent.`);
 		}
 	}
 
@@ -311,6 +321,11 @@ export class MacosHelperClient {
 	}
 
 	async restart(signal?: AbortSignal): Promise<void> {
+		if (usingExternalHelperSocket) throw new Error("External macOS helper build mismatch; its owner must restart it. No shutdown or physical input was sent.");
+		const identity = await this.diagnosticsCommand(signal);
+		if (!(await isResolvedHelperExecutable(identity.executablePath))) {
+			throw new Error("macOS helper executable ownership is unverified; refusing to shut down an unrelated daemon.");
+		}
 		await this.command("shutdown", {}, { signal, timeoutMs: 2_000 }).catch(() => undefined);
 		this.daemonAvailable = false;
 		await sleep(400, signal);
@@ -331,6 +346,7 @@ export class MacosHelperClient {
 			parentBundleId: toOptionalString(result?.parentBundleId),
 			parentPath: toOptionalString(result?.parentPath),
 			executablePath: toOptionalString(result?.executablePath),
+			executableSha256: toOptionalString(result?.executableSha256),
 			os: toOptionalString(result?.macOS),
 			arch: toOptionalString(result?.arch),
 			accessibility: toBoolean(result?.accessibility),
@@ -341,9 +357,14 @@ export class MacosHelperClient {
 	}
 
 	async ensureProtocol(signal?: AbortSignal): Promise<PlatformDiagnostics> {
+		const expectedSha256 = await this.expectedHelperSha256();
 		let diagnostics = await this.diagnosticsCommand(signal);
 		const executableMatches = await isResolvedHelperExecutable(diagnostics.executablePath);
-		if (diagnostics.protocolVersion === HELPER_PROTOCOL_VERSION && executableMatches) return diagnostics;
+		if (helperIdentityMatches(diagnostics.protocolVersion, executableMatches, expectedSha256, diagnostics.executableSha256)) return diagnostics;
+		// Never restart a stale executable on disk, nor an externally owned socket.
+		if (usingExternalHelperSocket || !executableMatches || await executableSha256(HELPER_APP_EXECUTABLE_PATH) !== expectedSha256) {
+			throw new Error(`macOS helper build mismatch: expected ${expectedSha256}, running ${diagnostics.executableSha256 ?? "unknown"}. Repair the installed helper and restart its owner at a desktop safe point; no physical input was sent.`);
+		}
 
 		// The helper daemon outlives Pi, so restarting/reloading Pi alone does not
 		// replace a stale daemon or one launched from the legacy system location.
@@ -352,10 +373,10 @@ export class MacosHelperClient {
 		await this.restart(signal);
 		diagnostics = await this.diagnosticsCommand(signal);
 		const relaunchedExecutableMatches = await isResolvedHelperExecutable(diagnostics.executablePath);
-		if (diagnostics.protocolVersion !== HELPER_PROTOCOL_VERSION || !relaunchedExecutableMatches) {
+		if (!helperIdentityMatches(diagnostics.protocolVersion, relaunchedExecutableMatches, expectedSha256, diagnostics.executableSha256)) {
 			this.daemonAvailable = false;
 			throw new Error(
-				`pi-computer-use helper mismatch after relaunch: expected protocol ${HELPER_PROTOCOL_VERSION} and executable ${HELPER_APP_EXECUTABLE_PATH}; got protocol ${diagnostics.protocolVersion} and executable ${diagnostics.executablePath ?? "unknown"}. Reinstall or rebuild the helper app at ${HELPER_APP_PATH}.`,
+				`pi-computer-use helper mismatch after relaunch: expected protocol ${HELPER_PROTOCOL_VERSION}, executable ${HELPER_APP_EXECUTABLE_PATH}, SHA256 ${expectedSha256}; got protocol ${diagnostics.protocolVersion}, executable ${diagnostics.executablePath ?? "unknown"}, SHA256 ${diagnostics.executableSha256 ?? "unknown"}. Reinstall or rebuild the helper app at ${HELPER_APP_PATH}.`,
 			);
 		}
 		return diagnostics;

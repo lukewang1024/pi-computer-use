@@ -37,6 +37,21 @@ Observed `@e` refs store UIA RuntimeId and AutomationId metadata. Ref-targeted a
 
 Root deltas are baselined at act time. Bounded WinEvent observations are combined with HWND snapshots (`deltaSource: "win-event+snapshot"`), with snapshot fallback when events are unavailable.
 
+## Truncation ancestry diagnostics
+
+UIA extraction keeps its existing element and ancestry-scan limits. Omitted
+nodes sharing a parent chain reuse the already established nearest retained
+ancestor within that one extraction. Failed or depth-limited walks are not
+cached as complete, and a fresh observation starts with an empty cache.
+`uiaDiagnostics.stages` separates subtree enumeration, retained-element metadata
+and truncation work. Pattern-availability flags join the retained element
+property cache; missing or unreadable cached values fall back to current reads.
+This cache is for observation metadata only; action-time element/pattern
+resolution and foreground checks remain live.
+`uiaDiagnostics.truncationAncestry` reports parent reads, omitted candidates
+scanned and cached entries. These counters support live profiling; fewer
+synthetic provider calls do not prove an application latency improvement.
+
 ## Protocol
 
 Request envelope:

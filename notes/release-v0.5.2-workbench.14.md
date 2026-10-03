@@ -1,0 +1,5 @@
+# 0.5.2-workbench.14
+
+Scoped Windows UIA reads now use the same modern client and per-call connection/transaction timeouts as top-level observations. Scoped reference resolution has a cooperative eight-second budget; resolution and extraction have separate budgets, and in-flight COM calls can exceed them. Action resolution and exact foreground/input guards remain unchanged. A three-read native Word candidate probe returned the requested status bar; this is not evidence of a fixed speedup or reliable behavior under every hung provider.
+
+Managed browser startup observes child spawn errors and early exits, cancels the pending CDP wait, and returns an explicit failure instead of leaving an unhandled child-process error to terminate the host. Startup is never automatically replayed. Controlled Node subprocess tests cover ENOENT, early exit, cancellation including asynchronous spawn errors, and readiness. The Linux installed84 host-disconnect root cause remains unproven; this release does not clear desktop quarantine.

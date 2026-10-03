@@ -137,6 +137,15 @@ fn with_physical_input<T>(
 
 fn main() {
     #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--read-only-uia") {
+        set_dpi_awareness();
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() != 3 { std::process::exit(2); }
+        println!("{}", windows_bridge::uia::read_only_worker(&args[2]));
+        return;
+    }
+
+    #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("--foreground-uia") {
         let args: Vec<String> = std::env::args().collect();
         if args.len() != 5 { std::process::exit(2); }

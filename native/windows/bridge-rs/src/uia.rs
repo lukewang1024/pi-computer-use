@@ -27,7 +27,9 @@ fn failed_extraction(error: &str) -> Vec<Value> {
     vec![serde_json::json!({
         "diagnosticOnly": true,
         "extractionDiagnostics": {
-            "status": "incomplete", "reason": "provider_error", "error": error,
+            "status": "incomplete",
+            "reason": if error.starts_with("UIA read worker deadline exceeded;") { "read_timeout" } else { "provider_error" },
+            "error": error,
             "rawTruncated": true, "rawVisited": 0, "visibleRetained": 0
         }
     })]
@@ -91,7 +93,7 @@ pub fn extract_elements(store: &mut RefStore, hwnd: isize) -> Vec<Value> {
 
     #[cfg(windows)]
     {
-        match uia_extract(store, hwnd) {
+        match bounded_extract(store, hwnd, &[], "") {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[uia] WARN extraction skipped: {e}");
@@ -115,7 +117,57 @@ pub fn extract_elements_from(
     }
     #[cfg(windows)]
     {
-        native::uia_extract_from(store, hwnd, runtime_id, automation_id)
+        bounded_extract(store, hwnd, runtime_id, automation_id)
+    }
+}
+
+// UIA's provider transaction timeout does not bound every provider hook. Keep
+// discovery in a disposable, read-only process; never move action dispatch here.
+#[cfg(windows)]
+fn bounded_extract(store: &mut RefStore, hwnd: isize, runtime_id: &[i32], automation_id: &str)
+    -> Result<Vec<Value>, String> {
+    use std::{os::windows::process::CommandExt, process::Command, time::Duration};
+    let request = serde_json::json!({"hwnd": hwnd, "runtimeId": runtime_id, "automationId": automation_id}).to_string();
+    if request.len() > 8_000 { return Err("UIA read worker request limit exceeded".into()); }
+    let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    command.args(["--read-only-uia", &request]).creation_flags(0x08000000);
+    let output = crate::read_worker::run(&mut command, Duration::from_millis(8_500), 8 * 1024 * 1024)?;
+    let response: Value = serde_json::from_slice(&output).map_err(|e| e.to_string())?;
+    if let Some(error) = response.get("error").and_then(Value::as_str) { return Err(error.into()); }
+    let elements: Vec<Value> = serde_json::from_value(response.get("elements").cloned()
+        .ok_or("UIA read worker missing elements")?).map_err(|e| e.to_string())?;
+    Ok(adopt_worker_elements(store, elements))
+}
+
+#[cfg(any(windows, test))]
+fn adopt_worker_elements(store: &mut RefStore, mut elements: Vec<Value>) -> Vec<Value> {
+    // Worker-local references must never collide with existing parent looks.
+    // Only JSON/runtime identities cross the process boundary, never COM pointers.
+    for element in &mut elements {
+        if element.get("diagnosticOnly").and_then(Value::as_bool) != Some(true) {
+            element["ref"] = Value::String(store.insert_element(crate::refs::NativeHandle::new(0)).to_string());
+        }
+    }
+    elements
+}
+
+/// Dedicated worker mode: read-only extraction only, no protocol/action loop.
+#[cfg(windows)]
+pub fn read_only_worker(request: &str) -> Value {
+    let result = (|| -> Result<Vec<Value>, String> {
+        if request.len() > 8_000 { return Err("UIA read worker request limit exceeded".into()); }
+        let request: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
+        let hwnd = request.get("hwnd").and_then(Value::as_i64).ok_or("Missing HWND")? as isize;
+        let runtime_id: Vec<i32> = serde_json::from_value(request.get("runtimeId").cloned()
+            .ok_or("Missing runtime ID")?).map_err(|e| e.to_string())?;
+        let automation_id = request.get("automationId").and_then(Value::as_str).ok_or("Missing automation ID")?;
+        let mut store = RefStore::new();
+        if runtime_id.is_empty() && automation_id.is_empty() { native::uia_extract(&mut store, hwnd) }
+        else { native::uia_extract_from(&mut store, hwnd, &runtime_id, automation_id) }
+    })();
+    match result {
+        Ok(elements) => serde_json::json!({"elements": elements}),
+        Err(error) => serde_json::json!({"error": error}),
     }
 }
 
@@ -1223,6 +1275,23 @@ mod unit_tests {
         assert_eq!(failed[0]["extractionDiagnostics"]["status"], "incomplete");
         assert_eq!(failed[0]["extractionDiagnostics"]["rawTruncated"], true);
         assert!(failed[0].get("ref").is_none());
+    }
+
+    #[test]
+    fn worker_refs_never_alias_previous_parent_observations() {
+        let mut store = RefStore::new();
+        assert_eq!(store.insert_element(NativeHandle::new(0)).to_string(), "@e1");
+        let elements = adopt_worker_elements(&mut store, vec![
+            json!({"ref":"@e1", "runtimeId":[7, 42], "parentRuntimeId":[7, 1]}),
+            json!({"ref":"@e2", "runtimeId":[7, 43]}),
+            failed_extraction("UIA read worker deadline exceeded; terminated and reaped")[0].clone(),
+        ]);
+        assert_eq!(elements[0]["ref"], "@e2");
+        assert_eq!(elements[1]["ref"], "@e3");
+        assert_eq!(elements[0]["runtimeId"], json!([7, 42]));
+        assert_eq!(elements[0]["parentRuntimeId"], json!([7, 1]));
+        assert_eq!(elements[2]["extractionDiagnostics"]["reason"], "read_timeout");
+        assert!(elements[2].get("ref").is_none());
     }
 
     #[test]

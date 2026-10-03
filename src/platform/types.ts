@@ -23,6 +23,8 @@ export interface PlatformDiagnostics {
 	parentBundleId?: string;
 	parentPath?: string;
 	executablePath?: string;
+	/** macOS: executable digest captured when the daemon starts, before serving requests. */
+	executableSha256?: string;
 	os?: string;
 	arch?: string;
 	accessibility?: boolean;

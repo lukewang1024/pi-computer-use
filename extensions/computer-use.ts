@@ -81,13 +81,13 @@ const observeTool = defineTool({
 	description: "Capture the current/frontmost root or one exact @r root and return a bounded UI outline.",
 	promptSnippet: "Primary UI observation tool. Focus a background window with focus_window first; then follow with search_ui, expand_ui, inspect_ui, or act_ui.",
 	promptGuidelines: [
-		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection.",
+		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection. Windows native mode=pixels captures only pixels without UIA or OCR; it requires an exact native @r root and returns no semantic element refs.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
 		"A visible native popup can have an empty outline. Inspect its image and exact owner relationship; query the owner root once without refocusing or replaying input.",
 	],
 	parameters: Type.Object({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
-		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused")], { description: "Observation mode, default fused" })),
+		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused"), Type.Literal("pixels")], { description: "Observation mode, default fused" })),
 	}),
 	execute: executeObserve,
 });

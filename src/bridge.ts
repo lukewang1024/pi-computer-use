@@ -92,7 +92,7 @@ interface ComputerUseDetails {
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
 	observationTimings?: Record<string, number>;
 	uiaDiagnostics?: Record<string, unknown>;
-	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "completed" | "unconfirmed" };
+	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "completed" | "unconfirmed" } | { status: "pixels_only"; readOnly: true };
 	tool: string;
 	target: {
 		app: string;
@@ -1030,7 +1030,7 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean; includeElements?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
 	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find_roots and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
@@ -1039,6 +1039,7 @@ async function performLook(target: ResolvedTarget, options: { readText: "auto" |
 		scopeRef: options.scopeRef,
 		maxDimension: options.maxDimension,
 		includeImage: options.includeImage,
+		...(options.includeElements === undefined ? {} : { includeElements: options.includeElements }),
 		allowImageFailure: options.allowImageFailure,
 	}, { signal, timeoutMs: LOOK_TIMEOUT_MS });
 }
@@ -1052,13 +1053,16 @@ function noteWindowForTarget(target: ResolvedTarget | CurrentTarget, look?: Look
 	};
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false): Promise<CaptureResult> {
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean): Promise<CaptureResult> {
 	const state = operationState();
 	const baseOutline = state.currentOutline;
 	const baseTarget = state.currentTarget;
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure }, signal);
+	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements }, signal);
+	if (includeElements === false && (look.uiaDiagnostics?.status !== "skipped" || look.uiaDiagnostics?.reason !== "pixel_only_observation" || !look.image)) {
+		throw new Error("Native helper did not confirm pixel-only capture; no state was adopted.");
+	}
 	// An optional read may finish after its caller timed out. Never adopt that late look.
 	throwIfAborted(signal);
 	const outline = stabilizeRefs(baseTarget && sameRootIdentity(baseTarget, target) ? baseOutline : undefined, look.parsedOutline!);
@@ -1831,6 +1835,9 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const requestedRoot = typeof params.root === "string" ? params.root : undefined;
 	if (requestedRoot && !/^@r\d+$/.test(requestedRoot)) throw new Error("observe_ui.root must be an exact @r ref issued by find_roots.");
 	const browserContextId = requestedRoot ? runtimeState.browserContextByRoot.get(requestedRoot) : undefined;
+	if (params.mode === "pixels" && (currentPlatformBackend.name !== "windows" || !requestedRoot || isBrowserContextId(browserContextId))) {
+		throw new Error("mode=pixels requires an exact Windows native @r root; use visual for other roots.");
+	}
 	if (isBrowserContextId(browserContextId)) {
 		const targetId = browserContextId.slice(BROWSER_CONTEXT_PREFIX.length);
 		const resourceKey = `cdp:${targetId}`;
@@ -1852,8 +1859,8 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	}
 	const state = operationState();
 	const mode = params.mode ?? "fused";
-	const image = mode === "semantic" ? "never" : mode === "visual" ? "always" : "auto";
-	const defaultReadText = mode === "semantic" ? "never" : mode === "visual" ? "always" : "auto";
+	const image = mode === "semantic" ? "never" : mode === "visual" || mode === "pixels" ? "always" : "auto";
+	const defaultReadText = mode === "semantic" || mode === "pixels" ? "never" : mode === "visual" ? "always" : "auto";
 	const readText = params.readText ?? defaultReadText;
 	state.currentImageMode = normalizeImageMode(image);
 	const selection: ObserveTargetParams = { root: normalizeWindowSelector(params.root) };
@@ -1870,6 +1877,12 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const scheduled = await resourceScheduler.read(resourceKey, async (epoch) => {
 		state.resourceKey = resourceKey;
 		state.epoch = epoch;
+		if (mode === "pixels") {
+			const imageStarted = performance.now();
+			const captured = await captureCurrentTarget(signal, "never", EXPLICIT_IMAGE_MAX_DIMENSION, requestedTarget, true, false, false);
+			imageObservationMs = performance.now() - imageStarted;
+			return captured;
+		}
 		if (imageMode !== "never" && runtimeState.helperDiagnostics?.optionalImageFailure === true) {
 			const imageStarted = performance.now();
 			const combined = await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true, true);
@@ -1907,6 +1920,10 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	}
 	const summary = `Observed ${mode} ${captureResult.target.windowRef ? `${captureResult.target.windowRef} ` : ""}${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned the latest outline state.`;
 	const result = await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageError ? "never" : imageMode);
+	if (mode === "pixels") {
+		result.details.observation = { status: "pixels_only", readOnly: true };
+		result.content.unshift({ type: "text", text: "Pixel-only observation: UIA and OCR were skipped. No semantic element refs were observed. Use the fresh screenshot state for coordinate actions; observe semantic or fused before querying elements." });
+	}
 	if (imageError) {
 		result.details.observation = { status: "semantic_only", readOnly: true, imageError, nativeCompletion: imageCompletion };
 		result.content.unshift({ type: "text", text: `Image observation failed; fresh semantic evidence remains valid. Native capture completion: ${imageCompletion}; no image was returned.` });
@@ -1932,6 +1949,7 @@ function shouldEscalateSearchOCR(matches: OutlineSearchMatch[], text?: string): 
 async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
 	const state = operationState();
 	let outline = currentOutlineOrThrow(params.stateId);
+	if (state.currentLook?.uiaDiagnostics?.reason === "pixel_only_observation") throw new Error("Pixel-only observation has no semantic elements; observe semantic or fused before searching.");
 	const text = trimOrUndefined(params.text);
 	const role = trimOrUndefined(params.role);
 	const capability = trimOrUndefined(params.capability);
@@ -2228,6 +2246,8 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	state.currentImageMode = "auto";
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
+	const pixelOnly = look.uiaDiagnostics?.status === "skipped" && look.uiaDiagnostics?.reason === "pixel_only_observation";
+	if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
 	const condition = params.expect ? validateCondition(params.expect) : undefined;
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
@@ -2280,7 +2300,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			} else {
 				await sleep(settleMsForExecution(execution), signal);
 			}
-			const capture = await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target);
+			const capture = await captureCurrentTarget(signal, pixelOnly ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, true, false, pixelOnly ? false : undefined);
 			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });

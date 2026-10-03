@@ -73,6 +73,9 @@ try {
   assert.equal(calls.some(c=>c.method==='Page.captureScreenshot'),false,'condition polling must not capture');
   const controller=new AbortController();controller.abort();
   await assert.rejects(()=>executeWaitFor('aborted',{stateId:waited.details.stateId,text:'Never present',timeoutMs:1000},controller.signal,undefined,ctx));
+  const beforePixels=calls.length;
+  await assert.rejects(()=>tool(executeObserve,{root,mode:'pixels'}),/exact Windows native/);
+  assert.equal(calls.length,beforePixels,'unsupported pixel mode must not issue a CDP request');
   for(const mode of ['visual','fused',undefined]) {
     const result=await tool(executeObserve,{root,...(mode?{mode}:{})});
     assert.equal(result.content.find(c=>c.type==='image')?.data,pixel);

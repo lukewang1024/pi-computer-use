@@ -248,6 +248,7 @@ pub fn annotation_can_set_text(signals: &ElementAnnotationSignals) -> bool {
 mod native {
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
+    use std::time::Instant;
 
     use super::{
         annotation_can_press, annotation_can_set_text, control_type_to_role,
@@ -303,10 +304,13 @@ mod native {
                 .map_err(|e| format!("CreateTrueCondition: {e}"))?
         };
 
+        let find_started = Instant::now();
         let found = unsafe {
             root.FindAll(TreeScope_Subtree, &condition)
                 .map_err(|e| format!("FindAll: {e}"))?
         };
+
+        let find_ms = find_started.elapsed().as_millis() as u64;
 
         // Cache only each retained element, not the whole unbounded subtree.
         // Full element mode keeps live pattern/action resolution available.
@@ -318,7 +322,11 @@ mod native {
                     UIA_AutomationIdPropertyId, UIA_ClassNamePropertyId,
                     UIA_BoundingRectanglePropertyId, UIA_IsOffscreenPropertyId,
                     UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
-                    UIA_IsPasswordPropertyId] {
+                    UIA_IsPasswordPropertyId, UIA_IsInvokePatternAvailablePropertyId,
+                    UIA_IsTogglePatternAvailablePropertyId, UIA_IsSelectionItemPatternAvailablePropertyId,
+                    UIA_IsExpandCollapsePatternAvailablePropertyId, UIA_IsLegacyIAccessiblePatternAvailablePropertyId,
+                    UIA_IsValuePatternAvailablePropertyId, UIA_IsTextPatternAvailablePropertyId,
+                    UIA_IsScrollPatternAvailablePropertyId] {
                     cache.AddProperty(property).ok()?;
                 }
                 Some(cache)
@@ -338,6 +346,7 @@ mod native {
                 .map_err(|e| format!("ControlViewWalker: {e}"))?
         };
 
+        let retained_started = Instant::now();
         for i in 0..limit {
             let element = unsafe {
                 found
@@ -355,6 +364,8 @@ mod native {
             }
         }
 
+        let retained_ms = retained_started.elapsed().as_millis() as u64;
+        let truncation_started = Instant::now();
         let mut ancestry_reads = 0usize;
         let mut ancestry_candidates = 0usize;
         let mut ancestry_entries = 0usize;
@@ -420,6 +431,10 @@ mod native {
         }
 
         let mut diagnostics = super::extraction_diagnostics(count, limit, elements.len());
+        diagnostics["stages"] = json!({
+            "findAllMs": find_ms, "retainedElementsMs": retained_ms,
+            "truncationMs": truncation_started.elapsed().as_millis() as u64
+        });
         diagnostics["truncationAncestry"] = json!({
             "parentReads": ancestry_reads, "omittedCandidatesScanned": ancestry_candidates,
             "cacheEntries": ancestry_entries
@@ -715,12 +730,13 @@ mod native {
         Ok(PressResult::NoPattern)
     }
 
+    // Discovery-only metadata. Actions still resolve live elements and patterns.
     fn pattern_available(element: &IUIAutomationElement, property_id: UIA_PROPERTY_ID) -> bool {
         unsafe {
-            element
-                .GetCurrentPropertyValue(property_id)
-                .ok()
+            element.GetCachedPropertyValue(property_id).ok()
                 .and_then(|value| bool::try_from(&value).ok())
+                .or_else(|| element.GetCurrentPropertyValue(property_id).ok()
+                    .and_then(|value| bool::try_from(&value).ok()))
                 .unwrap_or(false)
         }
     }

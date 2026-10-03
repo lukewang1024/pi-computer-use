@@ -22,6 +22,33 @@ fn extraction_diagnostics(total_found: usize, raw_visited: usize, visible_retain
 }
 
 
+#[cfg(any(windows, test))]
+fn retained_ancestor<T>(
+    mut current: T,
+    retained: &std::collections::HashSet<String>,
+    cache: &mut std::collections::HashMap<String, String>,
+    mut identity: impl FnMut(&T) -> Option<String>,
+    mut parent: impl FnMut(&T) -> Option<T>,
+) -> Option<String> {
+    // Extraction-local only: never reuse ancestry across observations.
+    let mut path = Vec::new();
+    let mut key = identity(&current).filter(|key| !key.is_empty())?;
+    for _ in 0..64 {
+        if let Some(ancestor) = cache.get(&key).cloned() {
+            for visited in path { cache.insert(visited, ancestor.clone()); }
+            return Some(ancestor);
+        }
+        path.push(key);
+        current = parent(&current)?;
+        key = identity(&current).filter(|key| !key.is_empty())?;
+        if retained.contains(&key) {
+            for visited in path { cache.insert(visited, key.clone()); }
+            return Some(key);
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
@@ -220,7 +247,7 @@ pub fn annotation_can_set_text(signals: &ElementAnnotationSignals) -> bool {
 #[cfg(windows)]
 mod native {
     use serde_json::{json, Value};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use super::{
         annotation_can_press, annotation_can_set_text, control_type_to_role,
@@ -328,6 +355,9 @@ mod native {
             }
         }
 
+        let mut ancestry_reads = 0usize;
+        let mut ancestry_candidates = 0usize;
+        let mut ancestry_entries = 0usize;
         if count > limit {
             let retained = elements
                 .iter()
@@ -342,26 +372,23 @@ mod native {
                 })
                 .collect::<HashSet<_>>();
             let mut truncated = HashSet::new();
+            let mut ancestry_cache = HashMap::new();
             for i in limit..count.min(limit + MAX_TRUNCATION_SCAN) {
-                let mut candidate = unsafe { found.GetElement(i as _).ok() };
-                for _ in 0..64 {
-                    let Some(element) = candidate else { break };
-                    let Some(parent) = (unsafe { walker.GetParentElement(&element).ok() }) else {
-                        break;
-                    };
-                    let key = runtime_id(&parent)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(i32::to_string)
-                        .collect::<Vec<_>>()
-                        .join(".");
-                    if retained.contains(&key) {
-                        truncated.insert(key);
-                        break;
-                    }
-                    candidate = Some(parent);
+                let Some(candidate) = (unsafe { found.GetElement(i as _).ok() }) else { continue };
+                ancestry_candidates += 1;
+                if let Some(key) = super::retained_ancestor(
+                    candidate, &retained, &mut ancestry_cache,
+                    |element| runtime_id(element).map(|ids| ids.iter()
+                        .map(i32::to_string).collect::<Vec<_>>().join(".")),
+                    |element| {
+                        ancestry_reads += 1;
+                        unsafe { walker.GetParentElement(element).ok() }
+                    },
+                ) {
+                    truncated.insert(key);
                 }
             }
+            ancestry_entries = ancestry_cache.len();
             // If the omitted tail is larger than the bounded ancestry scan,
             // mark the retained extraction root as an honest coarse boundary.
             if count > limit + MAX_TRUNCATION_SCAN {
@@ -392,7 +419,11 @@ mod native {
             }
         }
 
-        let diagnostics = super::extraction_diagnostics(count, limit, elements.len());
+        let mut diagnostics = super::extraction_diagnostics(count, limit, elements.len());
+        diagnostics["truncationAncestry"] = json!({
+            "parentReads": ancestry_reads, "omittedCandidatesScanned": ancestry_candidates,
+            "cacheEntries": ancestry_entries
+        });
         if let Some(first) = elements.first_mut() {
             first["extractionDiagnostics"] = diagnostics;
         }
@@ -1308,5 +1339,52 @@ mod unit_tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0]["ref"].as_str(), Some("@e1"));
         assert_eq!(targets[0]["role"].as_str(), Some("edit"));
+    }
+}
+
+#[cfg(test)]
+mod ancestry_cache_tests {
+    use super::retained_ancestor;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn shared_ancestors_preserve_boundary_with_far_fewer_provider_calls() {
+        let retained = HashSet::from(["0".to_string()]);
+        let mut cache = HashMap::new();
+        let mut reads = 0;
+        for leaf in 100..1100 {
+            assert_eq!(retained_ancestor(leaf, &retained, &mut cache,
+                |id| Some(id.to_string()),
+                |id| { reads += 1; Some(if *id >= 100 { 10 } else { id - 1 }) }),
+                Some("0".to_string()));
+        }
+        assert_eq!(reads, 1010); // Uncached: 1000 * 11 parent queries.
+    }
+
+    #[test]
+    fn nearest_retained_branch_is_not_replaced_by_another_boundary() {
+        let retained = HashSet::from(["0".to_string(), "5".to_string()]);
+        let mut cache = HashMap::new();
+        for (leaf, ancestor) in [(100, "5"), (101, "5"), (102, "0")] {
+            assert_eq!(retained_ancestor(leaf, &retained, &mut cache,
+                |id| Some(id.to_string()),
+                |id| Some(match *id { 100 | 101 => 10, 102 => 4, other => other - 1 })),
+                Some(ancestor.to_string()));
+        }
+    }
+
+    #[test]
+    fn failed_or_depth_limited_walks_do_not_invent_or_cache_boundaries() {
+        let retained = HashSet::from(["0".to_string()]);
+        let mut cache = HashMap::new();
+        assert_eq!(retained_ancestor(100, &retained, &mut cache,
+            |id| Some(id.to_string()), |id| Some(id - 1)), None);
+        assert!(cache.is_empty());
+        assert_eq!(retained_ancestor(2, &retained, &mut cache,
+            |id| Some(id.to_string()), |_| None), None);
+        assert!(cache.is_empty());
+        assert_eq!(retained_ancestor(2, &retained, &mut cache,
+            |_| Some(String::new()), |_| Some(0)), None);
+        assert!(cache.is_empty());
     }
 }

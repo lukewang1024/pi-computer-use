@@ -17,3 +17,6 @@ pub use protocol::{Request, Response};
 
 #[cfg(windows)]
 pub mod foreground;
+
+#[cfg(any(windows, test))]
+pub mod read_worker;

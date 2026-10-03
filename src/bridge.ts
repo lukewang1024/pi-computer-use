@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { waitForBrowserStartup } from "./browser-startup.ts";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
@@ -2512,7 +2513,7 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 	runtimeState.managedBrowserCdpPort = String(port);
 	process.env.PI_COMPUTER_USE_CDP_PORT = String(port);
 	try {
-		await waitForCdpPort(port, signal);
+		await waitForBrowserStartup(managedBrowser, (startupSignal) => waitForCdpPort(port, startupSignal), signal);
 	} catch (error) {
 		if (runtimeState.managedBrowser === managedBrowser) {
 			runtimeState.managedBrowser = undefined;

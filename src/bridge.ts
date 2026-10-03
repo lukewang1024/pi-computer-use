@@ -90,6 +90,7 @@ interface ExecutionTrace {
 interface ComputerUseDetails {
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
 	observationTimings?: Record<string, number>;
+	uiaDiagnostics?: Record<string, unknown>;
 	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "completed" | "unconfirmed" };
 	tool: string;
 	target: {
@@ -1119,6 +1120,7 @@ async function buildToolResult(
 		},
 		lookId: result.look.lookId,
 		observationTimings: result.look.timings,
+		uiaDiagnostics: result.look.uiaDiagnostics,
 		view: useDiff ? "diff" : "full",
 		baseStateId: transition ? base?.stateId : undefined,
 		changes: useDiff ? transition?.changes : undefined,
@@ -1146,7 +1148,9 @@ async function buildToolResult(
 		}
 	}
 
-	const noteText = renderedNote ? `\n\n${renderedNote}` : "";
+	const uiaNote = result.look.uiaDiagnostics?.status === "incomplete"
+		? `\n\nWindows UIA observation is incomplete (${String(result.look.uiaDiagnostics.reason ?? "provider error")}): ${String(result.look.uiaDiagnostics.error ?? "")}. Missing elements are not evidence of absence.` : "";
+	const noteText = (renderedNote ? `\n\n${renderedNote}` : "") + uiaNote;
 	// The model must echo capture.stateId into follow-up tools. Exposing only the
 	// helper-internal lookId here makes a plausible but invalid stateId easy to use.
 	const renderedChanges = useDiff ? renderChanges(transition!.changes) : "";

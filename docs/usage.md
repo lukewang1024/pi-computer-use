@@ -98,18 +98,20 @@ act_ui({
 
 Steps run sequentially against one resource and retain helper checks. The native helper uses one root baseline and final settle for the transaction, and the bridge returns one final observation. If a transition can change the meaning of later refs or requires a decision, send one action, inspect the returned state, then continue.
 
-Clicks into editable regions establish foreground focus for later keyboard steps in the same transaction. Omit `ref` from `typeText` or `keypress` after such a click so input is sent to the editor established by that click:
+Clicks at image-grounded points or clicks/presses on editable `@e` refs establish foreground focus for later keyboard steps in the same transaction. A separate `act_ui` call does not inherit tracked focus. Omit `ref` from `typeText` or `keypress` after such a click so input is sent to the editor established by that click:
 
 ```ts
 act_ui({
   stateId,
   actions: [
-    { action: "click", x: 420, y: 300 },
+    { action: "click", ref: "@e1" },
     { action: "typeText", text: "hello" },
   ],
   expect: { text: "hello" },
 })
 ```
+
+For a screenshot-only editor, click its image-grounded point, then type with an explicit image point in a fresh image-bearing state. On Windows, `typeText` sends to current keyboard focus; it does not focus a child merely because an element or point was supplied. Verify the text is in the intended editor before submitting. Window `@r` refs support `keypress` only. Targetless keyboard actions remain invalid in headless mode and outside a batch that establishes focus.
 
 The runtime prefers background semantics when they are credible, verifies the result, and escalates side-effect-free failed keyboard input to foreground delivery automatically. Ambiguous pointer actions are never replayed blindly.
 

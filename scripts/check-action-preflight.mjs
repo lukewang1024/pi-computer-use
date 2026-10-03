@@ -1,5 +1,7 @@
 // Newly authored coverage of the current exported preflight contract.
 import assert from 'node:assert/strict';
+import {Value} from 'typebox/value';
+import computerUseExtension from '../extensions/computer-use.ts';
 import {preflightActionSequence,canRetryInForeground,describeActionExecution} from '../src/actions.ts';
 const text={ref:'@e1',wireRef:'native-text',role:'textbox',isTextInput:true,canSetValue:true,actions:['set_text'],children:[]};
 const env={platform:'windows',headless:false,image:{width:100,height:100},
@@ -28,4 +30,24 @@ const unknown=describeActionExecution(1,2,'unknown');
 assert.match(unknown,/effect is unverified/);
 assert.match(unknown,/Do not automatically repeat/);
 assert.doesNotMatch(describeActionExecution(2,2,'worked'),/Remaining|unverified|no effect/);
-console.log('Action preflight regression checks passed (new coverage; no native input)');
+
+// Word comment acceptance exposed these public-contract boundaries.
+const editableTyping=preflightActionSequence([{action:'click',ref:'@e1'},{action:'typeText',text:'comment'},{action:'keypress',keys:['ctrl','Enter']}],false,env);
+assert.equal(editableTyping[1].usesCurrentFocus,true);
+assert.equal(editableTyping[2].usesCurrentFocus,true);
+const pointBatch=preflightActionSequence([{action:'click',x:20,y:30},{action:'typeText',text:'comment'}],false,env);
+assert.equal(pointBatch[1].usesCurrentFocus,true,'coordinate click may establish focus only within its own foreground batch');
+assert.throws(()=>preflightActionSequence([{action:'typeText',text:'comment'}],false,env),/requires either ref/,'separate call must not inherit prior focus');
+assert.throws(()=>preflightActionSequence([{action:'click',ref:'@e1'},{action:'typeText',text:'comment'}],false,{...env,headless:true}),/requires either ref/,'headless batch must not authorize physical current-focus typing');
+const pointTyping=preflightActionSequence([{action:'typeText',x:20,y:30,text:'comment'}],false,env);
+assert.deepEqual(pointTyping[0].target,{x:20,y:30});
+assert.equal(pointTyping[0].establishesFocus,false);
+assert.throws(()=>preflightActionSequence([{action:'typeText',x:100,y:30,text:'comment'}],false,env),/Invalid point/);
+
+const registered=new Map();
+computerUseExtension({registerTool(tool){registered.set(tool.name,tool);},registerCommand(){},on(){}});
+const schema=registered.get('act_ui').parameters;
+assert(Value.Check(schema,{stateId:'S1',actions:[{action:'click',x:20,y:30},{action:'typeText',text:'comment'},{action:'keypress',keys:['ctrl','Enter']}]}),'registered schema must admit current-focus keypress in the same batch');
+assert(Value.Check(schema,{stateId:'S1',actions:[{action:'typeText',x:20,y:30,text:'comment'}]}),'registered schema must expose existing image-point typing');
+assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'typeText',x:20,text:'comment'}]}),'image-point typing must require both coordinates');
+console.log('Action preflight and registered-schema regression checks passed (no native input)');

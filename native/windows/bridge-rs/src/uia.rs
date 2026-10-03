@@ -280,10 +280,7 @@ mod native {
     const EXTRACTION_BUDGET_MS: u64 = 8_000;
     const MAX_TRUNCATION_SCAN: usize = 1_000;
 
-    /// Entry point called from the public stub on cfg(windows).
-    pub fn uia_extract(store: &mut RefStore, hwnd: isize) -> Result<Vec<Value>, String> {
-        let _com = ComGuard::new()?;
-
+    fn read_only_client() -> Result<IUIAutomation, String> {
         // Read-only extraction uses the modern provider client with finite per-call
         // timeouts. Do not silently fall back to an unbounded older client.
         let modern: IUIAutomation2 = unsafe {
@@ -296,8 +293,16 @@ mod native {
             modern.SetTransactionTimeout(3_000)
                 .map_err(|e| format!("SetTransactionTimeout: {e}"))?;
         }
-        let uia: IUIAutomation = modern.cast()
-            .map_err(|e| format!("IUIAutomation2 base interface: {e}"))?;
+        modern.cast()
+            .map_err(|e| format!("IUIAutomation2 base interface: {e}"))
+
+    }
+
+    /// Entry point called from the public stub on cfg(windows).
+    pub fn uia_extract(store: &mut RefStore, hwnd: isize) -> Result<Vec<Value>, String> {
+        let _com = ComGuard::new()?;
+
+        let uia = read_only_client()?;
 
         let root = unsafe {
             uia.ElementFromHandle(HWND(hwnd as *mut _))
@@ -313,7 +318,7 @@ mod native {
         runtime_id_target: &[i32],
         automation_id: &str,
     ) -> Result<Vec<Value>, String> {
-        let (_com, uia, root) = resolve(hwnd, runtime_id_target, automation_id)?;
+        let (_com, uia, root) = resolve_for_read(hwnd, runtime_id_target, automation_id)?;
         extract_from_root(store, &uia, &root)
     }
 
@@ -944,11 +949,30 @@ mod native {
         runtime_id_target: &[i32],
         automation_id: &str,
     ) -> Result<(ComGuard, IUIAutomation, IUIAutomationElement), String> {
+        resolve_with_mode(hwnd, runtime_id_target, automation_id, false)
+    }
+
+    fn resolve_for_read(
+        hwnd: isize, runtime_id_target: &[i32], automation_id: &str,
+    ) -> Result<(ComGuard, IUIAutomation, IUIAutomationElement), String> {
+        resolve_with_mode(hwnd, runtime_id_target, automation_id, true)
+    }
+
+    fn resolve_with_mode(
+        hwnd: isize, runtime_id_target: &[i32], automation_id: &str, read_only: bool,
+    ) -> Result<(ComGuard, IUIAutomation, IUIAutomationElement), String> {
         let com = ComGuard::new()?;
-        let uia: IUIAutomation = unsafe {
+        let started = Instant::now();
+        let uia: IUIAutomation = if read_only { read_only_client()? } else { unsafe {
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| format!("CoCreateInstance IUIAutomation: {e}"))?
+        } };
+        let read_budget_available = || {
+            if read_only && started.elapsed().as_millis() >= EXTRACTION_BUDGET_MS as u128 {
+                Err("UIA scoped read resolution budget exceeded".to_owned())
+            } else { Ok(()) }
         };
+        read_budget_available()?;
         let root = unsafe {
             uia.ElementFromHandle(HWND(hwnd as *mut _))
                 .map_err(|e| format!("ElementFromHandle: {e}"))?
@@ -984,6 +1008,7 @@ mod native {
             }
         }
 
+        read_budget_available()?;
         let condition = unsafe {
             uia.CreateTrueCondition()
                 .map_err(|e| format!("CreateTrueCondition: {e}"))?
@@ -999,6 +1024,7 @@ mod native {
         };
         let mut automation_fallback = None;
         for i in 0..count {
+            read_budget_available()?;
             let element = unsafe {
                 found
                     .GetElement(i)

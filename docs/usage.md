@@ -175,3 +175,9 @@ failure returns semantic refs and `observation.status: "semantic_only"`, no imag
 `nativeCompletion: "unconfirmed"` is not proof native capture work has stopped;
 use native diagnostics for its request/task lifecycle. Pixel actions still require
 a valid image, and all input retains its exact target/foreground preconditions.
+
+### Windows pixel-only observation
+
+Use `observe_ui({root: nativeRootRef, mode: "pixels"})` when an exact Windows native window is known and only its pixels are needed. This mode skips UIA and OCR, requires a successful image, and marks the unobserved semantic subtree as truncated and picture-only. It does not return semantic element refs. Unsupported platforms, browser CDP roots, and omitted roots are rejected before capture. Search and semantic postconditions require a new semantic/fused observation.
+
+Coordinate actions remain subject to the existing headless policy, exact HWND foreground checks, captured geometry checks, and stale-reference guards. Their successor capture keeps pixel-only mode; a returned HID dispatch still has an unverified effect and must not be automatically replayed or treated as a verified edit. Inspect the fresh image independently. Native capture failure remains a failure, and older helpers that do not acknowledge skipping UIA cannot establish a pixel-only state. The new path does not make slow semantic provider reads bounded.

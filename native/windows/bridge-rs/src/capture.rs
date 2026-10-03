@@ -459,8 +459,8 @@ fn bgrx_to_opaque_rgba(pixels: &mut [u8]) {
 mod unit_tests {
     #[test]
     fn detects_uniform_failed_compositor_captures() {
-        let black = vec![0, 0, 0, 255].repeat(10_000);
-        let white = vec![231, 231, 231, 255].repeat(10_000);
+        let black = [0, 0, 0, 255].repeat(10_000);
+        let white = [231, 231, 231, 255].repeat(10_000);
         let mut almost_uniform = white.clone();
         for offset in (0..almost_uniform.len()).step_by(4).take(200) {
             almost_uniform[offset..offset + 3].copy_from_slice(&[40, 120, 200]);
@@ -485,7 +485,7 @@ mod unit_tests {
     #[test]
     fn detects_uniform_window_with_thin_border_at_stride_aligned_width() {
         let (width, height) = (1164usize, 688usize);
-        let mut pixels = vec![240, 240, 240, 255].repeat(width * height);
+        let mut pixels = [240, 240, 240, 255].repeat(width * height);
         for y in 0..height {
             for x in 0..width {
                 if x < 9 || x >= width - 9 || y < 3 || y >= height - 3 {
@@ -505,7 +505,7 @@ mod unit_tests {
     #[test]
     fn preserves_window_with_visible_text_like_rows_at_stride_aligned_width() {
         let (width, height) = (1164usize, 688usize);
-        let mut pixels = vec![240, 240, 240, 255].repeat(width * height);
+        let mut pixels = [240, 240, 240, 255].repeat(width * height);
         // Repeated short dark runs model visible text rather than a blank surface.
         for y in 30..height - 30 {
             for x in 30..width - 30 {

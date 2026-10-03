@@ -93,3 +93,32 @@ The native picture menu and OfficePLUS can both be named 图片. Resolve the cur
 Word's native Accept/Reject split buttons exposed a parent rectangle covering both halves and a default-action child covering the upper half. Parent `press` did not expand the menu. A click in the remaining lower region, computed from freshly inspected rectangles and a current image, opened it. Do not reuse coordinates from a previous observation.
 
 In the tested Word configuration, the menu's `Net UI Tool Window` root had no UIA children although its screenshot showed the menu. The exact menu entries were available under the owning document's UIA tree. After independently confirming the popup's exact owner, one semantic owner-root observation without refocusing found Accept/Reject All Changes. Both saved-document checks passed: acceptance retained the inserted marker; rejection removed it; both removed revision nodes and preserved original contents. These are single-trial observations, not a general provider guarantee.
+
+
+### Bounded semantic discovery
+
+Windows UIA discovery now runs in a dedicated read-only helper subprocess.
+The parent drains its output concurrently (maximum 8 MiB), gives the worker
+8.5 seconds including process startup, and terminates and reaps it on expiry.
+The existing 8-second cooperative traversal budget and provider transaction
+settings remain in place. A stalled `ElementFromHandle`, `FindAll`, or scoped
+reference resolution cannot hold this discovery worker indefinitely.
+
+A timed-out full-root extraction returns an incomplete outline with
+`uiaDiagnostics.reason = "read_timeout"`, no invented semantic targets, and the
+independent window image when capture succeeded. Scoped extraction fails rather
+than claiming a successful empty subtree. Worker-local element references are
+reassigned in the parent; only JSON and runtime IDs cross the boundary.
+
+The worker mode cannot dispatch actions or activate windows. Input, live action
+resolution, exact foreground HWND checks, and stale-reference guards keep their
+existing contracts. Pixel-only observations do not start a UIA worker. This does
+not bound every other native operation, including root enumeration or live
+pattern actions, and does not turn an incomplete outline into semantic success.
+
+The motivating Word traces failed inside `FindAll` after approximately 27–30
+seconds before any nodes were visited, despite finite UIA transaction settings.
+The worker budget addresses that blocking boundary; cross-platform process tests
+cover a hung worker, output larger than pipe capacity, oversized output, and
+failed exit. Native Word latency and repeated provider-failure acceptance remain
+required before claiming a measured deployed performance improvement.

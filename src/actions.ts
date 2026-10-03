@@ -201,6 +201,11 @@ function containsEditable(node: OutlineNode): boolean {
 
 export function prepareAction(action: UiAction, state: ActionState, env: ActionEnvironment): PreparedAction {
 	const operation = action.action;
+	if (action.ref && ["press", "click", "setText", "typeText", "keypress"].includes(operation)
+		&& env.node(action.ref).isEnabled === false) {
+		throw new Error("Target control is disabled; input was not sent.");
+	}
+
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
 	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
 	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));

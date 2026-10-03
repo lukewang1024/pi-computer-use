@@ -26,6 +26,7 @@ export interface OutlineNode {
 	description: string;
 	value: string;
 	actions: string[];
+	isEnabled?: boolean;
 	canPress: boolean;
 	canFocus: boolean;
 	canSetValue: boolean;
@@ -78,6 +79,7 @@ export interface LookResponse {
 	window: LookWindow;
 	image?: LookImage;
 	imageError?: string;
+	uiaDiagnostics?: Record<string, unknown>;
 	outline: OutlineNode;
 	timings: Record<string, number>;
 	readText?: { requested?: "auto" | "always" | "never"; executed: boolean };
@@ -188,6 +190,7 @@ function parseNode(raw: unknown, parent?: OutlineNode): OutlineNode {
 		description: toString(record.description),
 		value: toString(record.value),
 		actions: Array.isArray(record.actions) ? record.actions.filter((value): value is string => typeof value === "string") : [],
+		isEnabled: typeof record.isEnabled === "boolean" ? record.isEnabled : undefined,
 		canPress: toBoolean(record.canPress),
 		canFocus: toBoolean(record.canFocus),
 		canSetValue: toBoolean(record.canSetValue),
@@ -240,6 +243,8 @@ export function parseLookResponse(raw: unknown): LookResponse {
 			height: Math.max(1, Math.trunc(toNumber(image.height, 1))),
 		} : undefined,
 		imageError: typeof record.imageError === "string" ? record.imageError.slice(0, 1024) : undefined,
+		uiaDiagnostics: isRecord(record.uiaDiagnostics) ? { ...record.uiaDiagnostics,
+			error: typeof record.uiaDiagnostics.error === "string" ? record.uiaDiagnostics.error.slice(0, 1024) : undefined } : undefined,
 		outline: outline.root,
 		timings: isRecord(record.timings) ? Object.fromEntries(Object.entries(record.timings).map(([key, value]) => [key, toNumber(value)])) : {},
 		readText: readText ? { requested: requestedReadText, executed: toBoolean(readText.executed) } : undefined,
@@ -579,6 +584,7 @@ function copyNodeFields(target: OutlineNode, source: OutlineNode, preserveWireRe
 	target.description = source.description;
 	target.value = source.value;
 	target.actions = [...source.actions];
+	target.isEnabled = source.isEnabled;
 	target.canPress = source.canPress;
 	target.canFocus = source.canFocus;
 	target.canSetValue = source.canSetValue;

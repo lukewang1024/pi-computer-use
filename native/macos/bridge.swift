@@ -2210,7 +2210,39 @@ final class Bridge {
 		if let element, action == "press" || action == "click" {
 			let elementRole = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
 			let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText", "AXSecureTextField"]
-			let requiresPointerFocus = hasAncestorRole(element, role: "AXWebArea") || textRoles.contains(elementRole)
+			let isWeb = hasAncestorRole(element, role: "AXWebArea")
+			let isSingleLeftClick = (params["button"] as? String ?? "left") == "left"
+				&& ((params["clickCount"] as? NSNumber)?.intValue ?? 1) == 1
+			var focusSettable = DarwinBoolean(false)
+			let focusCapability = AXUIElementIsAttributeSettable(element, kAXFocusedAttribute as CFString, &focusSettable)
+			if textRoles.contains(elementRole), !isWeb, isSingleLeftClick,
+				focusCapability == .success, focusSettable.boolValue {
+				// Ref-scoped native text clicks can establish focus without a pointer.
+				// Bind both the setter and its effect to the observed process/window.
+				var elementPid: pid_t = 0
+				guard AXUIElementGetPid(element, &elementPid) == .success, elementPid == pid,
+					record.windowId > 0, let boundWindow = windowElement(pid: pid, windowId: record.windowId),
+					isElement(element, descendantOf: boundWindow)
+				else { throw BridgeFailure(message: "Native focus reference no longer belongs to the observed window", code: "stale_ref") }
+				let status = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+				let appElement = AXUIElementCreateApplication(pid)
+				let focusedElement = copyAttribute(appElement, attribute: kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement)
+				let focusedWindow = copyAttribute(appElement, attribute: kAXFocusedWindowAttribute as CFString).flatMap(asAXElement)
+				let elementMatches = focusedElement.map { sameElement($0, element) } ?? false
+				let windowMatches = focusedWindow.map { sameElement($0, boundWindow) } ?? false
+				let attributeFocused = boolAttribute(element, attribute: kAXFocusedAttribute as CFString) == true
+				let verified = status == .success && elementMatches && windowMatches && attributeFocused
+				performed["grounding"] = "description"
+				performed["delivery"] = "ax"
+				performed["focused"] = verified
+				// A returned setter can have an ambiguous effect. Never replay it or
+				// fall through to pointer input; observe before any subsequent action.
+				return finish(["outcome": verified ? "worked" : "unknown", "performed": performed,
+					"evidence": ["nativeTextFocus": ["status": Int(status.rawValue),
+						"focusedElementMatches": elementMatches, "focusedWindowMatches": windowMatches,
+						"attributeFocused": attributeFocused, "verified": verified]]])
+			}
+			let requiresPointerFocus = isWeb || textRoles.contains(elementRole)
 			if requiresPointerFocus && policy != "ax_only" {
 				if policy == "foreground" {
 					try executeCoordinates(coordinatePoint())

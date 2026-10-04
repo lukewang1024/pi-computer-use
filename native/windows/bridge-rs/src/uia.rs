@@ -50,6 +50,24 @@ impl<T> ElementIdentityResolver<T> {
     }
 }
 
+// Preserve the extraction root and a few late document anchors without raising
+// the property-cache/output budget. Each index is visited at most once.
+#[cfg(any(windows, test))]
+fn extraction_order(count: usize, limit: usize, anchors: &[usize]) -> Vec<usize> {
+    let mut result = Vec::with_capacity(count.min(limit));
+    if count == 0 || limit == 0 { return result; }
+    result.push(0);
+    for &index in anchors.iter().take(8) {
+        if result.len() == limit { break; }
+        if index < count && !result.contains(&index) { result.push(index); }
+    }
+    for index in 1..count.min(limit) {
+        if result.len() == limit { break; }
+        if !result.contains(&index) { result.push(index); }
+    }
+    result
+}
+
 #[cfg(any(windows, test))]
 fn extraction_diagnostics(total_found: usize, raw_visited: usize, visible_retained: usize) -> Value {
     serde_json::json!({
@@ -463,6 +481,24 @@ mod native {
         } as usize;
 
         let limit = count.min(MAX_ELEMENTS);
+        // The provider's depth-first order can put the actual document after
+        // hundreds of ribbon/sidebar nodes. Inspect only a short omitted tail
+        // for document anchors, then reserve slots inside the existing limit.
+        // No names/classes/PIDs are treated as input authority.
+        let anchor_started = Instant::now();
+        let mut anchor_scanned = 0usize;
+        let mut anchors = Vec::new();
+        for index in limit..count.min(limit + 64) {
+            if budget_expired() || anchor_started.elapsed().as_millis() >= 500 || anchors.len() >= 8 { break; }
+            let Some(element) = (unsafe { found.GetElement(index as _).ok() }) else { continue };
+            anchor_scanned += 1;
+            if unsafe { element.CurrentControlType().ok() } == Some(UIA_DocumentControlTypeId) {
+                anchors.push(index);
+            }
+        }
+        let anchor_ms = anchor_started.elapsed().as_millis() as u64;
+        let order = super::extraction_order(count, MAX_ELEMENTS, &anchors);
+        let selected = order.iter().copied().collect::<HashSet<_>>();
         let mut elements = Vec::with_capacity(limit);
         let walker = unsafe {
             uia.ControlViewWalker()
@@ -472,7 +508,7 @@ mod native {
         let retained_started = Instant::now();
         let mut visited = 0usize;
         let mut cache_failures = 0usize;
-        for i in 0..limit {
+        for i in order {
             if budget_expired() { break; }
             let element = unsafe {
                 found
@@ -516,8 +552,11 @@ mod native {
                 .collect::<HashSet<_>>();
             let mut truncated = HashSet::new();
             let mut ancestry_cache = HashMap::new();
-            for i in limit..count.min(limit + MAX_TRUNCATION_SCAN) {
-                if budget_expired() { break; }
+            let mut omitted_scanned = 0usize;
+            for i in 0..count {
+                if selected.contains(&i) { continue; }
+                if budget_expired() || omitted_scanned >= MAX_TRUNCATION_SCAN { break; }
+                omitted_scanned += 1;
                 let Some(candidate) = (unsafe { found.GetElement(i as _).ok() }) else { continue };
                 ancestry_candidates += 1;
                 if let Some(key) = super::retained_ancestor(
@@ -568,6 +607,11 @@ mod native {
         diagnostics["budgetMs"] = json!(EXTRACTION_BUDGET_MS);
         diagnostics["elapsedMs"] = json!(extraction_started.elapsed().as_millis() as u64);
         diagnostics["cacheFailures"] = json!(cache_failures);
+        diagnostics["documentAnchors"] = json!({
+            "tailCandidatesScanned": anchor_scanned, "selected": anchors.len(),
+            "scanMs": anchor_ms,
+            "candidateLimit": 64, "cooperativeBudgetMs": 500
+        });
         if budget_expired() || cache_failures > 0 {
             diagnostics["status"] = json!("incomplete");
             diagnostics["reason"] = json!(if budget_expired() { "budget_exceeded" } else { "cache_unavailable" });
@@ -1350,6 +1394,28 @@ mod unit_tests {
         assert_eq!(elements[0]["parentRuntimeId"], json!([7, 1]));
         assert_eq!(elements[2]["extractionDiagnostics"]["reason"], "read_timeout");
         assert!(elements[2].get("ref").is_none());
+    }
+
+    #[test]
+    fn document_after_sidebar_is_retained_within_the_original_budget() {
+        let order = super::extraction_order(236, 200, &[220]);
+        assert_eq!(order.len(), 200);
+        assert_eq!(&order[..3], &[0, 220, 1]);
+        assert!(!order.contains(&199));
+        assert!(super::extraction_diagnostics(236, order.len(), 200)["rawTruncated"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn anchor_order_is_unique_bounded_and_keeps_small_trees_complete() {
+        assert_eq!(super::extraction_order(4, 200, &[0, 3, 3, 999]), vec![0, 3, 1, 2]);
+        assert!(super::extraction_order(0, 200, &[1]).is_empty());
+        assert!(super::extraction_order(10, 0, &[1]).is_empty());
+        let order = super::extraction_order(500, 200, &(200..220).collect::<Vec<_>>());
+        assert_eq!(order.len(), 200);
+        assert!(order.contains(&207));
+        assert!(!order.contains(&208));
+        assert_eq!(order.iter().copied().collect::<std::collections::HashSet<_>>().len(), 200);
+        assert_eq!(super::extraction_order(236, 200, &[]), (0..200).collect::<Vec<_>>());
     }
 
     #[test]

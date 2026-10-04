@@ -119,6 +119,8 @@ export class WindowsHelperClient {
 		const child = spawn(WINDOWS_HELPER_PATH, [], { stdio: ["pipe", "pipe", "pipe"] });
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
+		// Drain diagnostics continuously: an unread pipe can block helper replies.
+		child.stderr.resume();
 		child.stdin.setDefaultEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => { if (this.child === child) this.onStdout(chunk); });
 		const disconnected = (reason: string) => {

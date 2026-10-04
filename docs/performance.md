@@ -31,3 +31,17 @@ a controlled daemon, asserting one look, no automatic recapture, invalid-ref
 preflight rejection, strict errors and legacy compatibility. The shared native
 policy tests have also been compiled and run on a managed Mac. These checks do
 not establish live chooser latency or PDF export acceptance.
+
+## Native control value verification
+
+Mac AX values may be strings, CFNumbers or CFBooleans. Observations and action
+readback preserve primitive numeric values, including checkbox and radio-button
+states. Unsupported objects and nonfinite numbers remain unavailable, and secure
+field values remain redacted. An accepted value write without readable successor
+evidence is reported as unknown rather than failed or verified; it must not be
+replayed to recover missing evidence.
+
+A Word PDF acceptance attempt stopped before export because the previous
+string-only reader exposed both native radio states as empty. The shared value
+normalization and write-outcome policy are covered by actual Mac Swift tests;
+real Word radio-state and PDF export acceptance still require the candidate.

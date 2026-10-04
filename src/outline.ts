@@ -79,6 +79,7 @@ export interface LookResponse {
 	window: LookWindow;
 	image?: LookImage;
 	imageError?: string;
+	ocrDiagnostics?: { status: "succeeded" | "failed"; nativeCompletion: "completed" | "unconfirmed"; readOnly: true; errorDomain?: string; errorCode?: number; error?: string };
 	uiaDiagnostics?: Record<string, unknown>;
 	outline: OutlineNode;
 	timings: Record<string, number>;
@@ -243,6 +244,14 @@ export function parseLookResponse(raw: unknown): LookResponse {
 			height: Math.max(1, Math.trunc(toNumber(image.height, 1))),
 		} : undefined,
 		imageError: typeof record.imageError === "string" ? record.imageError.slice(0, 1024) : undefined,
+		ocrDiagnostics: isRecord(record.ocrDiagnostics) && (record.ocrDiagnostics.status === "succeeded" || record.ocrDiagnostics.status === "failed") ? {
+			status: record.ocrDiagnostics.status,
+			nativeCompletion: record.ocrDiagnostics.nativeCompletion === "completed" ? "completed" : "unconfirmed",
+			readOnly: true,
+			errorDomain: typeof record.ocrDiagnostics.errorDomain === "string" ? record.ocrDiagnostics.errorDomain.slice(0, 256) : undefined,
+			errorCode: typeof record.ocrDiagnostics.errorCode === "number" && Number.isSafeInteger(record.ocrDiagnostics.errorCode) ? record.ocrDiagnostics.errorCode : undefined,
+			error: typeof record.ocrDiagnostics.error === "string" ? record.ocrDiagnostics.error.slice(0, 1024) : undefined,
+		} : undefined,
 		uiaDiagnostics: isRecord(record.uiaDiagnostics) ? { ...record.uiaDiagnostics,
 			error: typeof record.uiaDiagnostics.error === "string" ? record.uiaDiagnostics.error.slice(0, 1024) : undefined } : undefined,
 		outline: outline.root,

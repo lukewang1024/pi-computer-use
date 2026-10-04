@@ -92,3 +92,23 @@ The architecture is centered on immutable, state-scoped observations. Desktop su
 ## License
 
 MIT
+
+
+### macOS OCR failure and pixel evidence
+
+A visual observation can successfully capture a window while Vision text
+recognition fails. The macOS helper retains that image and its native
+accessibility outline. `details.ocrDiagnostics` reports the bounded error,
+`status: failed` and whether recognition completion is confirmed. Failed OCR
+never claims text was obtained; use native text evidence when available, or
+inspect the actual pixels. Input guards are unchanged. Automatic text search
+does not retry OCR in that same failed observation; an explicit new observation
+can try again against fresh content. OCR cancellation requested on timeout is
+reported as unconfirmed completion rather than successful recognition.
+
+For an isolated managed helper, set an absolute
+`PI_COMPUTER_USE_HELPER_SOCKET_PATH` alongside the isolated helper app path.
+The SDK launches that exact app with its normal LaunchServices lifecycle.
+`PI_CU_SOCKET_PATH` continues to designate an externally owned socket; the SDK
+never launches or restarts that external helper. Configuring both socket
+variables is rejected before helper operations.

@@ -415,6 +415,7 @@ final class Bridge {
 			let bytes = try? Data(contentsOf: executable) else { return "" }
 		return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
 	}()
+	private let textRecognition = BoundedReadExecutor<[OCRBox]>(label: "pi-computer-use.text-recognition")
 	private let captureTraceLock = NSLock()
 	private var captureTraces: [CaptureTrace] = []
 	private let refStore = AXRefStore()
@@ -1568,7 +1569,10 @@ final class Bridge {
 				let nativeError = error as NSError
 				let failure = error as? BridgeFailure
 				ocrDiagnostics = ["status": "failed", "readOnly": true,
-					"nativeCompletion": failure?.code == "text_recognition_timeout" ? "unconfirmed" : "completed",
+					"nativeCompletion": ["text_recognition_timeout", "text_recognition_busy"].contains(failure?.code ?? "") ? "unconfirmed" : "completed",
+					"errorKind": failure?.code ?? "text_recognition_failed",
+					"operationNotStarted": failure?.code == "text_recognition_busy",
+					"cancellationRequested": failure?.code == "text_recognition_timeout",
 					"errorDomain": String(nativeError.domain.prefix(256)), "errorCode": nativeError.code,
 					"error": String((failure?.message ?? nativeError.localizedDescription).prefix(1024))]
 			}
@@ -1757,37 +1761,30 @@ final class Bridge {
 	}
 
 	private func recognizeText(in image: CGImage, outputWidth: Int, outputHeight: Int) throws -> [OCRBox] {
-		let semaphore = DispatchSemaphore(value: 0)
-		let recognized = Box<[OCRBox]>([])
-		let recognizedError = Box<Error?>(nil)
-		let request = VNRecognizeTextRequest { request, error in
-			defer { semaphore.signal() }
-			if let error {
-				recognizedError.value = error
-				return
-			}
-			let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
-			recognized.value = observations.compactMap { observation in
-				guard let candidate = observation.topCandidates(1).first else { return nil }
-				let box = observation.boundingBox
-				let x = box.origin.x * Double(outputWidth)
-				let y = (1.0 - box.origin.y - box.height) * Double(outputHeight)
-				let w = box.width * Double(outputWidth)
-				let h = box.height * Double(outputHeight)
-				return OCRBox(string: candidate.string, confidence: Double(candidate.confidence), rect: CGRect(x: x, y: y, width: w, height: h))
-			}
-		}
+		let request = VNRecognizeTextRequest()
 		request.recognitionLevel = .accurate
 		request.usesLanguageCorrection = false
-		try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-		if semaphore.wait(timeout: .now() + .seconds(8)) == .timedOut {
-			request.cancel()
-			throw BridgeFailure(message: "Text recognition timed out", code: "text_recognition_timeout")
-		}
-		if let error = recognizedError.value {
+		do {
+			return try textRecognition.run(timeout: 8, cancel: { request.cancel() }) {
+				try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+				let observations = request.results ?? []
+				return observations.compactMap { observation in
+					guard let candidate = observation.topCandidates(1).first else { return nil }
+					let box = observation.boundingBox
+					let x = box.origin.x * Double(outputWidth)
+					let y = (1.0 - box.origin.y - box.height) * Double(outputHeight)
+					let w = box.width * Double(outputWidth)
+					let h = box.height * Double(outputHeight)
+					return OCRBox(string: candidate.string, confidence: Double(candidate.confidence), rect: CGRect(x: x, y: y, width: w, height: h))
+				}
+			}
+		} catch BoundedReadFailure.busy {
+			throw BridgeFailure(message: "Previous text recognition is still running; no new OCR was started", code: "text_recognition_busy")
+		} catch BoundedReadFailure.timedOut {
+			throw BridgeFailure(message: "Text recognition timed out; cancellation completion is unconfirmed", code: "text_recognition_timeout")
+		} catch {
 			throw BridgeFailure(message: "Text recognition failed: \(error.localizedDescription)", code: "text_recognition_failed")
 		}
-		return recognized.value
 	}
 
 	private func attachOCR(_ boxes: [OCRBox], to root: LookNode) {

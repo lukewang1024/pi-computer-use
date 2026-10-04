@@ -294,7 +294,7 @@ checkMacos("INV-8 swift typecheck", () => {
 		"native/macos/agent_cursor_motion.swift",
 		"native/macos/foreground_gate.swift",
 		"native/macos/text_input_source.swift",
-		"native/macos/optional_image_capture.swift", "native/macos/accessibility_value.swift",
+		"native/macos/optional_image_capture.swift", "native/macos/accessibility_value.swift", "native/macos/bounded_read.swift",
 		"native/macos/outline_walk.swift",
 		"native/macos/bridge.swift",
 	], { cwd: root, stdio: "pipe" });

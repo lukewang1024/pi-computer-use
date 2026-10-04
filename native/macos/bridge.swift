@@ -1652,36 +1652,21 @@ final class Bridge {
 		// client aborts at 33s, so stop walking well before that and return a
 		// truncated outline instead.
 		let deadline = Date().addingTimeInterval(20.0)
-		var walked = 1
-		var seen = Set<ObjectIdentifier>([ObjectIdentifier(root)])
-		var queue: [(AXUIElement, LookNode)] = [(root, rootNode)]
-		var index = 0
-		while index < queue.count {
-			let (element, node) = queue[index]
-			index += 1
-			let children = axElementArray(element, attribute: kAXChildrenAttribute as CFString)
-			if children.isEmpty { continue }
-			if walked >= nodeLimit || Date() >= deadline {
-				node.truncated = true
-				continue
-			}
-			let visibleByKind = visibleChildrenByKind(element)
-			for child in children {
-				if walked >= nodeLimit || Date() >= deadline {
-					node.truncated = true
-					break
-				}
-				let identity = ObjectIdentifier(child)
-				if seen.contains(identity) { continue }
-				seen.insert(identity)
-				let role = stringAttribute(child, attribute: kAXRoleAttribute as CFString) ?? ""
-				let offscreen = childOffscreen(child, role: role, visibleByKind: visibleByKind)
-				let childNode = lookNode(element: child, transform: transform, offscreen: offscreen)
-				node.children.append(childNode)
-				queue.append((child, childNode))
-				walked += 1
-			}
-		}
+		var visibility: [ObjectIdentifier: [String: [AXUIElement]?]] = [:]
+		walkObservedOutline(root: root, node: rootNode, maxNodes: nodeLimit,
+			identity: { AnyHashable(ObjectIdentifier($0)) },
+			children: { self.axElementArray($0, attribute: kAXChildrenAttribute as CFString) },
+			describe: { child, parent in
+				let key = ObjectIdentifier(parent)
+				if visibility[key] == nil { visibility[key] = self.visibleChildrenByKind(parent) }
+				let role = self.stringAttribute(child, attribute: kAXRoleAttribute as CFString) ?? ""
+				let hidden = self.childOffscreen(child, role: role, visibleByKind: visibility[key]!)
+				return self.lookNode(element: child, transform: transform, offscreen: hidden)
+			},
+			offscreen: { $0.offscreen },
+			append: { $0.children.append($1) },
+			truncate: { $0.truncated = true },
+			withinBudget: { Date() < deadline })
 		return rootNode
 	}
 

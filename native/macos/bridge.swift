@@ -831,6 +831,7 @@ final class Bridge {
 		var output: [String: Any] = [
 			"protocolVersion": protocolVersion,
 			"architectureVersion": 1,
+			"optionalImageFailure": true,
 			"invariants": ["state-scoped-observations", "bounded-observation-history", "multi-root-forest", "progressive-disclosure", "atomic-physical-input", "concurrent-requests", "transactional-batching"],
 			"pid": Int32(getpid()),
 			"parentPid": parentPid,
@@ -1459,6 +1460,7 @@ final class Bridge {
 		let readText = optionalStringArg(request, "readText") ?? "auto"
 		let baseLookId = optionalStringArg(request, "baseLookId")
 		let includeImage = boolArg(request, "includeImage") ?? true
+		let allowImageFailure = boolArg(request, "allowImageFailure") ?? false
 		guard readText == "auto" || readText == "always" || readText == "never" else {
 			throw BridgeFailure(message: "readText must be auto, always, or never", code: "invalid_args")
 		}
@@ -1468,8 +1470,20 @@ final class Bridge {
 		let isMenuRoot = requestedRole == "AXMenu" || (windowRef?.hasPrefix("cgmenu:") == true)
 		let captureStart = Date()
 		let shouldCapture = !isMenuRoot && (includeImage || readText == "always")
-		let capture = try shouldCapture ? windowId.map { try captureWindow(windowId: $0, requestId: optionalStringArg(request, "id") ?? "unidentified") } : nil
-		let captureMs = capture.map { _ in elapsedMs(captureStart) } ?? 0
+		var capture: CapturedWindowImage?
+		var imageFailure: OptionalImageFailure?
+		if shouldCapture, let windowId {
+			let attempt = try captureOptionalImage(allowed: allowImageFailure,
+				operation: { try self.captureWindow(windowId: windowId, requestId: self.optionalStringArg(request, "id") ?? "unidentified") },
+				classify: { error in
+					guard let failure = error as? BridgeFailure else { return nil }
+					return classifyOptionalImageFailure(code: failure.code, message: failure.message,
+						taskCompleted: failure.details["taskCompleted"] as? Bool)
+				})
+			capture = attempt.value
+			imageFailure = attempt.failure
+		}
+		let captureMs = shouldCapture ? elapsedMs(captureStart) : 0
 
 		let pid: Int32
 		if let windowId, let ownerPid = pidForWindowId(windowId) {
@@ -1517,10 +1531,14 @@ final class Bridge {
 			imageHeight = outputImage.height
 			transform = rectTransform(windowFrame: capture.frame, imageWidth: outputImage.width, imageHeight: outputImage.height)
 			if includeImage {
-				guard let jpeg = jpegData(image: outputImage, quality: 0.8) else {
+				if let jpeg = jpegData(image: outputImage, quality: 0.8) {
+					imagePayload = ["jpegBase64": jpeg.base64EncodedString(), "width": outputImage.width, "height": outputImage.height]
+				} else if allowImageFailure {
+					imagePayload = nil
+					imageFailure = classifyOptionalImageFailure(code: "encoding_failed", message: "Failed to encode look image as JPEG", taskCompleted: true)
+				} else {
 					throw BridgeFailure(message: "Failed to encode look image as JPEG", code: "encoding_failed")
 				}
-				imagePayload = ["jpegBase64": jpeg.base64EncodedString(), "width": outputImage.width, "height": outputImage.height]
 			} else {
 				imagePayload = nil
 			}
@@ -1565,7 +1583,7 @@ final class Bridge {
 			windowFrame: baseRecord?.windowFrame ?? capture?.frame ?? rootFrame,
 			imageWidth: baseRecord?.imageWidth ?? imageWidth,
 			imageHeight: baseRecord?.imageHeight ?? imageHeight,
-			hasImage: baseRecord?.hasImage ?? (capture != nil)
+			hasImage: imageFailure == nil ? (baseRecord?.hasImage ?? (capture != nil)) : false
 		))
 		let scale = (capture?.frame.width ?? rootFrame.width) > 0 ? Double(imageWidth) / (capture?.frame.width ?? rootFrame.width) : displayScaleFactor(for: rootFrame)
 		let pairing = pairingForWindow(window, pid: pid)
@@ -1590,6 +1608,10 @@ final class Bridge {
 			"timings": ["captureMs": captureMs, "describeMs": describeMs, "readTextMs": readTextMs],
 			"readText": ["requested": readText, "executed": readTextExecuted],
 		]
+		if let failure = imageFailure {
+			response["imageError"] = failure.message
+			response["imageDiagnostics"] = ["code": failure.code, "nativeCompletion": failure.nativeCompletion, "readOnly": true]
+		}
 		if let imagePayload { response["image"] = imagePayload }
 		if let ocrDiagnostics { response["ocrDiagnostics"] = ocrDiagnostics }
 		return response

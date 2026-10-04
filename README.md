@@ -112,3 +112,26 @@ The SDK launches that exact app with its normal LaunchServices lifecycle.
 `PI_CU_SOCKET_PATH` continues to designate an externally owned socket; the SDK
 never launches or restarts that external helper. Configuring both socket
 variables is rejected before helper operations.
+
+
+### Navigation performance sampling
+
+`navigate_browser` accepts optional `includePerformance: true`. It collects fixed,
+bounded top-frame navigation, paint and buffered observer measurements before the
+normal successor snapshot. This avoids a separate `evaluate_browser` call and a
+second full accessibility traversal. The default navigation behavior is unchanged;
+arbitrary JavaScript evaluation still refreshes the observation and invalidates
+old action refs through the existing resource epoch rules.
+
+Successful collection returns `details.performanceSample` and a compact text
+summary. Observer entries are capped at64 per type with explicit truncation;
+failed observer types are unavailable, not zero-latency evidence. Collection
+failure returns bounded `details.performanceError` alongside the successful
+navigation's successor state. It never repeats navigation or skips the mandatory
+successor snapshot. Failed navigation and snapshot refresh still fail normally.
+
+These are retained top-frame observation-window data, not page health, final
+Core Web Vitals or server load capacity. Preserve test conditions and distinguish
+positive from zero reported transfer bytes; zero alone does not prove a cache hit.
+Use the fresh returned state/refs for subsequent actions, and capture the exact
+page separately for visual claims.

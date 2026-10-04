@@ -842,6 +842,7 @@ final class Bridge {
 			"arch": arch,
 			"accessibility": permissions["accessibility"] ?? false,
 			"screenRecording": permissions["screenRecording"] ?? false,
+			"postEventAccess": CGPreflightPostEventAccess(),
 			"recentCompletedRequestIds": completedRequestIds(),
 			"captures": captureSnapshots(),
 		]
@@ -2146,6 +2147,26 @@ final class Bridge {
 				throw BridgeFailure(message: "Coordinate grounding is unavailable for this outline-only root", code: "coordinate_unavailable_for_root")
 			}
 			performed["grounding"] = "coordinates"
+			// Read-only evidence: event posting has no delivery acknowledgement.
+			var pointerDiagnostics: [String: Any] = [
+				"lookId": record.lookId,
+				"windowId": record.windowId,
+				"imageWidth": record.imageWidth,
+				"imageHeight": record.imageHeight,
+				"windowFrame": ["x": record.windowFrame.origin.x, "y": record.windowFrame.origin.y, "width": record.windowFrame.width, "height": record.windowFrame.height],
+				"screenPoint": ["x": point.x, "y": point.y],
+				"delivery": delivery,
+				"postEventAccess": CGPreflightPostEventAccess(),
+			]
+			if let cursor = CGEvent(source: nil)?.location {
+				pointerDiagnostics["cursorBefore"] = ["x": cursor.x, "y": cursor.y]
+			}
+			defer {
+				if let cursor = CGEvent(source: nil)?.location {
+					pointerDiagnostics["cursorAfter"] = ["x": cursor.x, "y": cursor.y]
+				}
+				performed["pointerDiagnostics"] = pointerDiagnostics
+			}
 			if delivery == "pid" { performed["verification"] = "caller_required" }
 			acquirePhysicalInputIfNeeded()
 			focusTargetForPhysicalInput()

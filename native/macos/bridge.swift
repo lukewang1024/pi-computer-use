@@ -2084,7 +2084,7 @@ final class Bridge {
 			}
 			if refound { performed["refound"] = true }
 			element = stored
-			beforeValue = stringAttribute(stored, attribute: kAXValueAttribute as CFString)
+			beforeValue = valueAttribute(stored)
 			beforeSelected = stringAttribute(stored, attribute: kAXSelectedTextAttribute as CFString)
 		} else if let xNumber = target["x"] as? NSNumber, let yNumber = target["y"] as? NSNumber {
 			guard record.hasImage else {
@@ -2221,7 +2221,7 @@ final class Bridge {
 				acquirePhysicalInputIfNeeded()
 				focusTargetForPhysicalInput()
 				_ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-				let currentValue = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
+				let currentValue = valueAttribute(element) ?? ""
 				var range = CFRange(location: 0, length: (currentValue as NSString).length)
 				let selected = AXValueCreate(.cfRange, &range).map {
 					AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, $0) == .success
@@ -2233,11 +2233,12 @@ final class Bridge {
 				try postAtomicUnicodeText(text, pid: pid, target: physicalTarget, delivery: delivery)
 				usleep(40_000)
 				let verificationElement = refreshElement() ?? element
-				let value = stringAttribute(verificationElement, attribute: kAXValueAttribute as CFString) ?? ""
+				let observedValue = valueAttribute(verificationElement)
+				let value = observedValue ?? ""
 				performed["grounding"] = "keyboard-events"
 				performed["delivery"] = delivery
 				performed["selectionGrounding"] = selected ? "ax" : "keyboard"
-				return finish(["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]])
+				return finish(["outcome": accessibilityWriteOutcome(observed: observedValue, expected: text), "performed": performed, "evidence": ["value": value, "valueAvailable": observedValue != nil]])
 			}
 			var targetElement = element
 			var status = AXUIElementSetAttributeValue(targetElement, kAXValueAttribute as CFString, text as CFTypeRef)
@@ -2248,11 +2249,12 @@ final class Bridge {
 			if status == .success {
 				performed["grounding"] = "description"
 				performed["delivery"] = "ax"
-				let value = stringAttribute(targetElement, attribute: kAXValueAttribute as CFString) ?? ""
-				if value != text && policy != "foreground" {
+				let observedValue = valueAttribute(targetElement)
+				let value = observedValue ?? ""
+				if let observedValue, observedValue != text && policy != "foreground" {
 					throw BridgeFailure(message: "The background accessibility value write was accepted but did not take effect", code: "foreground_required")
 				}
-				return finish(["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]])
+				return finish(["outcome": accessibilityWriteOutcome(observed: observedValue, expected: text), "performed": performed, "evidence": ["value": value, "valueAvailable": observedValue != nil]])
 			}
 			try executeCoordinates(coordinatePoint())
 		} else if action == "typeText" {
@@ -2268,7 +2270,7 @@ final class Bridge {
 			performed["grounding"] = "coordinates"
 			if let element, !text.isEmpty {
 				usleep(30_000)
-				let afterValue = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
+				let afterValue = valueAttribute(element) ?? ""
 				let changed = afterValue != (beforeValue ?? "")
 				// AppKit's field editor may apply the event before the AX backing
 				// value catches up. Input has already been posted: an unchanged
@@ -2285,7 +2287,7 @@ final class Bridge {
 				if normalizedKeys.count == 2,
 					normalizedKeys.last == "a",
 					["cmd", "command", "meta"].contains(normalizedKeys.first ?? ""),
-					let value = stringAttribute(element, attribute: kAXValueAttribute as CFString)
+					let value = valueAttribute(element)
 				{
 					var range = CFRange(location: 0, length: (value as NSString).length)
 					if let selection = AXValueCreate(.cfRange, &range),
@@ -2320,7 +2322,7 @@ final class Bridge {
 		var outcome = preflightCapsUnknown ? "unknown" : "unknown"
 		var evidence: [String: Any] = [:]
 		if let element, action == "press" || action == "click" {
-			let afterValue = stringAttribute(element, attribute: kAXValueAttribute as CFString)
+			let afterValue = valueAttribute(element)
 			let afterSelected = stringAttribute(element, attribute: kAXSelectedTextAttribute as CFString)
 			if beforeValue != afterValue || beforeSelected != afterSelected || windowChanged {
 				outcome = "worked"
@@ -2943,7 +2945,7 @@ final class Bridge {
 		guard !isSecureTextElement(role: role, subrole: subrole) else {
 			throw BridgeFailure(message: "Refers to a secure text field; refusing to read its value", code: "secure_text_unreadable")
 		}
-		guard let value = stringAttribute(element, attribute: kAXValueAttribute as CFString) else {
+		guard let value = valueAttribute(element) else {
 			throw BridgeFailure(message: "Element has no readable AXValue. Call snapshot/screenshot and choose a text-bearing ref.", code: "text_unavailable")
 		}
 		let characters = Array(value)
@@ -2995,7 +2997,14 @@ final class Bridge {
 
 	private func displayValue(_ element: AXUIElement, role: String, subrole: String) -> String {
 		if isSecureTextElement(role: role, subrole: subrole) { return "" }
-		return stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
+		return accessibilityValueText(copyAttribute(element, attribute: kAXValueAttribute as CFString)) ?? ""
+	}
+
+	private func valueAttribute(_ element: AXUIElement) -> String? {
+		let role = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
+		let subrole = stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
+		return accessibilityValueText(copyAttribute(element, attribute: kAXValueAttribute as CFString),
+			secure: isSecureTextElement(role: role, subrole: subrole))
 	}
 
 	// kAXSheetsAttribute is unsupported (-25205) on recent macOS; sheets are

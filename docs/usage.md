@@ -98,6 +98,13 @@ act_ui({
 
 Steps run sequentially against one resource and retain helper checks. The native helper uses one root baseline and final settle for the transaction, and the bridge returns one final observation. If a transition can change the meaning of later refs or requires a decision, send one action, inspect the returned state, then continue.
 
+For browser CDP actions with `expect`, the snapshot that satisfies the condition
+is returned as the successor state. It is collected after input within the same
+resource write epoch; the bridge does not collect another full accessibility
+tree before returning. Actions without `expect` still collect a new successor
+snapshot. Previous input states remain stale, and a timed-out postcondition
+never causes the action to be replayed.
+
 Clicks at image-grounded points or clicks/presses on editable `@e` refs establish foreground focus for later keyboard steps in the same transaction. A separate `act_ui` call does not inherit tracked focus. Omit `ref` from `typeText` or `keypress` after such a click so input is sent to the editor established by that click:
 
 ```ts

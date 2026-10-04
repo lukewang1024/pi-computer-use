@@ -12,7 +12,7 @@ currentPlatformBackend.ensureReady = async () => ({lastPermissionCheckAt: Date.n
 currentPlatformBackend.listRoots = async () => [];
 currentPlatformBackend.getFrontmost = async () => {throw Error("Browser search must not query desktop foreground");};
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5l0AAAAASUVORK5CYII=';
-let port, present = true, badImage = false, axNodes=[], failPerformance=false;
+let port, present = true, badImage = false, axNodes=[], failPerformance=false, axResponseQueue=[];
 const calls = [], sockets = new Set();
 function frame(value) {
   const data = Buffer.from(JSON.stringify(value));
@@ -49,7 +49,7 @@ server.on('upgrade', (req, socket) => {
         }else result={result:{value:request.params.expression==='window.devicePixelRatio'?2:'Visible page text'}};
       }
       if(request.method==='Page.navigate')result={frameId:'owned-frame'};
-      if(request.method==='Accessibility.getFullAXTree')result={nodes:axNodes};
+      if(request.method==='Accessibility.getFullAXTree')result={nodes:axResponseQueue.length ? axResponseQueue.shift() : axNodes};
       if(request.method==='Page.getLayoutMetrics')result={cssVisualViewport:{clientWidth:1,clientHeight:1,pageX:0,pageY:0}};
       if(request.method==='Page.captureScreenshot')result={data:badImage?'invalid':pixel};
       socket.write(frame({id:request.id,result}));
@@ -150,6 +150,34 @@ try {
   present=false;
   await assert.rejects(()=>tool(executeObserve,{root,mode:'visual'}),/no longer available/);
   assert.equal(calls.some(c=>c.method.startsWith('Input.')),false,'observation must not send input');
+  // Public action executor + real CDP transport: a satisfied postcondition is
+  // already a successor observation, and must not trigger another full tree.
+  present=true;badImage=false;axNodes=[{nodeId:'ready',role:{value:'StaticText'},name:{value:'Ready after action'}}];
+  const actionBase=await tool(executeObserve,{root,mode:'semantic'});
+  const beforeAction=calls.length;
+  const satisfied=await tool(executeAct,{stateId:actionBase.details.stateId,actions:[{action:'click',x:1,y:1}],expect:{text:'Ready after action',timeoutMs:1000}});
+  const actionCalls=calls.slice(beforeAction);
+  assert.equal(actionCalls.filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'satisfied postcondition must return its existing tree');
+  assert.equal(actionCalls.filter(c=>c.method==='Input.dispatchMouseEvent').length,2,'one physical click submission');
+  assert.equal(satisfied.details.baseStateId,actionBase.details.stateId);
+  assert.notEqual(satisfied.details.stateId,actionBase.details.stateId);
+  assert(JSON.stringify(satisfied.details.outline).includes('Ready after action'),'successor must carry the satisfying outline');
+  const beforeStale=calls.length;
+  await assert.rejects(()=>tool(executeAct,{stateId:actionBase.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
+  assert.equal(calls.slice(beforeStale).some(c=>c.method.startsWith('Input.')),false,'snapshot reuse must not permit pre-action input refs');
+  axResponseQueue=[[],axNodes];
+  const beforeDelayed=calls.length;
+  const delayed=await tool(executeAct,{stateId:satisfied.details.stateId,actions:[{action:'click',x:1,y:1}],expect:{text:'Ready after action',timeoutMs:1000}});
+  const delayedCalls=calls.slice(beforeDelayed);
+  assert.equal(delayedCalls.filter(c=>c.method==='Accessibility.getFullAXTree').length,2,'poll until satisfied, with no redundant successor collection');
+  assert.equal(delayedCalls.filter(c=>c.method==='Input.dispatchMouseEvent').length,2,'condition polling must not replay input');
+  assert(JSON.stringify(delayed.details.outline).includes('Ready after action'));
+  const beforePlain=calls.length;
+  const plain=await tool(executeAct,{stateId:delayed.details.stateId,actions:[{action:'click',x:1,y:1}]});
+  assert.equal(calls.slice(beforePlain).filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'actions without expect still collect a successor');
+  const beforeTimeout=calls.length;
+  await assert.rejects(()=>tool(executeAct,{stateId:plain.details.stateId,actions:[{action:'click',x:1,y:1}],expect:{text:'Never present',timeoutMs:1}}),/delivered but its postcondition was not satisfied/);
+  assert.equal(calls.slice(beforeTimeout).filter(c=>c.method==='Input.dispatchMouseEvent').length,2,'timeout must not replay the delivered action');
   console.log('Browser observe executor integration checks passed');
 } finally {
   await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);

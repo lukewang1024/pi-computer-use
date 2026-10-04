@@ -167,6 +167,14 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 		const node = env.node(action.ref.trim());
 		const semanticClick = operation === "click" || operation === "press";
 		if (semanticClick && node.isTextInput) {
+			// Keep an observed native ref for a verifiable macOS focus request.
+			// The helper distinguishes native editors from web areas. Keep the
+			// image requirement for any pointer fallback and explicit pointer gestures.
+			if (env.platform === "macos" && env.image && node.wireRef && node.canFocus && !node.pictureOnly
+				&& (action.button === undefined || action.button === "left")
+				&& (action.clickCount === undefined || action.clickCount === 1)) {
+				return { ref: node.wireRef };
+			}
 			const point = env.center(node);
 			env.validatePoint(point.x, point.y);
 			return point;

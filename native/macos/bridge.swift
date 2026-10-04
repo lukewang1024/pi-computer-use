@@ -2127,6 +2127,19 @@ final class Bridge {
 		}
 
 		func preflight(_ point: CGPoint) throws {
+			// A system dialog can cover this point while the target application
+			// still reports its document as main/focused. Bind the actual hit to
+			// the exact observed window before any pointer event, including a
+			// raw image point with no semantic element ref.
+			guard let window = physicalTarget?.axWindow,
+				let hit = hitTestElement(at: point) else {
+				throw BridgeFailure(message: "Target point ownership could not be verified; pointer input was not sent", code: "point_target_unverified")
+			}
+			var hitPid: pid_t = 0
+			guard AXUIElementGetPid(hit, &hitPid) == .success,
+				hitPid == pid, isElement(hit, descendantOf: window) else {
+				throw BridgeFailure(message: "Target point is occluded by pid \(hitPid): \(payloadNode(element: hit)); pointer input was not sent", code: "occluded_target")
+			}
 			guard let element else { preflightCapsUnknown = true; return }
 			for attempt in 0..<4 {
 				guard let hit = hitTestElement(at: point) else { preflightCapsUnknown = true; return }

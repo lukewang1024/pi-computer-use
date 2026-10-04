@@ -21,7 +21,7 @@ import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDeliv
 import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler, runPreflightWrite } from "./runtime.ts";
 import { verifyFocusedWindow } from "./focus-window.ts";
-import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
+import { scoreWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
 export type { ActParams, EvaluateBrowserParams, ExpandUiParams, FocusWindowParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
@@ -527,7 +527,8 @@ function validateStateId(stateId?: string): CurrentCapture {
 		);
 	}
 	const stateTarget = state.currentStateTarget;
-	if (stateTarget && state.currentTarget && (stateTarget.pid !== state.currentTarget.pid || stateTarget.windowId !== state.currentTarget.windowId)) {
+	if (stateTarget && state.currentTarget && (stateTarget.pid !== state.currentTarget.pid || stateTarget.windowId !== state.currentTarget.windowId
+		|| (stateTarget.nativeWindowRef !== undefined && stateTarget.nativeWindowRef !== state.currentTarget.nativeWindowRef))) {
 		throw new Error("The latest state belongs to a different window. Call observe_ui for the target window and retry.");
 	}
 	return state.currentCapture;
@@ -944,10 +945,10 @@ async function resolveCurrentTarget(signal?: AbortSignal): Promise<ResolvedTarge
 		throw new Error(CURRENT_TARGET_GONE_ERROR);
 	}
 
-	const modal = windows
-		.filter((window) => shouldPreferForegroundModalWindow(match!, window))
-		.sort((a, b) => scoreWindow(b) - scoreWindow(a))[0];
-	if (modal) match = modal;
+	// A current observation belongs to one exact root. A foreground modal can
+	// belong to another document in the same process; discovering it must not
+	// silently change the root used with the current look and element refs.
+	// Rootless observation still discovers the frontmost root independently.
 
 	const app: HelperApp = {
 		appName: current.appName,
@@ -1076,7 +1077,7 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 
 	setCurrentTarget(target);
 	state.currentCapture = capture;
-	state.currentStateTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef };
+	state.currentStateTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef, nativeWindowRef: target.nativeWindowRef };
 	state.currentLook = look;
 	state.currentOutline = outline;
 	state.currentNote = noteFromLook(state.currentNote, outline, noteWindowForTarget(target, look));
@@ -2261,6 +2262,9 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 	const noteBefore = state.currentNote;
+	// Root discovery can reveal a replaced or remapped window after the first
+	// state check. Reject before acquiring a write lock or dispatching input.
+	validateStateId(params.stateId);
 	const headless = getComputerUseConfig().headless;
 	return await withWindowWriteLock(target, async () => {
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);

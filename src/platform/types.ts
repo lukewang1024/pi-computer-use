@@ -29,6 +29,7 @@ export interface PlatformDiagnostics {
 	arch?: string;
 	accessibility?: boolean;
 	screenRecording?: boolean;
+	postEventAccess?: boolean;
 	optionalImageFailure?: boolean;
 }
 
@@ -113,6 +114,19 @@ export interface HelperActPerformed {
 	selectionGrounding?: "ax" | "keyboard";
 	transaction?: boolean;
 	actionCount?: number;
+	/** Cursor movement is diagnostic evidence, not application acknowledgement. */
+	pointerDiagnostics?: {
+		lookId: string;
+		windowId: number;
+		imageWidth: number;
+		imageHeight: number;
+		windowFrame: { x: number; y: number; width: number; height: number };
+		screenPoint: { x: number; y: number };
+		delivery: string;
+		postEventAccess: boolean;
+		cursorBefore?: { x: number; y: number };
+		cursorAfter?: { x: number; y: number };
+	};
 	activated?: boolean;
 	raised?: boolean;
 	focused?: boolean;

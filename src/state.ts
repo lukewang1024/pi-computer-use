@@ -136,6 +136,9 @@ export class SavedStates {
 					image: state.currentLook.image ? { ...state.currentLook.image } : undefined,
 					timings: { ...state.currentLook.timings },
 					readText: state.currentLook.readText ? { ...state.currentLook.readText } : undefined,
+					// Keep the fixed OCR retry policy across state hydration, without error text.
+					ocrDiagnostics: state.currentLook.ocrDiagnostics ? { status: state.currentLook.ocrDiagnostics.status,
+						nativeCompletion: state.currentLook.ocrDiagnostics.nativeCompletion, readOnly: true } : undefined,
 					// Retain only the fixed capture policy marker, not arbitrary diagnostic payloads.
 					uiaDiagnostics: state.currentLook.uiaDiagnostics?.status === "skipped" && state.currentLook.uiaDiagnostics?.reason === "pixel_only_observation"
 						? { status: "skipped", reason: "pixel_only_observation" } : undefined,

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { PlatformDiagnostics } from "../types.ts";
 import { resolveMacosHelperAppPath } from "./helper-path.mjs";
+import { resolveHelperSocket } from "./helper-socket.mjs";
 import { HELPER_PROTOCOL_VERSION, executableSha256, helperIdentityMatches, packagedHelperSha256 } from "./helper-identity.ts";
 
 const COMMAND_TIMEOUT_MS = 15_000;
@@ -17,8 +18,9 @@ export const HELPER_BUNDLE_ID = "com.injaneity.pi-computer-use";
 export const HELPER_APP_PATH = resolveMacosHelperAppPath();
 export const HELPER_APP_EXECUTABLE_PATH = path.join(HELPER_APP_PATH, "Contents", "MacOS", "bridge");
 const DEFAULT_HELPER_SOCKET_PATH = path.join(os.homedir(), "Library", "Caches", "pi-computer-use", "bridge.sock");
-export const HELPER_SOCKET_PATH = process.env.PI_CU_SOCKET_PATH ?? DEFAULT_HELPER_SOCKET_PATH;
-const usingExternalHelperSocket = HELPER_SOCKET_PATH !== DEFAULT_HELPER_SOCKET_PATH;
+const helperSocket = resolveHelperSocket(process.env, DEFAULT_HELPER_SOCKET_PATH);
+export const HELPER_SOCKET_PATH = helperSocket.socketPath;
+const usingExternalHelperSocket = helperSocket.external;
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");

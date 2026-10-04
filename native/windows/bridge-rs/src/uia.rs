@@ -12,6 +12,45 @@ use serde_json::Value;
 use crate::refs::RefStore;
 
 #[cfg(any(windows, test))]
+struct ElementIdentityResolver<T> {
+    runtime_id: Vec<i32>,
+    automation_id: String,
+    candidate: Option<T>,
+    ambiguous: bool,
+}
+
+#[cfg(any(windows, test))]
+impl<T> ElementIdentityResolver<T> {
+    fn new(runtime_id: &[i32], automation_id: &str) -> Result<Self, String> {
+        if runtime_id.is_empty() && automation_id.is_empty() {
+            return Err("Element reference has no identity".to_owned());
+        }
+        Ok(Self { runtime_id: runtime_id.to_vec(), automation_id: automation_id.to_owned(),
+                  candidate: None, ambiguous: false })
+    }
+
+    fn matches(&self, runtime_id: Option<&[i32]>, automation_id: &str) -> bool {
+        if !self.runtime_id.is_empty() {
+            runtime_id == Some(self.runtime_id.as_slice())
+        } else {
+            automation_id == self.automation_id
+        }
+    }
+
+    fn observe(&mut self, runtime_id: Option<&[i32]>, automation_id: &str, element: T) {
+        if self.matches(runtime_id, automation_id) {
+            if self.candidate.is_some() { self.ambiguous = true; }
+            self.candidate = Some(element);
+        }
+    }
+
+    fn finish(self) -> Result<T, String> {
+        if self.ambiguous { return Err("Element reference is ambiguous".to_owned()); }
+        self.candidate.ok_or_else(|| "Element reference is stale".to_owned())
+    }
+}
+
+#[cfg(any(windows, test))]
 fn extraction_diagnostics(total_found: usize, raw_visited: usize, visible_retained: usize) -> Value {
     serde_json::json!({
         "totalFound": total_found,
@@ -316,7 +355,7 @@ mod native {
 
     use super::{
         annotation_can_press, annotation_can_set_text, control_type_to_role,
-        ElementAnnotationSignals,
+        ElementAnnotationSignals, ElementIdentityResolver,
     };
     use crate::refs::{NativeHandle, RefStore};
 
@@ -1013,6 +1052,7 @@ mod native {
     fn resolve_with_mode(
         hwnd: isize, runtime_id_target: &[i32], automation_id: &str, read_only: bool,
     ) -> Result<(ComGuard, IUIAutomation, IUIAutomationElement), String> {
+        let mut identity = ElementIdentityResolver::new(runtime_id_target, automation_id)?;
         let com = ComGuard::new()?;
         let started = Instant::now();
         let uia: IUIAutomation = if read_only { read_only_client()? } else { unsafe {
@@ -1029,31 +1069,20 @@ mod native {
             uia.ElementFromHandle(HWND(hwnd as *mut _))
                 .map_err(|e| format!("ElementFromHandle: {e}"))?
         };
-        if runtime_id(&root).as_deref() == Some(runtime_id_target) {
+        if !runtime_id_target.is_empty() && identity.matches(runtime_id(&root).as_deref(), "") {
             return Ok((com, uia, root));
         }
         // UIA RuntimeId is exposed as a SAFEARRAY and is not reliably accepted by
         // CreatePropertyCondition across providers/windows-rs VARIANT conversion,
         // so use AutomationId as the fast server-side lookup when available and
         // keep RuntimeId as the authoritative equality check/fallback scan.
-        if !automation_id.is_empty() {
+        if !automation_id.is_empty() && !runtime_id_target.is_empty() {
             let value = VARIANT::from(automation_id);
             if let Ok(condition) =
                 unsafe { uia.CreatePropertyCondition(UIA_AutomationIdPropertyId, &value) }
             {
                 if let Ok(element) = unsafe { root.FindFirst(TreeScope_Subtree, &condition) } {
-                    if runtime_id(&element).as_deref() == Some(runtime_id_target)
-                        || runtime_id_target.is_empty()
-                    {
-                        return Ok((com, uia, element));
-                    }
-                    let candidate_id = unsafe {
-                        element
-                            .CurrentAutomationId()
-                            .unwrap_or_default()
-                            .to_string()
-                    };
-                    if candidate_id == automation_id && runtime_id_target.is_empty() {
+                    if identity.matches(runtime_id(&element).as_deref(), "") {
                         return Ok((com, uia, element));
                     }
                 }
@@ -1074,7 +1103,6 @@ mod native {
                 .Length()
                 .map_err(|e| format!("ElementArray.Length: {e}"))?
         };
-        let mut automation_fallback = None;
         for i in 0..count {
             read_budget_available()?;
             let element = unsafe {
@@ -1082,25 +1110,19 @@ mod native {
                     .GetElement(i)
                     .map_err(|e| format!("GetElement({i}): {e}"))?
             };
-            if runtime_id(&element).as_deref() == Some(runtime_id_target) {
-                return Ok((com, uia, element));
-            }
-            if !automation_id.is_empty() {
-                let candidate_id = unsafe {
-                    element
-                        .CurrentAutomationId()
-                        .unwrap_or_default()
-                        .to_string()
-                };
-                if candidate_id == automation_id && automation_fallback.is_none() {
-                    automation_fallback = Some(element);
+            if !runtime_id_target.is_empty() {
+                if identity.matches(runtime_id(&element).as_deref(), "") {
+                    return Ok((com, uia, element));
                 }
+                continue;
             }
+            let candidate_id = unsafe {
+                element.CurrentAutomationId()
+                    .map_err(|e| format!("CurrentAutomationId: {e}"))?.to_string()
+            };
+            identity.observe(None, &candidate_id, element);
         }
-        if let Some(element) = automation_fallback {
-            return Ok((com, uia, element));
-        }
-        Err("Element reference is stale".to_owned())
+        Ok((com, uia, identity.finish()?))
     }
 
     fn read_text_from_element(element: &IUIAutomationElement) -> String {
@@ -1266,6 +1288,42 @@ mod unit_tests {
     use super::*;
     use crate::refs::NativeHandle;
     use serde_json::json;
+
+    #[test]
+    fn replaced_control_cannot_reuse_an_observed_automation_id() {
+        let mut resolution = ElementIdentityResolver::new(&[42, 7], "Insert").unwrap();
+        resolution.observe(Some(&[42, 8]), "Insert", "replacement button");
+        resolution.observe(None, "Insert", "provider lost its runtime identity");
+        assert_eq!(resolution.finish().unwrap_err(), "Element reference is stale");
+    }
+
+    #[test]
+    fn runtime_identity_survives_reordering_and_name_changes() {
+        let mut resolution = ElementIdentityResolver::new(&[42, 7], "Insert").unwrap();
+        resolution.observe(Some(&[42, 8]), "Insert", "other button with same automation ID");
+        resolution.observe(Some(&[42, 7]), "RenamedInsert", "observed button");
+        assert_eq!(resolution.finish().unwrap(), "observed button");
+    }
+
+    #[test]
+    fn automation_only_identity_requires_one_live_match() {
+        let mut unique = ElementIdentityResolver::new(&[], "Save").unwrap();
+        unique.observe(None, "Cancel", "other control");
+        unique.observe(Some(&[42, 7]), "Save", "save button");
+        assert_eq!(unique.finish().unwrap(), "save button");
+        let mut duplicate = ElementIdentityResolver::new(&[], "Save").unwrap();
+        duplicate.observe(Some(&[42, 7]), "Save", "ribbon save");
+        duplicate.observe(Some(&[42, 8]), "Save", "dialog save");
+        assert_eq!(duplicate.finish().unwrap_err(), "Element reference is ambiguous");
+    }
+
+    #[test]
+    fn missing_identity_never_resolves_to_an_arbitrary_root() {
+        assert!(ElementIdentityResolver::<()>::new(&[], "").is_err());
+        let mut absent = ElementIdentityResolver::new(&[], "Insert").unwrap();
+        absent.observe(Some(&[]), "", "root with no identity");
+        assert_eq!(absent.finish().unwrap_err(), "Element reference is stale");
+    }
 
     #[test]
     fn provider_failure_is_explicit_and_never_creates_an_element_ref() {

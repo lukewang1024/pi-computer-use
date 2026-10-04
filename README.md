@@ -135,3 +135,9 @@ Core Web Vitals or server load capacity. Preserve test conditions and distinguis
 positive from zero reported transfer bytes; zero alone does not prove a cache hit.
 Use the fresh returned state/refs for subsequent actions, and capture the exact
 page separately for visual claims.
+
+### Windows native element reference integrity
+
+A native reference carrying a UIA RuntimeId resolves only to that same live RuntimeId. A reused AutomationId cannot redirect an old reference to a replacement control. When a provider supplies only an AutomationId, resolution requires exactly one live matching element; missing identities and duplicate matches reject the reference. These checks apply to scoped reads and element actions. Exact HWND foreground, desktop, occlusion and unknown-delivery guards remain in force.
+
+This closes an identity fallback gap; it does not establish that every Office UIA provider operation is bounded or that provider-reported action success proves the intended document effect.

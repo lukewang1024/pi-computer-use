@@ -1618,8 +1618,8 @@ function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string,
 	return { content: [{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}${partial}${remoteControls}` }], details };
 }
 
-async function refreshBrowserSnapshot(contextId: string, tool: string, base?: { stateId: string; outline: SerializedOutline }): Promise<AgentToolResult<BrowserObservationDetails>> {
-	const browser = await cdpSnapshotForContext(contextId);
+async function refreshBrowserSnapshot(contextId: string, tool: string, base?: { stateId: string; outline: SerializedOutline }, observed?: CdpPageSnapshot): Promise<AgentToolResult<BrowserObservationDetails>> {
+	const browser = observed ?? await cdpSnapshotForContext(contextId);
 	if (!browser) throw new Error(`Browser root '${contextId}' is no longer available. Call find_roots and observe_ui again.`);
 	const state = operationState();
 	const resourceKey = state.resourceKey ?? `cdp:${browser.targetId}`;
@@ -2353,6 +2353,8 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 		return { action, target };
 	});
 	return await withBrowserWrite(contextId, async () => {
+		// Only reuse a snapshot collected after these inputs, inside this write epoch.
+		let postconditionSnapshot: CdpPageSnapshot | undefined;
 		for (const { action, target } of prepared) {
 			let worked = false;
 			if (action.action === "press" && target?.frameRoute) {
@@ -2383,12 +2385,13 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 				if (!snapshot) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
 				const present = outlineConditionPresent(restoreOutline(snapshot.outline), condition);
 				satisfied = present !== condition.gone;
+				if (satisfied) postconditionSnapshot = snapshot;
 				const remaining = deadline - Date.now();
 				if (!satisfied && remaining > 0) await sleep(Math.min(100, remaining), signal);
 			} while (!satisfied && Date.now() < deadline);
 			if (!satisfied) throw new Error(`The browser action was delivered but its postcondition was not satisfied within ${condition.timeoutMs}ms.`);
 		}
-		return await refreshBrowserSnapshot(contextId, "act_ui", baseView);
+		return await refreshBrowserSnapshot(contextId, "act_ui", baseView, postconditionSnapshot);
 	});
 }
 

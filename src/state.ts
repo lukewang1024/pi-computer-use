@@ -9,6 +9,7 @@ interface StateTargetSnapshot {
 	pid: number;
 	windowId: number;
 	windowRef?: string;
+	nativeWindowRef?: string;
 }
 
 export interface CurrentTarget {
@@ -109,7 +110,7 @@ export class SavedStates {
 		return {
 			currentTarget: { ...record.value.target },
 			currentCapture: { ...record.value.capture },
-			currentStateTarget: { pid: record.value.target.pid, windowId: record.value.target.windowId, windowRef: record.value.target.windowRef },
+			currentStateTarget: { pid: record.value.target.pid, windowId: record.value.target.windowId, windowRef: record.value.target.windowRef, nativeWindowRef: record.value.target.nativeWindowRef },
 			currentImageMode: record.value.imageMode,
 			currentLook: { ...record.value.look, outline: outline.root, parsedOutline: outline },
 			currentOutline: outline,

@@ -122,3 +122,20 @@ The worker budget addresses that blocking boundary; cross-platform process tests
 cover a hung worker, output larger than pipe capacity, oversized output, and
 failed exit. Native Word latency and repeated provider-failure acceptance remain
 required before claiming a measured deployed performance improvement.
+
+### Document anchors behind dense sidebars
+
+Truncated extraction reserves slots within the existing 200-node property-cache
+limit for up to eight Document controls found just after the initial prefix.
+The read-only discovery scans at most 64 tail candidates with a cooperative
+500 ms phase budget, inside the existing whole-extraction and subprocess bounds.
+Individual provider calls can outlast the cooperative phase budget; the worker
+remains the hard containment boundary. This does not promise complete discovery
+of arbitrarily large trees or make provider-hidden document text available.
+
+The extraction root remains first. Each selected index is cached at most once;
+omitted nodes still participate in bounded ancestry marking. Diagnostic
+`documentAnchors` fields report scanned candidates, selected anchors and scan
+elapsed time. `rawTruncated` remains true whenever the original tree is incomplete.
+The change adds observable semantic refs; it does not loosen live element
+identity, exact-window focus, stale-reference or physical-input checks.

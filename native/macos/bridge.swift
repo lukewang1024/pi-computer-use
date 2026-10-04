@@ -1536,11 +1536,24 @@ final class Bridge {
 
 		var readTextMs = 0
 		var readTextExecuted = false
+		var ocrDiagnostics: [String: Any]?
 		if let capture, readText == "always" {
-			readTextExecuted = true
 			let textStart = Date()
-			let boxes = try recognizeText(in: capture.image, outputWidth: imageWidth, outputHeight: imageHeight)
-			attachOCR(boxes, to: outline)
+			do {
+				let boxes = try recognizeText(in: capture.image, outputWidth: imageWidth, outputHeight: imageHeight)
+				attachOCR(boxes, to: outline)
+				readTextExecuted = true
+				ocrDiagnostics = ["status": "succeeded", "nativeCompletion": "completed", "readOnly": true]
+			} catch {
+				// Pixels and the exact AX outline are already available. A Vision
+				// failure must not discard either or imply OCR text was obtained.
+				let nativeError = error as NSError
+				let failure = error as? BridgeFailure
+				ocrDiagnostics = ["status": "failed", "readOnly": true,
+					"nativeCompletion": failure?.code == "text_recognition_timeout" ? "unconfirmed" : "completed",
+					"errorDomain": String(nativeError.domain.prefix(256)), "errorCode": nativeError.code,
+					"error": String((failure?.message ?? nativeError.localizedDescription).prefix(1024))]
+			}
 			readTextMs = elapsedMs(textStart)
 		}
 
@@ -1578,6 +1591,7 @@ final class Bridge {
 			"readText": ["requested": readText, "executed": readTextExecuted],
 		]
 		if let imagePayload { response["image"] = imagePayload }
+		if let ocrDiagnostics { response["ocrDiagnostics"] = ocrDiagnostics }
 		return response
 	}
 
@@ -1760,6 +1774,7 @@ final class Bridge {
 		request.usesLanguageCorrection = false
 		try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
 		if semaphore.wait(timeout: .now() + .seconds(8)) == .timedOut {
+			request.cancel()
 			throw BridgeFailure(message: "Text recognition timed out", code: "text_recognition_timeout")
 		}
 		if let error = recognizedError.value {

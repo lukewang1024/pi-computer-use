@@ -92,6 +92,7 @@ interface ComputerUseDetails {
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
 	observationTimings?: Record<string, number>;
 	uiaDiagnostics?: Record<string, unknown>;
+	ocrDiagnostics?: LookResponse["ocrDiagnostics"];
 	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "completed" | "unconfirmed" } | { status: "pixels_only"; readOnly: true };
 	tool: string;
 	target: {
@@ -1126,6 +1127,7 @@ async function buildToolResult(
 		lookId: result.look.lookId,
 		observationTimings: result.look.timings,
 		uiaDiagnostics: result.look.uiaDiagnostics,
+		ocrDiagnostics: result.look.ocrDiagnostics,
 		view: useDiff ? "diff" : "full",
 		baseStateId: transition ? base?.stateId : undefined,
 		changes: useDiff ? transition?.changes : undefined,
@@ -1920,6 +1922,9 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	}
 	const summary = `Observed ${mode} ${captureResult.target.windowRef ? `${captureResult.target.windowRef} ` : ""}${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned the latest outline state.`;
 	const result = await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageError ? "never" : imageMode);
+	if (captureResult.look.ocrDiagnostics?.status === "failed") {
+		result.content.unshift({ type: "text", text: "Text recognition failed; the captured pixels and native accessibility outline remain available. OCR text was not obtained. Inspect details.ocrDiagnostics; do not repeat input." });
+	}
 	if (mode === "pixels") {
 		result.details.observation = { status: "pixels_only", readOnly: true };
 		result.content.unshift({ type: "text", text: "Pixel-only observation: UIA and OCR were skipped. No semantic element refs were observed. Use the fresh screenshot state for coordinate actions; observe semantic or fused before querying elements." });
@@ -1961,7 +1966,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	const look = state.currentLook;
 	// Browser observations have their own CDP resource identity and no native
 	// target HWND. An empty AX tree must not trigger desktop OCR or focus.
-	if (!isBrowserContextId(state.contextId) && shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && state.lastSearchOcrEscalatedLookId !== look.lookId) {
+	if (!isBrowserContextId(state.contextId) && shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && look.ocrDiagnostics?.status !== "failed" && state.lastSearchOcrEscalatedLookId !== look.lookId) {
 		state.lastSearchOcrEscalatedLookId = look.lookId;
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		// captureCurrentTarget adopts the new look/outline/capture into

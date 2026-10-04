@@ -135,6 +135,11 @@ export class WindowsHelperClient {
 		};
 		child.on("exit", () => disconnected("exited"));
 		child.on("error", () => disconnected("failed"));
+		child.stdin.on("error", () => {
+			disconnected("stdin failed");
+			child.kill("SIGTERM");
+			child.unref();
+		});
 		this.child = child;
 		this.buffer = "";
 		return child;

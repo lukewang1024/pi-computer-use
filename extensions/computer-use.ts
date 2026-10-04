@@ -171,7 +171,7 @@ const navigateBrowserTool = defineTool({
 	label: "Navigate Browser",
 	description: "Navigate an observed CDP browser-page state to an HTTP(S) URL.",
 	promptSnippet: "Native browser windows use act_ui; this tool is CDP-only.",
-	parameters: Type.Object({ url: Type.String({ maxLength: 8192 }), stateId }),
+	parameters: Type.Object({ url: Type.String({ maxLength: 8192 }), stateId, includePerformance: Type.Optional(Type.Boolean({ description: "Collect fixed bounded performance measurements during navigation; avoids a separate evaluation/snapshot. Not page health, field vitals or a load test." })) }),
 	execute: executeNavigateBrowser,
 });
 

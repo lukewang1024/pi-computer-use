@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
-import { executeFind, executeSearchUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
+import { executeFind, executeNavigateBrowser, executeSearchUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
+import { BROWSER_PERFORMANCE_SAMPLE } from '../src/browser-performance.ts';
 import { currentPlatformBackend } from '../src/platform/index.ts';
 
 // Exercise public tool executors and the real CDP transport. Only native
@@ -11,7 +12,7 @@ currentPlatformBackend.ensureReady = async () => ({lastPermissionCheckAt: Date.n
 currentPlatformBackend.listRoots = async () => [];
 currentPlatformBackend.getFrontmost = async () => {throw Error("Browser search must not query desktop foreground");};
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5l0AAAAASUVORK5CYII=';
-let port, present = true, badImage = false, axNodes=[];
+let port, present = true, badImage = false, axNodes=[], failPerformance=false;
 const calls = [], sockets = new Set();
 function frame(value) {
   const data = Buffer.from(JSON.stringify(value));
@@ -41,11 +42,18 @@ server.on('upgrade', (req, socket) => {
       if(opcode===8){socket.end();continue;}if(opcode!==1)continue;
       const request=JSON.parse(data);calls.push(request);
       let result={};
-      if(request.method==='Runtime.evaluate')result={result:{value:request.params.expression==='window.devicePixelRatio'?2:'Visible page text'}};
+      if(request.method==='Runtime.evaluate'){
+        if(request.params.expression===BROWSER_PERFORMANCE_SAMPLE){
+          if(failPerformance){socket.write(frame({id:request.id,error:{message:'metrics failed'}}));continue;}
+          result={result:{value:{navigation:{timeOriginMs:1},observation:{supported:[],entries:{}},loadWait:{complete:true}}}};
+        }else result={result:{value:request.params.expression==='window.devicePixelRatio'?2:'Visible page text'}};
+      }
+      if(request.method==='Page.navigate')result={frameId:'owned-frame'};
       if(request.method==='Accessibility.getFullAXTree')result={nodes:axNodes};
       if(request.method==='Page.getLayoutMetrics')result={cssVisualViewport:{clientWidth:1,clientHeight:1,pageX:0,pageY:0}};
       if(request.method==='Page.captureScreenshot')result={data:badImage?'invalid':pixel};
       socket.write(frame({id:request.id,result}));
+      if(request.method==='Page.navigate')socket.write(frame({method:'Page.loadEventFired',params:{timestamp:1}}));
     }
   });
 });
@@ -115,6 +123,28 @@ try {
   const partial=await tool(executeObserve,{root,mode:'semantic'});
   assert.equal(partial.details.diagnostics.accessibilityCoverage.framesUnavailable,1);
   assert(partial.content.some(c=>c.type==='text'&&c.text.includes('Accessibility coverage is partial')),'partial frame coverage must reach the agent');
+  const beforeBadOption=calls.length;
+  await assert.rejects(()=>tool(executeNavigateBrowser,{stateId:partial.details.stateId,url:'https://example.com/',includePerformance:'yes'}),/must be boolean/);
+  assert.equal(calls.length,beforeBadOption,'invalid option must not dispatch navigation');
+  const beforeMetrics=calls.length;
+  const measured=await tool(executeNavigateBrowser,{stateId:partial.details.stateId,url:'https://example.com/',includePerformance:true});
+  const measuredCalls=calls.slice(beforeMetrics);
+  assert.equal(measuredCalls.filter(c=>c.method==='Page.navigate').length,1,'one navigation submission');
+  assert.equal(measuredCalls.filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'one successor tree, not a second evaluation tree');
+  assert(measured.details.performanceSample.loadWait.complete);
+  assert.notEqual(measured.details.stateId,partial.details.stateId,'metrics navigation must return a new state');
+  const beforeOldInput=calls.length;
+  await assert.rejects(()=>tool(executeAct,{stateId:partial.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
+  assert.equal(calls.slice(beforeOldInput).some(c=>c.method.startsWith('Input.')),false,'old state remains rejected before input');
+  failPerformance=true;
+  const beforeFailure=calls.length;
+  const unavailable=await tool(executeNavigateBrowser,{stateId:measured.details.stateId,url:'https://example.com/',includePerformance:true});
+  const failureCalls=calls.slice(beforeFailure);
+  assert.equal(failureCalls.filter(c=>c.method==='Page.navigate').length,1,'failed metrics cannot replay navigation');
+  assert.equal(failureCalls.filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'metrics failure still returns one successor tree');
+  assert.equal(unavailable.details.performanceError.status,'unavailable');
+  assert(unavailable.details.stateId,'successful navigation state survives metrics failure');
+  failPerformance=false;
   badImage=true;
   await assert.rejects(()=>tool(executeObserve,{root,mode:'visual'}),/not a PNG/);
   present=false;

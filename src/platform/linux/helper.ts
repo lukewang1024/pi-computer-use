@@ -16,9 +16,15 @@ export const LINUX_HELPER_PATH = process.env.PI_COMPUTER_USE_LINUX_HELPER_PATH
 	|| path.join(os.homedir(), ".pi", "agent", "helpers", "pi-computer-use", "linux-bridge");
 
 interface Pending<T> {
+	command: string;
 	resolve(value: T): void;
 	reject(error: Error): void;
 	timer: NodeJS.Timeout;
+	cleanup(): void;
+}
+
+function transportUnknownError(message: string, command: string, requestId: string): Error {
+	return Object.assign(new Error(message), { code: "helper_transport_unknown", outcome: "unknown", command, requestId, requestWriteAttempted: true });
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {
@@ -108,9 +114,10 @@ export class LinuxHelperClient {
 	}
 
 	private rejectPending(error: Error): void {
-		for (const pending of this.pending.values()) {
+		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);
-			pending.reject(error);
+			pending.cleanup();
+			pending.reject(transportUnknownError(error.message, pending.command, id));
 		}
 		this.pending.clear();
 		this.buffer = "";
@@ -171,6 +178,13 @@ export class LinuxHelperClient {
 			this.child = undefined;
 			this.rejectPending(error);
 		});
+		child.stdin.on("error", (error) => {
+			if (this.child !== child) return;
+			this.child = undefined;
+			this.rejectPending(error);
+			child.kill("SIGTERM");
+			child.unref();
+		});
 		this.child = child;
 		this.buffer = "";
 		return await new Promise<ChildProcessWithoutNullStreams>((resolve, reject) => {
@@ -193,8 +207,9 @@ export class LinuxHelperClient {
 			if (!pending) continue;
 			this.pending.delete(parsed.id);
 			clearTimeout(pending.timer);
+			pending.cleanup();
 			if (parsed.protocolVersion !== LINUX_HELPER_PROTOCOL_VERSION) {
-				pending.reject(new Error(`Linux helper protocol mismatch: expected ${LINUX_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`));
+				pending.reject(transportUnknownError(`Linux helper protocol mismatch: expected ${LINUX_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`, pending.command, parsed.id));
 			} else if (parsed.ok === true) {
 				pending.resolve(parsed.result);
 			} else {
@@ -206,32 +221,39 @@ export class LinuxHelperClient {
 	}
 
 	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
-		const child = await this.process(options?.signal);
+		const signal = options?.signal;
+		if (signal?.aborted) throw new Error("Operation aborted before dispatch.");
+		const child = await this.process(signal);
+		if (signal?.aborted) throw new Error("Operation aborted before dispatch.");
 		const id = randomUUID();
 		const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
 		return await new Promise<T>((resolve, reject) => {
+			const cleanup = () => signal?.removeEventListener("abort", onAbort);
 			const onAbort = () => {
 				this.pending.delete(id);
 				clearTimeout(timer);
-				reject(new Error("Operation aborted."));
+				cleanup();
+				reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id));
 			};
 			const timer = setTimeout(() => {
-				options?.signal?.removeEventListener("abort", onAbort);
+				cleanup();
 				this.pending.delete(id);
-				reject(new Error(`Helper command '${cmd}' timed out after ${timeoutMs}ms.`));
+				reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id));
 			}, timeoutMs);
 			this.pending.set(id, {
-				resolve: (value) => { options?.signal?.removeEventListener("abort", onAbort); resolve(value as T); },
-				reject: (error) => { options?.signal?.removeEventListener("abort", onAbort); reject(error); },
+				resolve: resolve as (value: unknown) => void,
+				reject,
 				timer,
+				cleanup,
+				command: cmd,
 			});
-			options?.signal?.addEventListener("abort", onAbort, { once: true });
+			signal?.addEventListener("abort", onAbort, { once: true });
 			child.stdin.write(`${JSON.stringify({ protocolVersion: LINUX_HELPER_PROTOCOL_VERSION, id, cmd, args })}\n`, (error) => {
 				if (!error) return;
-				options?.signal?.removeEventListener("abort", onAbort);
+				cleanup();
 				this.pending.delete(id);
 				clearTimeout(timer);
-				reject(error);
+				reject(transportUnknownError(error.message, cmd, id));
 			});
 		});
 	}

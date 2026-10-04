@@ -16,3 +16,18 @@ approximately 474 descendants under them; semantic observations took roughly
 new walker. Native regression fixtures cover visible controls after deferred
 rows, explicit expansion, leaves, exhausted budgets and repeated/cyclic identity.
 Actual chooser timing and successful PDF export still require candidate acceptance.
+
+## macOS combined visual observation
+
+Helpers advertising `optionalImageFailure` capture pixels and build the native
+outline in one look. Capture or JPEG encoding failures can return a fresh semantic
+outline with a bounded image error; exact-root, reference and policy failures
+still fail the request. The capability flag preserves the semantic-first path
+for older helpers. Missing capture lifetime evidence is reported as unconfirmed,
+and failed images cannot authorize coordinate grounding in the native look.
+
+Protocol regression tests use the original Mac helper client and backend against
+a controlled daemon, asserting one look, no automatic recapture, invalid-ref
+preflight rejection, strict errors and legacy compatibility. The shared native
+policy tests have also been compiled and run on a managed Mac. These checks do
+not establish live chooser latency or PDF export acceptance.

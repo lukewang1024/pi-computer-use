@@ -1893,7 +1893,7 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 			const combined = await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true, true);
 			imageObservationMs = performance.now() - imageStarted;
 			imageError = combined.look.imageError;
-			imageCompletion = "completed";
+			imageCompletion = combined.look.imageDiagnostics?.nativeCompletion ?? "completed";
 			return combined;
 		}
 		// Publish real semantic evidence first; optional image failure cannot erase it.

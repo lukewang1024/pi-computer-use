@@ -45,3 +45,21 @@ A Word PDF acceptance attempt stopped before export because the previous
 string-only reader exposed both native radio states as empty. The shared value
 normalization and write-outcome policy are covered by actual Mac Swift tests;
 real Word radio-state and PDF export acceptance still require the candidate.
+
+### Bounded macOS OCR
+
+The eight-second OCR deadline includes Vision's synchronous `perform` call,
+which runs on a dedicated worker. A deadline response requests cancellation and
+reports OCR completion as unconfirmed. Fresh AX and captured pixels are retained;
+no recognized text is attached until recognition actually returns successfully.
+While the previous worker remains in flight, subsequent OCR observations return
+`text_recognition_busy` without starting another recognition job. Each operation
+owns its request, result and cancellation: late results cannot contaminate the
+next observation. Semantic-only observations and explicit `readText: never` still
+skip OCR. This does not establish an eight-second bound for the full observation,
+which also includes capture and AX traversal.
+
+Foundation regressions exercise blocked native work, cancellation that itself
+blocks, admission while work is still live, genuine failure, recovery and
+isolation of late results. Full Word OCR latency and text-quality acceptance on
+the managed Mac remains required after deployment.

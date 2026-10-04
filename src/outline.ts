@@ -79,6 +79,7 @@ export interface LookResponse {
 	window: LookWindow;
 	image?: LookImage;
 	imageError?: string;
+	imageDiagnostics?: { code?: string; nativeCompletion: "completed" | "unconfirmed"; readOnly: true };
 	ocrDiagnostics?: { status: "succeeded" | "failed"; nativeCompletion: "completed" | "unconfirmed"; readOnly: true; errorDomain?: string; errorCode?: number; error?: string };
 	uiaDiagnostics?: Record<string, unknown>;
 	outline: OutlineNode;
@@ -244,6 +245,11 @@ export function parseLookResponse(raw: unknown): LookResponse {
 			height: Math.max(1, Math.trunc(toNumber(image.height, 1))),
 		} : undefined,
 		imageError: typeof record.imageError === "string" ? record.imageError.slice(0, 1024) : undefined,
+		imageDiagnostics: isRecord(record.imageDiagnostics) ? {
+			code: typeof record.imageDiagnostics.code === "string" ? record.imageDiagnostics.code.slice(0, 256) : undefined,
+			nativeCompletion: record.imageDiagnostics.nativeCompletion === "completed" ? "completed" : "unconfirmed",
+			readOnly: true,
+		} : undefined,
 		ocrDiagnostics: isRecord(record.ocrDiagnostics) && (record.ocrDiagnostics.status === "succeeded" || record.ocrDiagnostics.status === "failed") ? {
 			status: record.ocrDiagnostics.status,
 			nativeCompletion: record.ocrDiagnostics.nativeCompletion === "completed" ? "completed" : "unconfirmed",

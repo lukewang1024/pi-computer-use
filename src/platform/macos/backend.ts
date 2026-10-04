@@ -111,6 +111,7 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 			readText: request.readText,
 			scopeRef: request.scopeRef,
 			includeImage: request.includeImage,
+			allowImageFailure: request.allowImageFailure,
 		}, options));
 	},
 

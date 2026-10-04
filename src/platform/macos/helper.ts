@@ -353,6 +353,7 @@ export class MacosHelperClient {
 			arch: toOptionalString(result?.arch),
 			accessibility: toBoolean(result?.accessibility),
 			screenRecording: toBoolean(result?.screenRecording),
+			optionalImageFailure: result?.optionalImageFailure === true,
 		};
 		this.diagnosticsCache = diagnostics;
 		return diagnostics;

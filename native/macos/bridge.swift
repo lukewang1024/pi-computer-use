@@ -2392,7 +2392,11 @@ final class Bridge {
 	}
 
 	private func rootIdentity(_ root: [String: Any]) -> String {
-		if let windowId = root["windowId"] as? Int, windowId > 0 { return "window:\(windowId)" }
+		// AX sheets can be paired to their parent's CG window. Keep the
+		// semantic root type separate even when the physical window is shared.
+		if let windowId = root["windowId"] as? Int, windowId > 0 {
+			return "window:\(windowId):\(root["kind"] as? String ?? "window"):\(root["role"] as? String ?? "")"
+		}
 		// AXUIElement CFEqual/CFHash are not stable after re-enumeration for all
 		// transient roots; use the metadata tuple that comes from the cheap pass.
 		let kind = root["kind"] as? String ?? "window"
@@ -2408,7 +2412,11 @@ final class Bridge {
 
 	private func rootMetadataSnapshot(pid: Int32) -> [String: [String: Any]] {
 		let roots = ((try? listRoots(pid: pid)["roots"] as? [[String: Any]]) ?? [])
-		return Dictionary(uniqueKeysWithValues: roots.map { (rootIdentity($0), $0) })
+		// AX enumeration may report an identical root more than once. This
+		// diagnostic snapshot must not trap after an action has been sent.
+		// Preserve the first observation; duplicate metadata is not authority
+		// to dispatch an action or to infer that the target became focused.
+		return Dictionary(roots.map { (rootIdentity($0), $0) }, uniquingKeysWith: { first, _ in first })
 	}
 
 	private func rootDelta(before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32) -> [[String: Any]] {

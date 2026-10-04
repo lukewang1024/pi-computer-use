@@ -106,7 +106,7 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 		return parseLookResponse(await macosHelper.command("look", {
 			baseLookId: request.baseLookId,
 			windowId: request.target.windowId,
-			windowRef: request.target.rootRef,
+			windowRef: request.target.windowRef ?? request.target.rootRef,
 			maxDimension: request.maxDimension,
 			readText: request.readText,
 			scopeRef: request.scopeRef,

@@ -1,3 +1,4 @@
+import { navigateWithPerformance, summarizeBrowserPerformance } from "./browser-performance.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { waitForBrowserStartup } from "./browser-startup.ts";
 import { randomUUID } from "node:crypto";
@@ -234,6 +235,8 @@ interface BrowserObservationDetails {
 	root: { ref: string; kind: "browser_page"; title: string; url: string };
 	outline: SerializedOutline;
 	renderedOutline: string;
+	performanceSample?: Record<string, unknown>;
+	performanceError?: { status: "unavailable"; readOnly: true; phase: "after-navigation"; message: string };
 }
 
 interface EvaluateBrowserDetails {
@@ -2563,12 +2566,24 @@ async function performNavigateBrowser(params: NavigateBrowserParams): Promise<Ag
 	const url = trimOrUndefined(params.url);
 	if (!contextId) throw new Error("navigate_browser.stateId must belong to a CDP browser-page observation. Native browser windows use act_ui.");
 	if (!url || !/^https?:\/\//i.test(url)) throw new Error("navigate_browser.url must be an absolute HTTP(S) URL.");
+	if (params.includePerformance !== undefined && typeof params.includePerformance !== "boolean") throw new Error("navigate_browser.includePerformance must be boolean.");
 	const baseSnapshot = operationState().browserSnapshot;
 	if (!baseSnapshot) throw new Error("Browser navigation requires a complete base observation.");
 	return await withBrowserWrite(contextId, async () => {
-		const ok = await cdpNavigateContext(contextId, url);
-		if (!ok) throw new Error(`Browser context '${contextId}' is no longer available. Observe it again.`);
-		return await refreshBrowserSnapshot(contextId, "navigate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline });
+		const collected = await navigateWithPerformance(contextId, url, params.includePerformance, {
+			navigate: cdpNavigateContext,
+			evaluate: cdpEvaluateForContext,
+			refresh: async () => await refreshBrowserSnapshot(contextId, "navigate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline }),
+		});
+		if (collected.performanceSample) {
+			collected.observation.details.performanceSample = collected.performanceSample;
+			collected.observation.content.unshift({ type: "text", text: `Performance sample for state ${collected.observation.details.stateId} (top-frame retained buffer; not page health or field vitals): ${JSON.stringify(summarizeBrowserPerformance(collected.performanceSample))}` });
+		}
+		if (collected.performanceError) {
+			collected.observation.details.performanceError = collected.performanceError;
+			collected.observation.content.unshift({ type: "text", text: `Navigation returned a successor state, but optional performance collection is unavailable: ${collected.performanceError.message}. Do not replay navigation to recover this measurement.` });
+		}
+		return collected.observation;
 	});
 }
 

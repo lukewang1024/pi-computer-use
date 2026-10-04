@@ -28,6 +28,8 @@ export interface StateTargetParams {
 
 export interface NavigateBrowserParams extends StateTargetParams {
 	url: string;
+	/** Collect bounded navigation/paint/observer metrics before the successor snapshot. */
+	includePerformance?: boolean;
 }
 
 export interface LaunchBrowserParams {

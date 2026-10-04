@@ -51,3 +51,21 @@ assert(Value.Check(schema,{stateId:'S1',actions:[{action:'click',x:20,y:30},{act
 assert(Value.Check(schema,{stateId:'S1',actions:[{action:'typeText',x:20,y:30,text:'comment'}]}),'registered schema must expose existing image-point typing');
 assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'typeText',x:20,text:'comment'}]}),'image-point typing must require both coordinates');
 console.log('Action preflight and registered-schema regression checks passed (no native input)');
+
+// A semantic native Mac editor click retains its exact ref; pointer gestures
+// and Windows controls retain image grounding and the foreground requirement.
+const focusable={...text,canFocus:true};
+const macEnv={...env,platform:'macos',node(ref){if(ref!=='@e1')throw Error('Stale reference');return focusable;}};
+const nativeFocus=preflightActionSequence([{action:'click',ref:'@e1'}],false,macEnv)[0];
+assert.deepEqual(nativeFocus.target,{ref:'native-text'});
+assert.equal(nativeFocus.needsForeground,false);
+assert.equal(nativeFocus.establishesFocus,true);
+assert.equal(canRetryInForeground(nativeFocus,'unknown',false),false,'unconfirmed focus must not replay as pointer input');
+for(const action of [{action:'click',ref:'@e1',button:'right'},{action:'click',ref:'@e1',clickCount:2}]){
+ const pointer=preflightActionSequence([action],false,macEnv)[0];
+ assert.deepEqual(pointer.target,{x:20,y:30});assert.equal(pointer.needsForeground,true);
+}
+assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,node(){return {...focusable,canFocus:false};}})[0].target,{x:20,y:30});
+assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,platform:'windows'})[0].target,{x:20,y:30});
+assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,macEnv),/Stale/);
+console.log('Native macOS focus routing and pointer-gesture boundaries passed');

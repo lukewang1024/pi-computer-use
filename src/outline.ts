@@ -80,7 +80,7 @@ export interface LookResponse {
 	image?: LookImage;
 	imageError?: string;
 	imageDiagnostics?: { code?: string; nativeCompletion: "completed" | "unconfirmed"; readOnly: true };
-	ocrDiagnostics?: { status: "succeeded" | "failed"; nativeCompletion: "completed" | "unconfirmed"; readOnly: true; errorDomain?: string; errorCode?: number; error?: string };
+	ocrDiagnostics?: { status: "succeeded" | "failed"; nativeCompletion: "completed" | "unconfirmed"; readOnly: true; errorKind?: string; operationNotStarted?: boolean; cancellationRequested?: boolean; errorDomain?: string; errorCode?: number; error?: string };
 	uiaDiagnostics?: Record<string, unknown>;
 	outline: OutlineNode;
 	timings: Record<string, number>;
@@ -254,6 +254,9 @@ export function parseLookResponse(raw: unknown): LookResponse {
 			status: record.ocrDiagnostics.status,
 			nativeCompletion: record.ocrDiagnostics.nativeCompletion === "completed" ? "completed" : "unconfirmed",
 			readOnly: true,
+			errorKind: typeof record.ocrDiagnostics.errorKind === "string" ? record.ocrDiagnostics.errorKind.slice(0, 256) : undefined,
+			operationNotStarted: typeof record.ocrDiagnostics.operationNotStarted === "boolean" ? record.ocrDiagnostics.operationNotStarted : undefined,
+			cancellationRequested: typeof record.ocrDiagnostics.cancellationRequested === "boolean" ? record.ocrDiagnostics.cancellationRequested : undefined,
 			errorDomain: typeof record.ocrDiagnostics.errorDomain === "string" ? record.ocrDiagnostics.errorDomain.slice(0, 256) : undefined,
 			errorCode: typeof record.ocrDiagnostics.errorCode === "number" && Number.isSafeInteger(record.ocrDiagnostics.errorCode) ? record.ocrDiagnostics.errorCode : undefined,
 			error: typeof record.ocrDiagnostics.error === "string" ? record.ocrDiagnostics.error.slice(0, 1024) : undefined,

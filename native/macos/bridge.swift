@@ -438,6 +438,7 @@ final class Bridge {
 	private var rootObservers: [Int32: RootAXObserverState] = [:]
 	private let maxRootObservers = 4
 	private let permissionProbe = PermissionProbe<[String: Any]>()
+	private let screenRecordingProbe = CompletionOwnedPermissionProbe<Bool>()
 	private let completedRequestLock = NSLock()
 	private var recentCompletedRequestIds: [String] = []
 
@@ -844,6 +845,7 @@ final class Bridge {
 			"screenRecording": permissions["screenRecording"] ?? false,
 			"postEventAccess": CGPreflightPostEventAccess(),
 			"permissionProbe": permissionProbe.snapshot(),
+			"screenRecordingProbePending": screenRecordingProbe.occupied,
 			"recentCompletedRequestIds": completedRequestIds(),
 			"captures": captureSnapshots(),
 		]
@@ -866,16 +868,11 @@ final class Bridge {
 	/// two disagree, the preflight boolean is the one lying.
 	private func screenRecordingCapturable() -> Bool {
 		if #available(macOS 14.0, *) {
-			let sema = DispatchSemaphore(value: 0)
-			let capturable = Box<Bool>(false)
-			SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { shareable, error in
-				if let shareable = shareable {
-					capturable.value = !shareable.displays.isEmpty
+			return screenRecordingProbe.read(timeout: 5) { complete in
+				SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { shareable, _ in
+					complete(shareable.map { !$0.displays.isEmpty } ?? false)
 				}
-				sema.signal()
-			}
-			guard sema.wait(timeout: .now() + .seconds(5)) == .success else { return false }
-			return capturable.value
+			} ?? false
 		}
 		if #available(macOS 10.15, *) {
 			return CGPreflightScreenCaptureAccess()

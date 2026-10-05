@@ -69,3 +69,23 @@ assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...
 assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,platform:'windows'})[0].target,{x:20,y:30});
 assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,macEnv),/Stale/);
 console.log('Native macOS focus routing and pointer-gesture boundaries passed');
+
+// A focusable Word comment button without AXPress still uses pointer delivery.
+const focusOnlyButton={...focusable,role:'AXButton',isTextInput:false,canPress:false,canSetValue:false,actions:[]};
+const pointerRefEnv={...macEnv,node(ref){if(ref!=='@e1')throw Error('Stale reference');return focusOnlyButton;}};
+for(const action of ['click','press']) {
+ const prepared=preflightActionSequence([{action,ref:'@e1'}],false,pointerRefEnv)[0];
+ assert.deepEqual(prepared.target,{ref:'native-text'},'keep exact native ref validation');
+ assert.equal(prepared.needsForeground,true,'non-semantic pointer fallback starts in foreground');
+ assert.equal(canRetryInForeground(prepared,'unknown',false),false,'unknown pointer effect is never replayed');
+ assert.throws(()=>preflightActionSequence([{action,ref:'@e1'}],false,{...pointerRefEnv,image:undefined}),/image-bearing/);
+ assert.throws(()=>preflightActionSequence([{action,ref:'@e1'}],false,{...pointerRefEnv,center(){return {x:101,y:30};}}),/Invalid point/);
+ const semantic=preflightActionSequence([{action,ref:'@e1'}],false,{...pointerRefEnv,node(){return {...focusOnlyButton,canPress:true,actions:['AXPress']};}})[0];
+ assert.equal(semantic.needsForeground,false,'AXPress controls retain semantic delivery');
+ const strict=preflightActionSequence([{action,ref:'@e1'}],false,{...pointerRefEnv,headless:true,image:undefined})[0];
+ assert.equal(strict.needsForeground,false,'strict headless never requests foreground');
+ const windows=preflightActionSequence([{action,ref:'@e1'}],false,{...pointerRefEnv,platform:'windows'})[0];
+ assert.equal(windows.needsForeground,false,'native Windows ref routing unchanged');
+}
+assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,pointerRefEnv),/Stale/);
+console.log('Native Mac non-AXPress pointer refs preserve foreground and no-replay boundaries');

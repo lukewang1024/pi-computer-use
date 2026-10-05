@@ -217,7 +217,18 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
 	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
 	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));
-	const needsForeground = !env.headless && (operation === "click" || operation === "press") && "x" in target;
+	// A focusable non-editor ref can lack AXPress. The native helper then
+	// falls back to pointer input; do not send that pointer to a background PID.
+	const pointerRefFallback = env.platform === "macos" && Boolean(action.ref)
+		&& (operation === "click" || operation === "press")
+		&& !env.node(action.ref!).canPress && !env.node(action.ref!).isTextInput;
+	if (pointerRefFallback && !env.headless) {
+		if (!env.image) throw new Error("Pointer fallback requires an image-bearing state.");
+		const point = env.center(env.node(action.ref!));
+		env.validatePoint(point.x, point.y);
+	}
+	const needsForeground = !env.headless && (operation === "click" || operation === "press")
+		&& ("x" in target || pointerRefFallback);
 
 	switch (operation) {
 		case "press":

@@ -7,9 +7,9 @@ const original={...currentPlatformBackend};
 const root={kind:'window',rootRef:'pixel-root',windowId:71,pid:100071,appName:'Pixel fixture',title:'Owned pixel fixture',zOrder:0,framePoints:{x:0,y:0,w:1,h:1},scaleFactor:1,isOnscreen:true,isFocused:true,isMinimized:false,isMain:true,isModal:false};
 const node=(ref,role,title,extra={})=>({ref,role,title,subrole:'',identifier:'',description:'',value:'',actions:[],canPress:false,canFocus:false,canSetValue:false,canScroll:false,canIncrement:false,canDecrement:false,isTextInput:false,focused:false,offscreen:false,pictureOnly:false,truncated:false,text:[],children:[],rect:{x:0,y:0,w:1,h:1},...extra});
 const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5l0AAAAASUVORK5CYII=';
-let looks=0,requests=[],acts=0,ack=true,image=true;
+let looks=0,requests=[],acts=0,ack=true,image=true,targetDelayMs=0;
 Object.assign(currentPlatformBackend,{name:'windows',
- ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:root.appName,pid:root.pid,isFrontmost:true}],listRoots:async()=>[root],
+ ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:root.appName,pid:root.pid,isFrontmost:true}],listRoots:async()=>{if(targetDelayMs)await new Promise(resolve=>setTimeout(resolve,targetDelayMs));return [root];},
  getFrontmost:async()=>({appName:root.appName,pid:root.pid,windowTitle:root.title,windowId:root.windowId,rootRef:root.rootRef}),
  isBrowserApp:()=>false,isChromeFamilyApp:()=>false,
  observe:async(request)=>{requests.push(request);const pixels=request.includeElements===false;return parseLookResponse({lookId:'pixel-look-'+(++looks),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1,role:'window'},outline:node('@w1','window',root.title,{truncated:pixels,pictureOnly:pixels,children:pixels?[]:[node('native-save','button','Save',{canPress:true})]}),image:request.includeImage!==false&&image?{jpegBase64:png,mimeType:'image/png',width:1,height:1}:undefined,uiaDiagnostics:pixels&&ack?{status:'skipped',reason:'pixel_only_observation'}:undefined,timings:{totalMs:1}});},
@@ -18,7 +18,15 @@ Object.assign(currentPlatformBackend,{name:'windows',
 const ctx={cwd:process.cwd()};const call=(fn,params)=>fn('pixels-test',params,undefined,undefined,ctx);
 try{
  const found=await call(executeFind,{text:root.title});const ref=found.details.windows[0].windowRef;
+ targetDelayMs=30;
  const semantic=await call(executeObserve,{root:ref,mode:'semantic'});
+ targetDelayMs=0;
+ const measured=semantic.details.observationTimings;
+ for(const key of ['targetResolutionMs','resultBuildMs','observeRequestMs','observationPipelineMs'])assert(Number.isFinite(measured[key])&&measured[key]>=0,key+' must be a finite nonnegative duration');
+ assert(measured.targetResolutionMs>=20,'target resolution must include the controlled delayed root listing');
+ assert(measured.observeRequestMs>=measured.targetResolutionMs+measured.observationPipelineMs,'request total must span target resolution and observation pipeline');
+ assert(measured.observeRequestMs>=measured.resultBuildMs,'result construction is contained in the total');
+ assert.equal(acts,0,'timing diagnostics must not send input');
  const search=await call(executeSearchUi,{text:'Save',stateId:semantic.details.capture.stateId});const oldRef=search.details.matches[0].ref;
  requests=[];const pixels=await call(executeObserve,{root:ref,mode:'pixels'});
  assert.equal(requests.length,1,'pixel capture must not do a preliminary semantic read');

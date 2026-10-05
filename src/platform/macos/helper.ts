@@ -362,6 +362,7 @@ export class MacosHelperClient {
 			postEventAccess: typeof result?.postEventAccess === "boolean" ? result.postEventAccess : undefined,
 			optionalImageFailure: result?.optionalImageFailure === true,
 			permissionProbe,
+			screenRecordingProbePending: typeof result?.screenRecordingProbePending === "boolean" ? result.screenRecordingProbePending : undefined,
 		};
 		this.diagnosticsCache = diagnostics;
 		return diagnostics;

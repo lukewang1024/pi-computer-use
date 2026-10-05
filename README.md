@@ -163,3 +163,15 @@ This closes an identity fallback gap; it does not establish that every Office UI
 Native `observe_ui` reports `targetResolutionMs` before the observation pipeline, `resultBuildMs` for result construction, and `observeRequestMs` spanning target resolution through result construction. The total includes the pipeline and result construction; do not add it to its components. These timings exclude earlier request validation, browser/CDP observations, host startup, transport, and final response serialization. They do not prove action effects or identify the cause of time outside the measured stages.
 
 Execution summaries report `backgroundFirst` from the first dispatched step. For mixed delivery, inspect each step; a direct foreground action is not reported as background-first. An unknown effect remains unknown and is not automatically replayed.
+
+### Native macOS value confirmation
+
+A native editable control may accept `setText` while leaving its application
+model unchanged. If its fresh observed `actions` explicitly include `AXConfirm`,
+use a separate `act_ui` action `{"action":"commit","ref":"@eN"}` to commit
+that edit. This operation supports only native macOS desktop elements, keeps
+the current observation and window binding, and has no pointer or keyboard
+fallback. Missing capability, stale references, browser targets, and other
+platforms reject the action. A returned confirmation reports `unknown` because
+AX success alone does not prove the application saved the value; observe the
+result and independently verify saved output. Do not automatically replay it.

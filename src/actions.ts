@@ -12,7 +12,8 @@ export function describeActionExecution(attempted: number, requested: number, ou
 export type ActionTarget = { ref: string } | { x: number; y: number } | { focus: { x: number; y: number } };
 
 export type PreparedAction =
-	| { action: "press" | "click"; target: ActionTarget; params: { button?: MouseButtonName; clickCount?: number }; establishesFocus: boolean; usesCurrentFocus: false; needsForeground: boolean }
+	| { action: "commit"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
+	| { action: "press" | "click"; target: ActionTarget; params: { button?: MouseButtonName; clickCount?: number; nativeFocusOnly?: boolean }; establishesFocus: boolean; usesCurrentFocus: false; needsForeground: boolean }
 	| { action: "setText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "typeText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: false }
 	| { action: "keypress"; target: ActionTarget; params: { keys: string[] }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: false }
@@ -170,7 +171,7 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 			// Keep an observed native ref for a verifiable macOS focus request.
 			// The helper distinguishes native editors from web areas. Keep the
 			// image requirement for any pointer fallback and explicit pointer gestures.
-			if (env.platform === "macos" && env.image && node.wireRef && node.canFocus && !node.pictureOnly
+			if (env.platform === "macos" && node.wireRef && node.canFocus && !node.pictureOnly
 				&& (action.button === undefined || action.button === "left")
 				&& (action.clickCount === undefined || action.clickCount === 1)) {
 				return { ref: node.wireRef };
@@ -209,12 +210,22 @@ function containsEditable(node: OutlineNode): boolean {
 
 export function prepareAction(action: UiAction, state: ActionState, env: ActionEnvironment): PreparedAction {
 	const operation = action.action;
-	if (action.ref && ["press", "click", "setText", "typeText", "keypress"].includes(operation)
+	if (operation === "commit" && (env.platform !== "macos" || env.headless || !action.ref)) {
+		throw new Error("Native value commit requires a macOS desktop element reference.");
+	}
+	if (action.ref && ["commit", "press", "click", "setText", "typeText", "keypress"].includes(operation)
 		&& env.node(action.ref).isEnabled === false) {
 		throw new Error("Target control is disabled; input was not sent.");
 	}
 
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
+	if (operation === "commit") {
+		const node = env.node(action.ref!);
+		if (node.pictureOnly || !node.wireRef || !node.actions.includes("AXConfirm")) {
+			throw new Error("Target does not declare native AXConfirm; no input was sent.");
+		}
+		return { action: "commit", target: { ref: node.wireRef }, params: {}, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
+	}
 	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
 	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));
 	// A focusable non-editor ref can lack AXPress. The native helper then
@@ -232,7 +243,7 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 
 	switch (operation) {
 		case "press":
-		case "click": return { action: operation, target, params: { button: mouseButton(action.button), clickCount: clickCount(action.clickCount) }, establishesFocus, usesCurrentFocus: false, needsForeground };
+		case "click": return { action: operation, target, params: { button: mouseButton(action.button), clickCount: clickCount(action.clickCount), ...(!env.image && env.platform === "macos" && "ref" in target && env.node(action.ref!).isTextInput ? { nativeFocusOnly: true } : {}) }, establishesFocus, usesCurrentFocus: false, needsForeground };
 		case "setText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "typeText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus, needsForeground: false };
 		case "keypress": return { action: operation, target, params: { keys: keys(action.keys, env.platform) }, establishesFocus: false, usesCurrentFocus, needsForeground: false };

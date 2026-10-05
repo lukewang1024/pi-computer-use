@@ -89,6 +89,8 @@ export interface UiAction {
 export interface ActParams extends StateTargetParams {
 	actions: UiAction[];
 	expect?: UiCondition;
+	/** Desktop successor observation only; input delivery and focus guards are unchanged. */
+	observationMode?: "semantic" | "fused";
 }
 
 export interface ReadTextParams extends StateTargetParams {

@@ -134,7 +134,7 @@ const actTool = defineTool({
 		"An unknown outcome is not permission to resend input. Inspect the returned state or an independent postcondition before the next action.",
 		"For a split button, press may run the default action. Ground a separate dropdown click from the current image and parent/child rectangles.",
 	],
-	parameters: Type.Object({ stateId, expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
+	parameters: Type.Object({ stateId, observationMode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("fused")], { description: "Desktop successor observation: semantic skips the post-action screenshot and returns current UI refs; fused (default) captures pixels. Image-coordinate actions after a semantic successor require a fresh image-bearing observation. This does not change input delivery or focus requirements." })), expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
 });
 

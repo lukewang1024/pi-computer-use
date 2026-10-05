@@ -2252,10 +2252,12 @@ async function terminalDesktopActionResult(
 
 async function performDesktopTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails>> {
 	const state = operationState();
-	state.currentImageMode = "auto";
+	const semanticSuccessor = params.observationMode === "semantic";
+	state.currentImageMode = semanticSuccessor ? "never" : "auto";
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const pixelOnly = look.uiaDiagnostics?.status === "skipped" && look.uiaDiagnostics?.reason === "pixel_only_observation";
+	if (pixelOnly && semanticSuccessor) throw new Error("Pixel-only state cannot return a semantic successor; observe semantic or fused first.");
 	if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
 	const condition = params.expect ? validateCondition(params.expect) : undefined;
@@ -2312,7 +2314,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			} else {
 				await sleep(settleMsForExecution(execution), signal);
 			}
-			const capture = await captureCurrentTarget(signal, pixelOnly ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, true, false, pixelOnly ? false : undefined);
+			const capture = await captureCurrentTarget(signal, pixelOnly || semanticSuccessor ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, !semanticSuccessor, false, pixelOnly ? false : undefined);
 			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
@@ -2418,11 +2420,17 @@ function validateActionTarget(action: UiAction): void {
 }
 
 async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
+	if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused") {
+		throw new Error("act_ui.observationMode must be semantic or fused.");
+	}
 	const actions = Array.isArray(params.actions) ? params.actions : [];
 	if (actions.length === 0) throw new Error("act_ui.actions must contain at least one action.");
 	if (actions.length > 20) throw new Error("act_ui supports at most 20 actions per transaction.");
 	for (const action of actions) validateActionTarget(action);
-	if (operationState().contextId) return await performBrowserTransaction(params, actions, signal);
+	if (operationState().contextId) {
+		if (params.observationMode !== undefined) throw new Error("act_ui.observationMode is currently desktop-only.");
+		return await performBrowserTransaction(params, actions, signal);
+	}
 	return await performDesktopTransaction(params, actions, signal);
 }
 

@@ -27,6 +27,8 @@ try{
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,actions:[{action:'press',ref:oldRef}]}));assert.equal(acts,0,'prior semantic refs cannot be grounded in the pixel-only state');
  requests=[];await assert.rejects(()=>call(executeSearchUi,{text:'Save',stateId:pixels.details.capture.stateId}),/no semantic elements/);assert.equal(requests.length,0);
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,actions:[{action:'click',x:0,y:0}],expect:{text:'Save'}}),/semantic postconditions/);assert.equal(acts,0);
+ await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'semantic',actions:[{action:'click',x:0,y:0}]}),/semantic successor/);assert.equal(acts,0);
+ await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'invalid',actions:[{action:'click',x:0,y:0}]}),/must be semantic or fused/);assert.equal(acts,0);
  const acted=await call(executeAct,{stateId:pixels.details.capture.stateId,actions:[{action:'click',x:0,y:0}]});assert.equal(acted.details.execution.outcome,'unknown');assert.equal(acted.details.uiaDiagnostics.status,'skipped');assert.equal(requests.length,1);assert.equal(requests[0].includeElements,false);assert.equal(acts,1,'controlled input completion remains unverified; no batch replay');
  requests=[];await assert.rejects(()=>call(executeObserve,{mode:'pixels'}),/exact Windows native/);assert.equal(requests.length,0);
  currentPlatformBackend.name='macos';await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/exact Windows native/);assert.equal(requests.length,0);currentPlatformBackend.name='windows';

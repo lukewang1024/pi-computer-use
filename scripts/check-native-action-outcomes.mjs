@@ -11,12 +11,12 @@ import {Value} from 'typebox/value';
 const original={...currentPlatformBackend};
 const root={kind:'window',rootRef:'native-outcome-root',windowId:71,pid:100071,appName:'Outcome fixture',title:'Owned outcome fixture',zOrder:0,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isOnscreen:true,isFocused:true,isMinimized:false,isMain:true,isModal:false,metadata:{interaction:{enabled:true,ownerHwnd:72,ownerEnabled:false,ownerDisabled:true,unexpected:'must not leak'}}};
 const make=(ref,role,title,extra={})=>({ref,role,title,subrole:'',identifier:'',description:'',value:'',actions:[],canPress:false,canFocus:false,canSetValue:false,canScroll:false,canIncrement:false,canDecrement:false,isTextInput:false,focused:false,offscreen:false,pictureOnly:false,truncated:false,text:[],children:[],rect:{x:0,y:0,w:20,h:20},...extra});
-let outcome='didnt',calls=[],value='old',presses=0,look=0,enabled=true;
+let outcome='didnt',calls=[],value='old',presses=0,look=0,enabled=true,observations=[];
 Object.assign(currentPlatformBackend,{
  ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:root.appName,pid:root.pid,isFrontmost:true}],listRoots:async()=>[root],
  getFrontmost:async()=>({appName:root.appName,pid:root.pid,windowTitle:root.title,windowId:root.windowId,rootRef:root.rootRef}),
  isBrowserApp:()=>false,isChromeFamilyApp:()=>false,
- observe:async()=>parseLookResponse({lookId:'outcome-look-'+(++look),capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isModal:false,role:'window',subrole:''},outline:make('@w1','window',root.title,{children:[make('native-field','textbox','Field',{value,canSetValue:true,isTextInput:true,actions:['set_text']}),make('native-commit','button','Commit',{isEnabled:enabled,canPress:enabled,actions:enabled?['press']:[]})]}),timings:{captureMs:57,describeMs:3,readTextMs:0,totalMs:60}}),
+ observe:async(request)=>{observations.push(request);return parseLookResponse({lookId:'outcome-look-'+(++look),capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isModal:false,role:'window',subrole:''},outline:make('@w1','window',root.title,{children:[make('native-field','textbox','Field',{value,canSetValue:true,isTextInput:true,actions:['set_text']}),make('native-commit','button','Commit',{isEnabled:enabled,canPress:enabled,actions:enabled?['press']:[]})]}),timings:{captureMs:57,describeMs:3,readTextMs:0,totalMs:60}});},
  act:async(request)=>{calls.push(request);if(request.action==='setText'&&outcome==='worked')value=request.params.text;if(request.action==='press')presses++;return {outcome,performed:{grounding:'description',delivery:'ax'}};},shutdown:async()=>{},
 });
 const directory=await mkdtemp(path.join(os.tmpdir(),'cu-outcomes-'));
@@ -51,6 +51,30 @@ try{
   else{assert.equal(calls.length,1);assert.equal(presses,0);assert.equal(value,'old');assert.match(text,/Attempted 1 of 2/);assert.match(text,/Remaining 1 actions were not sent/);}
   if(expected==='unknown')assert.match(text,/Do not automatically repeat/);
   if(expected==='didnt')assert.match(text,/no effect was observed/);
+ }
+ // Explicit semantic successor avoids image capture without relaxing input grounding.
+ {
+  outcome='worked';value='old';observations=[];
+  const roots=await call('find_roots',{text:root.title});
+  const initial=await call('observe_ui',{root:roots.details.windows[0].windowRef,mode:'semantic'});
+  const matches=await call('search_ui',{stateId:initial.details.capture.stateId,text:'Field',role:'textbox'});
+  const ref=matches.details.matches.find(m=>m.matchReason==='exact').ref;
+  const count=calls.length;observations=[];
+  const successor=await call('act_ui',{stateId:initial.details.capture.stateId,observationMode:'semantic',actions:[{action:'setText',ref,text:'semantic-successor'}]});
+  assert.equal(calls.length,count+1);
+  assert.equal(observations.length,1);
+  assert.equal(observations[0].includeImage,false);
+  assert.equal(observations[0].readText,'never');
+  assert(!successor.content.some(c=>c.type==='image'));
+  assert.equal(successor.details.execution.outcome,'worked');
+  const fresh=await call('search_ui',{stateId:successor.details.capture.stateId,text:'Field',role:'textbox'});
+  assert(fresh.details.matches.some(m=>m.matchReason==='exact'));
+  assert.equal(successor.details.outline.root.children.find(n=>n.title==='Field').value,'semantic-successor');
+  await assert.rejects(call('act_ui',{stateId:successor.details.capture.stateId,actions:[{action:'click',x:1,y:1}]}),/image-bearing/);
+  assert.equal(calls.length,count+1,'Outline-only successor must reject image point before dispatch');
+  observations=[];
+  await call('act_ui',{stateId:successor.details.capture.stateId,observationMode:'fused',actions:[{action:'setText',ref:fresh.details.matches.find(m=>m.matchReason==='exact').ref,text:'fused-successor'}]});
+  assert.equal(observations.length,1);assert.equal(observations[0].includeImage,true);
  }
  enabled=false;
  const disabledFound=await call('find_roots',{text:root.title});

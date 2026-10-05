@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.2-workbench.42",
+	"version": "0.5.2-workbench.43",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -84,7 +84,7 @@
 		"test:local-build-fingerprint": "node scripts/check-local-build-fingerprint.mjs",
 		"test:signing": "node scripts/check-local-signing.mjs",
 		"test:macos-path": "node scripts/check-macos-helper-path.mjs",
-		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:cdp-navigation && npm run test:cdp-viewport && npm run test:browser-startup && npm run test:browser-observe && npm run test:cdp-frames && npm run test:cdp-sessions && npm run test:cdp-input && npm run test:permissions && npm run test:presigned-helper && npm run test:local-build-fingerprint && npm run test:action-preflight && npm run test:native-root-pin && npm run test:native-action-outcomes && npm run test:helper-transport && npm run test:bridge-unknown && npm run test:native-key-preflight && npm run test:text-input-source && npm run test:native-focus-gate && npm run test:focus-window && npm run test:focus-optional-capture && npm run test:readiness-without-capture && npm run test:ocr-failure && npm run test:capture-trace && npm run test:scoped-outline && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:package-assets && npm run test:signing && npm run test:macos-path && npm run test:macos-identity && npm run test:windows-managed-helper && npm run test:macos-helper-socket && npm run test:macos-outline && npm run test:macos-optional-image && npm run test:macos-values && npm run test:macos-bounded-read && npm run test:macos-root-snapshot && npm run test:macos-menu-pairing && npm run test:macos-dialog-pairing && npm run test:macos-permission-probe && npm run test:macos-permission-diagnostics",
+		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:cdp-navigation && npm run test:cdp-viewport && npm run test:browser-startup && npm run test:browser-observe && npm run test:cdp-frames && npm run test:cdp-sessions && npm run test:cdp-input && npm run test:permissions && npm run test:presigned-helper && npm run test:local-build-fingerprint && npm run test:action-preflight && npm run test:native-root-pin && npm run test:native-commit && npm run test:native-action-outcomes && npm run test:helper-transport && npm run test:bridge-unknown && npm run test:native-key-preflight && npm run test:text-input-source && npm run test:native-focus-gate && npm run test:focus-window && npm run test:focus-optional-capture && npm run test:readiness-without-capture && npm run test:ocr-failure && npm run test:capture-trace && npm run test:scoped-outline && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:package-assets && npm run test:signing && npm run test:macos-path && npm run test:macos-identity && npm run test:windows-managed-helper && npm run test:macos-helper-socket && npm run test:macos-outline && npm run test:macos-optional-image && npm run test:macos-values && npm run test:macos-bounded-read && npm run test:macos-root-snapshot && npm run test:macos-menu-pairing && npm run test:macos-dialog-pairing && npm run test:macos-permission-probe && npm run test:macos-permission-diagnostics",
 		"build:native": "node scripts/build-native.mjs",
 		"build:windows": "node scripts/build-native.mjs --platform windows",
 		"build:linux": "node scripts/build-native.mjs --platform linux",
@@ -116,7 +116,8 @@
 		"test:macos-menu-pairing": "node scripts/check-macos-menu-pairing.mjs",
 		"test:macos-dialog-pairing": "node scripts/check-macos-dialog-pairing.mjs",
 		"test:macos-permission-probe": "node scripts/check-macos-permission-probe.mjs",
-		"test:macos-permission-diagnostics": "tsx scripts/check-macos-permission-diagnostics.mjs"
+		"test:macos-permission-diagnostics": "tsx scripts/check-macos-permission-diagnostics.mjs",
+		"test:native-commit": "tsx scripts/check-native-commit.mjs"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",

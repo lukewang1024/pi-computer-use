@@ -89,3 +89,22 @@ for(const action of ['click','press']) {
 }
 assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,pointerRefEnv),/Stale/);
 console.log('Native Mac non-AXPress pointer refs preserve foreground and no-replay boundaries');
+
+// Native confirmation is a distinct commit operation, never a pointer press.
+const confirmNode={...focusable,role:'AXComboBox',actions:['AXShowMenu','AXConfirm'],canPress:false};
+const confirmEnv={...macEnv,image:undefined,node(ref){if(ref!=='@e1')throw Error('Stale reference');return confirmNode;},center(){throw Error('No coordinate fallback allowed');}};
+const confirmation=preflightActionSequence([{action:'commit',ref:'@e1'}],false,confirmEnv)[0];
+assert.deepEqual(confirmation.target,{ref:'native-text'});
+assert.equal(confirmation.needsForeground,false);
+assert.equal(confirmation.establishesFocus,false);
+for(const outcome of ['worked','unknown','didnt']) assert.equal(canRetryInForeground(confirmation,outcome,false),false);
+for(const platform of ['windows','linux']) assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@e1'}],false,{...confirmEnv,platform}),/macOS desktop/);
+assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@e1'}],false,{...confirmEnv,headless:true}),/macOS desktop/);
+assert.throws(()=>preflightActionSequence([{action:'commit',x:10,y:10}],false,confirmEnv),/element reference/);
+assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@missing'}],false,confirmEnv),/Stale/);
+for(const changed of [{actions:['AXShowMenu']},{pictureOnly:true},{wireRef:undefined},{isEnabled:false}]) {
+ assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@e1'}],false,{...confirmEnv,node(){return {...confirmNode,...changed};}}),/AXConfirm|disabled/);
+}
+assert(Value.Check(schema,{stateId:'S1',actions:[{action:'commit',ref:'@e1'}]}));
+assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'commit',x:10,y:10}]}));
+console.log('Native AXConfirm preflight, no-fallback and no-replay boundaries passed');

@@ -2225,6 +2225,25 @@ final class Bridge {
 			return refreshed
 		}
 
+		if action == "commit" {
+			guard let element, target["ref"] is String,
+				!hasAncestorRole(element, role: "AXWebArea"),
+				let boundWindow = windowElement(pid: pid, windowId: record.windowId),
+				isElement(element, descendantOf: boundWindow)
+			else { throw BridgeFailure(message: "Native value commit requires a current native element in the observed window", code: "stale_ref") }
+			guard actionNames(element).contains("AXConfirm") else {
+				throw BridgeFailure(message: "Element does not declare AXConfirm; no input was sent", code: "unsupported")
+			}
+			let status = AXUIElementPerformAction(element, "AXConfirm" as CFString)
+			performed["delivery"] = "ax"
+			performed["nativeAction"] = "AXConfirm"
+			performed["apiStatus"] = status.rawValue
+			// Returned AX success proves dispatch, not that an application saved
+			// its value. Never retry or substitute keyboard/pointer input.
+			return finish(["outcome": "unknown", "performed": performed,
+				"evidence": ["actionReturned": true, "apiSucceeded": status == .success]])
+		}
+
 		if let element, action == "press" || action == "click" {
 			let elementRole = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
 			let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText", "AXSecureTextField"]
@@ -2233,6 +2252,11 @@ final class Bridge {
 				&& ((params["clickCount"] as? NSNumber)?.intValue ?? 1) == 1
 			var focusSettable = DarwinBoolean(false)
 			let focusCapability = AXUIElementIsAttributeSettable(element, kAXFocusedAttribute as CFString, &focusSettable)
+			let nativeFocusOnly = params["nativeFocusOnly"] as? Bool ?? false
+			if nativeFocusOnly && !(textRoles.contains(elementRole) && !isWeb && isSingleLeftClick
+				&& focusCapability == .success && focusSettable.boolValue) {
+				throw BridgeFailure(message: "Outline-only native focus is unavailable; no pointer input was sent", code: "unsupported")
+			}
 			if textRoles.contains(elementRole), !isWeb, isSingleLeftClick,
 				focusCapability == .success, focusSettable.boolValue {
 				// Ref-scoped native text clicks can establish focus without a pointer.
@@ -2530,6 +2554,15 @@ final class Bridge {
 
 	private func rootDeltaItem(change: String, root: [String: Any], pid: Int32) -> [String: Any] {
 		var item: [String: Any] = ["change": change, "kind": root["kind"] as? String ?? "window", "title": root["title"] as? String ?? "", "pid": root["pid"] as? Int ?? Int(pid)]
+		// Sheets can share the parent CG window id. Only exact window pairings
+		// may bind a newly appeared public root to a physical window identity.
+		if root["kind"] as? String == "window",
+		   let metadata = root["metadata"] as? [String: Any],
+		   let pairing = metadata["pairing"] as? [String: Any],
+		   pairing["confidence"] as? String == "exact",
+		   let windowId = root["windowId"] as? Int, windowId > 0 {
+			item["windowId"] = windowId
+		}
 		if let isModal = root["isModal"] as? Bool { item["isModal"] = isModal }
 		if let metadata = root["metadata"] as? [String: Any] { item["metadata"] = metadata }
 		if let ref = root["rootRef"] as? String ?? root["windowRef"] as? String { item["ref"] = ref }

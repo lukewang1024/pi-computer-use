@@ -68,6 +68,14 @@ for(const action of [{action:'click',ref:'@e1',button:'right'},{action:'click',r
 assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,node(){return {...focusable,canFocus:false};}})[0].target,{x:20,y:30});
 assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,platform:'windows'})[0].target,{x:20,y:30});
 assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,macEnv),/Stale/);
+for(const operation of ['press','click']){
+ const semanticFocus=preflightActionSequence([{action:operation,ref:'@e1'}],false,{...macEnv,image:undefined})[0];
+ assert.deepEqual(semanticFocus.target,{ref:'native-text'});assert.equal(semanticFocus.params.nativeFocusOnly,true);assert.equal(semanticFocus.needsForeground,false);
+}
+assert.equal(nativeFocus.params.nativeFocusOnly,undefined,'Image-bearing focus preserves existing routing');
+for(const action of [{action:'click',ref:'@e1',button:'right'},{action:'click',ref:'@e1',clickCount:2}]){
+ assert.throws(()=>preflightActionSequence([action],false,{...macEnv,image:undefined,validatePoint(){throw Error('Image required');}}),/Image/);
+}
 console.log('Native macOS focus routing and pointer-gesture boundaries passed');
 
 // A focusable Word comment button without AXPress still uses pointer delivery.
@@ -89,3 +97,22 @@ for(const action of ['click','press']) {
 }
 assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,pointerRefEnv),/Stale/);
 console.log('Native Mac non-AXPress pointer refs preserve foreground and no-replay boundaries');
+
+// Native confirmation is a distinct commit operation, never a pointer press.
+const confirmNode={...focusable,role:'AXComboBox',actions:['AXShowMenu','AXConfirm'],canPress:false};
+const confirmEnv={...macEnv,image:undefined,node(ref){if(ref!=='@e1')throw Error('Stale reference');return confirmNode;},center(){throw Error('No coordinate fallback allowed');}};
+const confirmation=preflightActionSequence([{action:'commit',ref:'@e1'}],false,confirmEnv)[0];
+assert.deepEqual(confirmation.target,{ref:'native-text'});
+assert.equal(confirmation.needsForeground,false);
+assert.equal(confirmation.establishesFocus,false);
+for(const outcome of ['worked','unknown','didnt']) assert.equal(canRetryInForeground(confirmation,outcome,false),false);
+for(const platform of ['windows','linux']) assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@e1'}],false,{...confirmEnv,platform}),/macOS desktop/);
+assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@e1'}],false,{...confirmEnv,headless:true}),/macOS desktop/);
+assert.throws(()=>preflightActionSequence([{action:'commit',x:10,y:10}],false,confirmEnv),/element reference/);
+assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@missing'}],false,confirmEnv),/Stale/);
+for(const changed of [{actions:['AXShowMenu']},{pictureOnly:true},{wireRef:undefined},{isEnabled:false}]) {
+ assert.throws(()=>preflightActionSequence([{action:'commit',ref:'@e1'}],false,{...confirmEnv,node(){return {...confirmNode,...changed};}}),/AXConfirm|disabled/);
+}
+assert(Value.Check(schema,{stateId:'S1',actions:[{action:'commit',ref:'@e1'}]}));
+assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'commit',x:10,y:10}]}));
+console.log('Native AXConfirm preflight, no-fallback and no-replay boundaries passed');

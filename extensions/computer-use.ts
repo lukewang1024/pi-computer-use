@@ -26,6 +26,7 @@ const mouseButton = Type.Optional(Type.Union([Type.Literal("left"), Type.Literal
 const clickByRef = Type.Object({ action: Type.Literal("click"), ref: Type.String(), button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
 const clickByPoint = Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
 const uiAction = Type.Union([
+	Type.Object({ action: Type.Literal("commit"), ref: Type.String({ description: "macOS native element declaring AXConfirm; commits an edited value without keyboard or pointer fallback" }) }),
 	Type.Object({ action: Type.Literal("press"), ref: Type.String({ description: "Actionable outline ref" }) }),
 	clickByRef,
 	clickByPoint,

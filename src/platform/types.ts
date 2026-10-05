@@ -135,6 +135,8 @@ export interface HelperActPerformed {
 }
 
 export interface PlatformRootDelta {
+	/** Exact native window identity, when available for a window root. */
+	windowId?: number;
 	change: "appeared" | "closed" | "focused";
 	kind: string;
 	ref?: string;
@@ -189,6 +191,7 @@ export interface PlatformActRequestBase {
 }
 
 export type PlatformActRequest = PlatformActRequestBase & (
+	| { action: "commit"; params: PlatformActDeliveryParam }
 	| { action: "press" | "click"; params: { button?: PlatformMouseButton; clickCount?: number } & PlatformActDeliveryParam }
 	| { action: "setText"; params: { text: string } & PlatformActDeliveryParam }
 	| { action: "typeText"; params: { text: string } & PlatformActDeliveryParam }

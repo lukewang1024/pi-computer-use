@@ -12,7 +12,10 @@ const source = fs.readFileSync(path.join(root, 'native/macos/bridge.swift'), 'ut
 const start = source.indexOf('\tprivate func rootIdentity(');
 const end = source.indexOf('\tprivate func rootDelta(', start);
 assert(start >= 0 && end > start, 'Production snapshot methods missing');
-const methods = source.slice(start, end);
+const deltaStart = source.indexOf('\tprivate func rootDeltaItem(');
+const deltaEnd = source.indexOf('\n\t// The AX snapshot', deltaStart);
+assert(deltaStart >= 0 && deltaEnd > deltaStart);
+const methods = source.slice(start, end) + source.slice(deltaStart, deltaEnd);
 const swift = `import Foundation
 final class Harness {
  var roots: [[String: Any]] = []
@@ -39,6 +42,14 @@ ${methods}
   assert(rootMetadataSnapshot(pid: 1).count == 2, "Distinct windows must remain distinct")
   roots = []; assert(rootMetadataSnapshot(pid: 1).isEmpty)
   failEnumeration = true; assert(rootMetadataSnapshot(pid: 1).isEmpty)
+  let popup: [String: Any] = ["kind":"window", "windowId":81,"pid":3,"title":"Header","windowRef":"native-popup", "metadata":["pairing":["confidence":"exact"]]]
+  let exact = rootDeltaItem(change:"appeared",root:popup,pid:3)
+  assert(exact["windowId"] as? Int == 81)
+  assert(exact["ref"] as? String == "native-popup")
+  for kind in ["sheet","menu"] { var other=popup; other["kind"]=kind; assert(rootDeltaItem(change:"appeared",root:other,pid:3)["windowId"] == nil) }
+  for confidence in ["high","low"] { var other=popup; other["metadata"]=["pairing":["confidence":confidence]]; assert(rootDeltaItem(change:"appeared",root:other,pid:3)["windowId"] == nil) }
+  var invalid=popup; invalid["windowId"]=0; assert(rootDeltaItem(change:"closed",root:invalid,pid:3)["windowId"] == nil)
+
  }
 }
 Harness().check()

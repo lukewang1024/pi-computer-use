@@ -31,6 +31,7 @@ export interface PlatformDiagnostics {
 	screenRecording?: boolean;
 	postEventAccess?: boolean;
 	optionalImageFailure?: boolean;
+	screenRecordingProbePending?: boolean;
 	permissionProbe?: { inFlight: boolean; waiters: number; positiveCached: boolean };
 }
 

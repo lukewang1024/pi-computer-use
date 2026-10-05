@@ -48,3 +48,41 @@ final class PermissionProbe<Value>: @unchecked Sendable {
                 "positiveCached": cached != nil]
     }
 }
+
+// A caller deadline cannot cancel ScreenCaptureKit's asynchronous content fetch.
+// Retain its slot until the actual callback completes; reject overlapping starts.
+final class CompletionOwnedPermissionProbe<Value>: @unchecked Sendable {
+    private final class Flight {
+        let done = DispatchSemaphore(value: 0)
+        var value: Value?
+        var completed = false
+    }
+    private let lock = NSLock()
+    private var active: Flight?
+
+    var occupied: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active != nil
+    }
+
+    func read(timeout: TimeInterval, start: (@escaping (Value) -> Void) -> Void) -> Value? {
+        precondition(timeout.isFinite && timeout >= 0)
+        lock.lock()
+        guard active == nil else { lock.unlock(); return nil }
+        let flight = Flight()
+        active = flight
+        lock.unlock()
+        start { value in
+            self.lock.lock()
+            guard !flight.completed else { self.lock.unlock(); return }
+            flight.value = value
+            flight.completed = true
+            if self.active === flight { self.active = nil }
+            self.lock.unlock()
+            flight.done.signal()
+        }
+        guard flight.done.wait(timeout: .now() + timeout) == .success else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return flight.value
+    }
+}

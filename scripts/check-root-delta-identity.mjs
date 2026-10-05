@@ -43,6 +43,35 @@ try{
   }
   assert.equal(inputs.length,inputCount,'Resolving a popup must not dispatch input');
  }
+ // Empty AX reads during a just-opened gallery may be retried, bounded.
+ for(const recover of [true,false]){
+  await shutdownComputerUseSession();roots=[owned];inputs=[];backend.listRoots=async()=>roots;
+  backend.act=async request=>{inputs.push(request);return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[{change:'appeared',kind:'window',ref:'native-popup-old',windowId:81,title:'Header',pid:owned.pid}]};};
+  const observed=await observeOwned();
+  const acted=await call(executeAct,{stateId:observed.details.capture.stateId,actions:[{action:'commit',ref:button(observed)}]});
+  roots=[owned,makeRoot(81,'native-popup-new','Header')];let enumerations=0;
+  backend.listRoots=async()=>{enumerations++;return recover && enumerations>=3?roots:[];};
+  if(recover){const popup=await call(executeObserve,{root:acted.details.execution.rootDelta[0].ref,mode:'semantic'});assert.equal(popup.details.target.windowId,81);}
+  else{await assert.rejects(()=>call(executeObserve,{root:acted.details.execution.rootDelta[0].ref,mode:'semantic'}),/stale/);assert.equal(enumerations,3,'Empty read recovery must stop after three reads');}
+  assert.equal(inputs.length,1,'Transient read recovery must not replay input');
+ }
+ backend.listRoots=async()=>roots;
+ for(const failure of ['transport','aborted','expired']){
+  await shutdownComputerUseSession();roots=[owned];inputs=[];backend.listRoots=async()=>roots;
+  backend.act=async request=>{inputs.push(request);return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[{change:'appeared',kind:'window',ref:'native-popup-old',windowId:81,title:'Header',pid:owned.pid}]};};
+  const observed=await observeOwned();
+  const acted=await call(executeAct,{stateId:observed.details.capture.stateId,actions:[{action:'commit',ref:button(observed)}]});
+  let enumerations=0;backend.listRoots=async()=>{enumerations++;if(failure==='transport')throw new Error('Fixture transport failure');return [];};
+  if(failure==='expired')await new Promise(resolve=>setTimeout(resolve,510));
+  if(failure==='aborted'){
+   const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10);
+   try{await assert.rejects(()=>executeObserve('abort-read',{root:acted.details.execution.rootDelta[0].ref,mode:'semantic'},controller.signal,undefined,{cwd:process.cwd(),hasUI:false}),/abort/i);}finally{clearTimeout(timer);}
+  }else{
+   await assert.rejects(()=>call(executeObserve,{root:acted.details.execution.rootDelta[0].ref,mode:'semantic'}),failure==='transport'?/transport/:/stale/);
+  }
+  assert.equal(enumerations,1,'Transport, cancellation and expired refs cannot keep polling');assert.equal(inputs.length,1);
+ }
+ backend.listRoots=async()=>roots;
  // Older helpers without an id must also reject a same-title replacement.
  await shutdownComputerUseSession();roots=[owned];inputs=[];
  backend.act=async request=>{inputs.push(request);return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[{change:'appeared',kind:'window',ref:'native-popup-old',title:'Header',pid:owned.pid}]};};

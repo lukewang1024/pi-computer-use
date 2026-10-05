@@ -37,7 +37,9 @@ try{
   outcome=expected;calls=[];value='old';presses=0;
   const found=await call('find_roots',{text:root.title});assert.equal(found.details.windows.length,1);assert.deepEqual(found.details.windows[0].interaction,{enabled:true,ownerHwnd:72,ownerEnabled:false,ownerDisabled:true});assert(found.content.some(c=>c.type==='text'&&c.text.includes('owner_disabled=72')));
   const observed=await call('observe_ui',{root:found.details.windows[0].windowRef});
-  const {semanticObservationMs,imageObservationMs,observationPipelineMs,...nativeTimings}=observed.details.observationTimings;
+  const {semanticObservationMs,imageObservationMs,observationPipelineMs,targetResolutionMs,resultBuildMs,observeRequestMs,...nativeTimings}=observed.details.observationTimings;
+  for(const value of [targetResolutionMs,resultBuildMs,observeRequestMs])assert(Number.isFinite(value)&&value>=0);
+  assert(observeRequestMs>=targetResolutionMs+observationPipelineMs);
   assert.deepEqual(nativeTimings,{captureMs:57,describeMs:3,readTextMs:0,totalMs:60});
   for(const duration of [semanticObservationMs,imageObservationMs,observationPipelineMs])assert(Number.isFinite(duration)&&duration>=0);
   assert(observationPipelineMs>=semanticObservationMs+imageObservationMs);

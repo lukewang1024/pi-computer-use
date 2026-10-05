@@ -1869,10 +1869,13 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const defaultReadText = mode === "semantic" || mode === "pixels" ? "never" : mode === "visual" ? "always" : "auto";
 	const readText = params.readText ?? defaultReadText;
 	state.currentImageMode = normalizeImageMode(image);
+	const observeRequestStarted = performance.now();
 	const selection: ObserveTargetParams = { root: normalizeWindowSelector(params.root) };
+	const targetResolutionStarted = performance.now();
 	const requestedTarget = selection.root
 		? await resolveTargetByWindowSelector(params.root!, signal)
 		: await resolveTargetForObserve(signal);
+	const targetResolutionMs = performance.now() - targetResolutionStarted;
 	const imageMode = normalizeImageMode(image);
 	const resourceKey = desktopResourceKey(requestedTarget);
 	let imageError: string | undefined;
@@ -1915,7 +1918,7 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		}
 	});
 	const captureResult = scheduled.value;
-	Object.assign(captureResult.look.timings, { semanticObservationMs, imageObservationMs, observationPipelineMs: performance.now() - observationStarted });
+	Object.assign(captureResult.look.timings, { targetResolutionMs, semanticObservationMs, imageObservationMs, observationPipelineMs: performance.now() - observationStarted });
 	// Model @r refs are re-minted on re-resolution, so ref string equality
 	// alone false-positives as drift for the same root; compare stable
 	// identity against the resolved request too.
@@ -1925,7 +1928,9 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		);
 	}
 	const summary = `Observed ${mode} ${captureResult.target.windowRef ? `${captureResult.target.windowRef} ` : ""}${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned the latest outline state.`;
+	const resultBuildStarted = performance.now();
 	const result = await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageError ? "never" : imageMode);
+	Object.assign(result.details.observationTimings ??= {}, { resultBuildMs: performance.now() - resultBuildStarted, observeRequestMs: performance.now() - observeRequestStarted });
 	if (captureResult.look.ocrDiagnostics?.status === "failed") {
 		result.content.unshift({ type: "text", text: "Text recognition failed; the captured pixels and native accessibility outline remain available. OCR text was not obtained. Inspect details.ocrDiagnostics; do not repeat input." });
 	}

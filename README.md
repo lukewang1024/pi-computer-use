@@ -161,3 +161,5 @@ A native reference carrying a UIA RuntimeId resolves only to that same live Runt
 This closes an identity fallback gap; it does not establish that every Office UIA provider operation is bounded or that provider-reported action success proves the intended document effect.
 
 Native `observe_ui` reports `targetResolutionMs` before the observation pipeline, `resultBuildMs` for result construction, and `observeRequestMs` spanning target resolution through result construction. The total includes the pipeline and result construction; do not add it to its components. These timings exclude earlier request validation, browser/CDP observations, host startup, transport, and final response serialization. They do not prove action effects or identify the cause of time outside the measured stages.
+
+Execution summaries report `backgroundFirst` from the first dispatched step. For mixed delivery, inspect each step; a direct foreground action is not reported as background-first. An unknown effect remains unknown and is not automatically replayed.

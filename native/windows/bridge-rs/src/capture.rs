@@ -94,7 +94,69 @@ use windows::Win32::Graphics::Gdi::{
 #[cfg(windows)]
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
+};
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CaptureFrame {
+    hwnd: isize,
+    pid: u32,
+    thread_id: u32,
+    bounds: (i32, i32, i32, i32),
+    valid: bool,
+    minimized: bool,
+    desktop_ready: bool,
+}
+
+#[cfg(any(windows, test))]
+fn capture_owner_matches(expected: CaptureFrame, actual: CaptureFrame) -> bool {
+    expected.valid
+        && actual.valid
+        && expected.hwnd != 0
+        && expected.pid != 0
+        && expected.thread_id != 0
+        && (expected.hwnd, expected.pid, expected.thread_id)
+            == (actual.hwnd, actual.pid, actual.thread_id)
+}
+
+#[cfg(any(windows, test))]
+fn capture_frame_matches(expected: CaptureFrame, actual: CaptureFrame) -> bool {
+    capture_owner_matches(expected, actual)
+        && !expected.minimized
+        && !actual.minimized
+        && expected.desktop_ready
+        && actual.desktop_ready
+        && expected.bounds.2 > 0
+        && expected.bounds.3 > 0
+        && expected.bounds == actual.bounds
+}
+
+#[cfg(windows)]
+unsafe fn read_capture_frame(hwnd: HWND) -> Option<CaptureFrame> {
+    let mut bounds = RECT::default();
+    if GetWindowRect(hwnd, &mut bounds).is_err() {
+        return None;
+    }
+    let mut pid = 0;
+    let thread_id = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    Some(CaptureFrame {
+        hwnd: hwnd.0 as isize,
+        pid,
+        thread_id,
+        bounds: (
+            bounds.left,
+            bounds.top,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
+        ),
+        valid: IsWindow(hwnd).as_bool(),
+        minimized: IsIconic(hwnd).as_bool(),
+        desktop_ready: crate::foreground::capture_state(hwnd.0 as isize)["desktop"]["ready"]
+            == true,
+    })
+}
 
 #[cfg(any(windows, test))]
 fn is_effectively_blank_bgra(bits: &[u8]) -> bool {
@@ -181,9 +243,17 @@ fn screenshot_impl(
     // Restoring a GPU window can expose its iconic bounds or an unpainted
     // surface briefly. Retry only capture failures on an available target,
     // refreshing geometry each time; never accept a blank image as success.
-    let mut captured = unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension) };
+    let owner = unsafe { read_capture_frame(hwnd) }.ok_or_else(|| {
+        ProtocolError::new(
+            "Capture target identity unavailable",
+            ErrorCode::CaptureFailed,
+        )
+    })?;
+    let mut captured =
+        unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension, owner) };
     for _ in 0..3 {
-        if captured.is_ok() || crate::foreground::capture_state(hwnd.0 as isize)["eligible"] != true {
+        if captured.is_ok() || crate::foreground::capture_state(hwnd.0 as isize)["eligible"] != true
+        {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(75));
@@ -197,10 +267,13 @@ fn screenshot_impl(
             width = (rect.right - rect.left).max(0);
             height = (rect.bottom - rect.top).max(0);
         }
-        if width == 0 || height == 0 { break; }
-        captured = unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension) };
+        if width == 0 || height == 0 {
+            break;
+        }
+        captured =
+            unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension, owner) };
     }
-    let (png_base64, output_width, output_height) = captured?;
+    let (png_base64, output_width, output_height, captured_frame) = captured?;
     let image_capture_ms = image_started.elapsed().as_millis() as u64;
 
     let state_id = StateId::fresh("s");
@@ -232,7 +305,15 @@ fn screenshot_impl(
         }
     }
 
+    let final_frame = unsafe { read_capture_frame(hwnd) };
+    if !final_frame.is_some_and(|current| capture_frame_matches(captured_frame, current)) {
+        return Err(ProtocolError::new(
+            format!("Capture identity, geometry or desktop changed before observation returned: captured={captured_frame:?}, current={final_frame:?}"),
+            ErrorCode::CaptureFailed,
+        ));
+    }
     result["timings"] = json!({
+        "captureFrameVerified": true,
         "imageCaptureMs": image_capture_ms,
         "uiaExtractionMs": uia_started.elapsed().as_millis() as u64,
         "uiaExtractionRequested": include_elements,
@@ -254,7 +335,20 @@ unsafe fn gdi_capture_to_base64(
     width: i32,
     height: i32,
     max_dimension: Option<u32>,
-) -> Result<(String, u32, u32), ProtocolError> {
+    owner: CaptureFrame,
+) -> Result<(String, u32, u32, CaptureFrame), ProtocolError> {
+    let before = read_capture_frame(hwnd).ok_or_else(|| {
+        ProtocolError::new(
+            "Capture target identity unavailable",
+            ErrorCode::CaptureFailed,
+        )
+    })?;
+    if !capture_owner_matches(owner, before)
+        || !capture_frame_matches(before, before)
+        || before.bounds != (window_x, window_y, width, height)
+    {
+        return Err(ProtocolError::new(format!("Capture identity, geometry or desktop changed before GDI: expected={owner:?}, actual={before:?}"), ErrorCode::CaptureFailed));
+    }
     // Acquire the window DC.
     let hdc_window = GetDC(hwnd);
     if hdc_window.is_invalid() {
@@ -335,7 +429,11 @@ unsafe fn gdi_capture_to_base64(
     if !pw_ok.as_bool() || dib_ok == 0 || print_window_blank {
         let mut screen_read_ok = false;
         let gate = crate::foreground::capture_state(hwnd.0 as isize);
-        let screen_dc = if gate["focused"] == true { GetDC(HWND(std::ptr::null_mut())) } else { HDC::default() };
+        let screen_dc = if gate["focused"] == true {
+            GetDC(HWND(std::ptr::null_mut()))
+        } else {
+            HDC::default()
+        };
         fallback_gate = Some(gate.clone());
         SelectObject(hdc_mem, hbitmap);
         if !screen_dc.is_invalid()
@@ -357,13 +455,19 @@ unsafe fn gdi_capture_to_base64(
             let after = crate::foreground::capture_state(hwnd.0 as isize);
             let mut rect = RECT::default();
             let geometry_matches = GetWindowRect(hwnd, &mut rect).is_ok()
-                && (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
-                    == (window_x, window_y, width, height);
-            screen_read_ok = dib_ok == height && after["focused"] == true
+                && (
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                ) == (window_x, window_y, width, height);
+            screen_read_ok = dib_ok == height
+                && after["focused"] == true
                 && after["target"]["pid"] == gate["target"]["pid"]
                 && after["target"]["threadId"] == gate["target"]["threadId"]
                 && geometry_matches;
-            fallback_gate = Some(json!({"before":gate,"after":after,"geometryMatches":geometry_matches}));
+            fallback_gate =
+                Some(json!({"before":gate,"after":after,"geometryMatches":geometry_matches}));
         }
         fallback_result = Some(screen_read_ok && !is_effectively_blank_bgra(&bits));
         if !screen_dc.is_invalid() {
@@ -376,6 +480,11 @@ unsafe fn gdi_capture_to_base64(
     let _ = DeleteObject(HGDIOBJ(hbitmap.0));
     let _ = DeleteDC(hdc_mem);
     ReleaseDC(hwnd, hdc_window);
+
+    let after = read_capture_frame(hwnd);
+    if !after.is_some_and(|current| capture_frame_matches(before, current)) {
+        return Err(ProtocolError::new(format!("Capture identity, geometry or desktop changed during GDI: before={before:?}, after={after:?}"), ErrorCode::CaptureFailed));
+    }
 
     if dib_ok != height {
         return Err(ProtocolError::new(
@@ -437,7 +546,12 @@ unsafe fn gdi_capture_to_base64(
     }
 
     // Base64-encode the PNG bytes.
-    Ok((BASE64.encode(&png_data), output_width, output_height))
+    Ok((
+        BASE64.encode(&png_data),
+        output_width,
+        output_height,
+        before,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +571,72 @@ fn bgrx_to_opaque_rgba(pixels: &mut [u8]) {
 
 #[cfg(test)]
 mod unit_tests {
+    #[test]
+    fn capture_frame_rejects_move_resize_owner_change_and_minimize() {
+        let frame = CaptureFrame {
+            hwnd: 12,
+            pid: 34,
+            thread_id: 56,
+            bounds: (-100, 20, 800, 600),
+            valid: true,
+            minimized: false,
+            desktop_ready: true,
+        };
+        assert!(capture_frame_matches(frame, frame));
+        for changed in [
+            CaptureFrame { hwnd: 13, ..frame },
+            CaptureFrame { pid: 35, ..frame },
+            CaptureFrame {
+                thread_id: 57,
+                ..frame
+            },
+            CaptureFrame {
+                valid: false,
+                ..frame
+            },
+            CaptureFrame {
+                minimized: true,
+                ..frame
+            },
+            CaptureFrame {
+                desktop_ready: false,
+                ..frame
+            },
+            CaptureFrame {
+                bounds: (-99, 20, 800, 600),
+                ..frame
+            },
+            CaptureFrame {
+                bounds: (-100, 20, 801, 600),
+                ..frame
+            },
+            CaptureFrame { pid: 0, ..frame },
+        ] {
+            assert!(!capture_frame_matches(frame, changed));
+        }
+        assert!(!capture_frame_matches(
+            CaptureFrame {
+                bounds: (0, 0, 0, 600),
+                ..frame
+            },
+            CaptureFrame {
+                bounds: (0, 0, 0, 600),
+                ..frame
+            }
+        ));
+        // A bounded retry may refresh geometry, but cannot adopt a new owner.
+        assert!(capture_owner_matches(
+            frame,
+            CaptureFrame {
+                bounds: (0, 0, 900, 700),
+                ..frame
+            }
+        ));
+        assert!(!capture_owner_matches(
+            frame,
+            CaptureFrame { pid: 35, ..frame }
+        ));
+    }
     #[test]
     fn detects_uniform_failed_compositor_captures() {
         let black = [0, 0, 0, 255].repeat(10_000);
@@ -494,10 +674,16 @@ mod unit_tests {
                 }
             }
         }
-        let uniform = pixels.chunks_exact(4).filter(|pixel| pixel[0] == 240).count();
+        let uniform = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] == 240)
+            .count();
         assert!(uniform * 1000 >= width * height * 975);
         let stride_samples: Vec<_> = pixels.chunks_exact(4).step_by(97).collect();
-        let stride_uniform = stride_samples.iter().filter(|pixel| pixel[0] == 240).count();
+        let stride_uniform = stride_samples
+            .iter()
+            .filter(|pixel| pixel[0] == 240)
+            .count();
         assert!(stride_uniform * 100 < stride_samples.len() * 97);
         assert!(is_effectively_blank_bgra(&pixels));
     }
@@ -517,7 +703,6 @@ mod unit_tests {
         }
         assert!(!is_effectively_blank_bgra(&pixels));
     }
-
 
     use super::*;
     use crate::error::ErrorCode;

@@ -58,6 +58,14 @@ Session startup and computer-use tools check these permissions without opening p
 
 On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 
+Windows window captures verify the same HWND, PID, GUI thread and bounds before
+and after GDI capture, then again after encoding and optional UIA extraction.
+Moved, resized, minimized or invalidated frames are rejected, as are unavailable
+interactive desktops. Bounded capture
+retries can refresh geometry but retain the original window owner. Uniform
+PrintWindow output still uses the guarded screen-pixel fallback or returns a
+capture error; it is not proof that the application itself has a white screen.
+
 On macOS, modal AX dialogs are paired with a visible CG window only when their
 geometry matches uniquely in both directions, including floating windows above
 the document layer. Missing, moved or ambiguous dialogs stay unpaired. A stored

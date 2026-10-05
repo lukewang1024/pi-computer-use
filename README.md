@@ -58,6 +58,12 @@ Session startup and computer-use tools check these permissions without opening p
 
 On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 
+On macOS, modal AX dialogs are paired with a visible CG window only when their
+geometry matches uniquely in both directions, including floating windows above
+the document layer. Missing, moved or ambiguous dialogs stay unpaired. A stored
+dialog root is checked against the current AX window and exact CG ID before use;
+same-process ownership does not authorize input to another window.
+
 On macOS, exact foreground text temporarily selects an enabled US or ABC keyboard layout when a composing input method is active. The helper restores the prior input source only while it still owns that selection. If the input source changes during typing, remaining text is stopped; already dispatched text must not be replayed. Microsoft Word uses bounded Unicode payloads, with explicit Enter and Tab events for line breaks and tabs. Every physical event still requires the exact foreground window.
 
 On Linux, run Pi inside the target user's graphical session with a working AT-SPI2 accessibility bus. AT-SPI semantic operations remain background-first. X11 additionally supports EWMH window metadata/focus, window capture, and policy-gated XTEST physical input; strict headless/background policies never use focus or XTEST. Native Wayland remains semantic-only; diagnostics reads portal capability properties without creating a session, and interactive portal use is disabled. See [Linux support](./docs/linux.md) for the exact capability matrix and portal status.

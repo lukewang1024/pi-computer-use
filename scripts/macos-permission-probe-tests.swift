@@ -48,6 +48,23 @@ private final class Counts: @unchecked Sendable {
             let next = cache.read(cacheWhen: { $0 }) { counts.probe(); return true }
             precondition(next && counts.probes == (granted ? 1 : 2))
         }
+        let completionProbe = CompletionOwnedPermissionProbe<Bool>()
+        var first: ((Bool) -> Void)?
+        var second: ((Bool) -> Void)?
+        precondition(completionProbe.read(timeout: 0) { first = $0 } == nil)
+        precondition(completionProbe.occupied)
+        precondition(completionProbe.read(timeout: 0) { _ in
+            preconditionFailure("Timed-out native fetch must retain its slot")
+        } == nil)
+        first!(false)
+        precondition(!completionProbe.occupied)
+        precondition(completionProbe.read(timeout: 0) { $0(true) } == true)
+        precondition(!completionProbe.occupied)
+        precondition(completionProbe.read(timeout: 0) { second = $0 } == nil)
+        first!(true) // Duplicate old completion cannot release the newer flight.
+        precondition(completionProbe.occupied)
+        second!(false)
+        precondition(!completionProbe.occupied)
         print("Concurrent permission probes share grants and denials; later denied checks can recover")
     }
 }

@@ -437,8 +437,7 @@ final class Bridge {
 	private let rootObserverLock = NSLock()
 	private var rootObservers: [Int32: RootAXObserverState] = [:]
 	private let maxRootObservers = 4
-	private let permissionCacheLock = NSLock()
-	private var grantedPermissionStatus: [String: Any]?
+	private let permissionProbe = PermissionProbe<[String: Any]>()
 	private let completedRequestLock = NSLock()
 	private var recentCompletedRequestIds: [String] = []
 
@@ -844,6 +843,7 @@ final class Bridge {
 			"accessibility": permissions["accessibility"] ?? false,
 			"screenRecording": permissions["screenRecording"] ?? false,
 			"postEventAccess": CGPreflightPostEventAccess(),
+			"permissionProbe": permissionProbe.snapshot(),
 			"recentCompletedRequestIds": completedRequestIds(),
 			"captures": captureSnapshots(),
 		]
@@ -920,40 +920,29 @@ final class Bridge {
 	}
 
 	private func checkPermissions() -> [String: Any] {
-		permissionCacheLock.lock()
-		if let cached = grantedPermissionStatus {
-			permissionCacheLock.unlock()
-			return cached
+		permissionProbe.read(cacheWhen: { status in
+			status["accessibility"] as? Bool == true && status["screenRecordingCapturable"] as? Bool == true
+		}) {
+			let accessibility = AXIsProcessTrusted()
+			let screenRecordingPreflight: Bool
+			if #available(macOS 10.15, *) {
+				screenRecordingPreflight = CGPreflightScreenCaptureAccess()
+			} else {
+				screenRecordingPreflight = true
+			}
+			let capturable = screenRecordingCapturable()
+			let result: [String: Any] = [
+				"accessibility": accessibility,
+				// The live probe is authoritative; the preflight boolean is kept
+				// for diagnostics (a true/false split identifies a stale cache or
+				// a grant belonging to a different responsible process).
+				"screenRecording": capturable,
+				"screenRecordingPreflight": screenRecordingPreflight,
+				"screenRecordingCapturable": capturable,
+				"source": permissionSource(),
+			]
+			return result
 		}
-		permissionCacheLock.unlock()
-		let accessibility = AXIsProcessTrusted()
-		let screenRecordingPreflight: Bool
-		if #available(macOS 10.15, *) {
-			screenRecordingPreflight = CGPreflightScreenCaptureAccess()
-		} else {
-			screenRecordingPreflight = true
-		}
-		let capturable = screenRecordingCapturable()
-		let result: [String: Any] = [
-			"accessibility": accessibility,
-			// The live probe is authoritative; the preflight boolean is kept
-			// for diagnostics (a true/false split identifies a stale cache or
-			// a grant belonging to a different responsible process).
-			"screenRecording": capturable,
-			"screenRecordingPreflight": screenRecordingPreflight,
-			"screenRecordingCapturable": capturable,
-			"source": permissionSource(),
-		]
-		// A successful TCC grant is process-stable in practice. Cache only the
-		// positive result so missing grants are always rechecked after the user
-		// enables them, while fresh agent processes avoid repeating a multi-second
-		// ScreenCaptureKit probe against the same long-lived helper daemon.
-		if accessibility && capturable {
-			permissionCacheLock.lock()
-			grantedPermissionStatus = result
-			permissionCacheLock.unlock()
-		}
-		return result
 	}
 
 	/// Register this process's identity with TCC for both grants so the app

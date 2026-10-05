@@ -135,6 +135,7 @@ private struct LookRecord {
 	let imageWidth: Int
 	let imageHeight: Int
 	let hasImage: Bool
+	var menuRoot: AXUIElement? = nil
 }
 
 private struct PhysicalInputTarget {
@@ -1335,9 +1336,10 @@ final class Bridge {
 				roots.append(root)
 			}
 			let popupCandidates = cgPopupMenuCandidates(pid: appPid, entries: entries)
-			let menuElements = popupCandidates.isEmpty ? [] : openMenuElements(pid: appPid, messagingTimeout: isBroadDiscovery ? 0.25 : 1.0)
+			let menuElements = popupCandidates.isEmpty ? [] : openMenuElements(pid: appPid, candidates: popupCandidates, messagingTimeout: isBroadDiscovery ? 0.25 : 1.0)
+			let menuPairs = popupMenuPairIndices(menuFrames: menuElements.map { frameForWindow($0) }, candidateFrames: popupCandidates.map { $0.bounds })
 			for (index, candidate) in popupCandidates.enumerated() {
-				let menuElement = index < menuElements.count ? menuElements[index] : nil
+				let menuElement = menuPairs[index].map { menuElements[$0] }
 				let menuRef = menuElement.map { refStore.storeWindow($0) } ?? "cgmenu:\(candidate.windowId)"
 				var menu: [String: Any] = [
 					"kind": "menu",
@@ -1355,7 +1357,7 @@ final class Bridge {
 					"isOnscreen": candidate.isOnscreen,
 					"isMain": false,
 					"isFocused": true,
-					"metadata": ["pairing": ["confidence": menuElement == nil ? "low" : "high", "score": menuElement == nil ? 0 : 100], "sheetCount": 0],
+					"metadata": ["pairing": ["confidence": menuElement == nil ? "low" : "high", "score": menuElement == nil ? 0 : 100, "reason": menuElement == nil ? "no_unique_visible_ax_menu" : "unique_popup_geometry"], "sheetCount": 0],
 					"pid": rawPid,
 					"appName": appName,
 				]
@@ -1588,7 +1590,8 @@ final class Bridge {
 			windowFrame: baseRecord?.windowFrame ?? capture?.frame ?? rootFrame,
 			imageWidth: baseRecord?.imageWidth ?? imageWidth,
 			imageHeight: baseRecord?.imageHeight ?? imageHeight,
-			hasImage: imageFailure == nil ? (baseRecord?.hasImage ?? (capture != nil)) : false
+			hasImage: imageFailure == nil ? (baseRecord?.hasImage ?? (capture != nil)) : false,
+			menuRoot: stringAttribute(window, attribute: kAXRoleAttribute as CFString) == "AXMenu" ? window : nil
 		))
 		let scale = (capture?.frame.width ?? rootFrame.width) > 0 ? Double(imageWidth) / (capture?.frame.width ?? rootFrame.width) : displayScaleFactor(for: rootFrame)
 		let pairing = pairingForWindow(window, pid: pid)
@@ -2031,6 +2034,16 @@ final class Bridge {
 			throw BridgeFailure(message: "Look id '\(lookId)' is no longer available", code: "stale_look")
 		}
 		let pid = Int32(try intArg(request, "pid"))
+		func validateObservedMenu(_ candidateElement: AXUIElement? = nil) throws {
+			guard let menuRoot = record.menuRoot else { return }
+			guard let activeMenu = visiblePopupMenuElement(pid: pid, windowId: record.windowId), sameElement(activeMenu, menuRoot) else {
+				throw BridgeFailure(message: "Observed popup menu is no longer uniquely visible; input was not sent", code: "stale_ref")
+			}
+			if let candidateElement, !sameElement(candidateElement, menuRoot), !isElement(candidateElement, descendantOf: menuRoot) {
+				throw BridgeFailure(message: "Element does not belong to the observed popup menu; input was not sent", code: "stale_ref")
+			}
+		}
+		try validateObservedMenu()
 		let target = request["target"] as? [String: Any] ?? [:]
 		let policy = optionalStringArg(request, "policy") ?? "default"
 		let deferRootDelta = boolArg(request, "deferRootDelta") ?? false
@@ -2080,6 +2093,7 @@ final class Bridge {
 			guard let stored = resolved else {
 				throw BridgeFailure(message: "Element reference is stale", code: "stale_ref")
 			}
+			try validateObservedMenu(stored)
 			if refound { performed["refound"] = true }
 			element = stored
 			beforeValue = valueAttribute(stored)
@@ -2263,6 +2277,17 @@ final class Bridge {
 					throw BridgeFailure(message: "Web content requires pointer input", code: "foreground_required")
 				}
 			} else if supportsAction(element, action: kAXPressAction as CFString) {
+				if record.menuRoot != nil {
+					// Recheck immediately before the one native invocation. A popup
+					// may close during that call, including an ambiguous AX failure;
+					// never refind, retry or fall through to physical input afterwards.
+					try validateObservedMenu(element)
+					let status = AXUIElementPerformAction(element, kAXPressAction as CFString)
+					performed["grounding"] = "description"
+					performed["delivery"] = "ax"
+					return finish(["outcome": "unknown", "performed": performed,
+						"evidence": ["nativeActionAttempted": true, "axStatus": Int(status.rawValue), "inputRetryProhibited": true]])
+				}
 				let cursorPoint = try? coordinatePoint()
 				var status = AXUIElementPerformAction(element, kAXPressAction as CFString)
 				if status != .success, let refreshed = refreshElement(), supportsAction(refreshed, action: kAXPressAction as CFString) {
@@ -2725,6 +2750,9 @@ final class Bridge {
 			AXUIElementSetMessagingTimeout(stored, 1.0)
 			var ownerPid: pid_t = 0
 			if AXUIElementGetPid(stored, &ownerPid) == .success, ownerPid == pid {
+				if stringAttribute(stored, attribute: kAXRoleAttribute as CFString) == "AXMenu" {
+					guard let windowId, let activeMenu = visiblePopupMenuElement(pid: pid, windowId: windowId), sameElement(activeMenu, stored) else { return nil }
+				}
 				return stored
 			}
 		}
@@ -2732,7 +2760,7 @@ final class Bridge {
 		let appElement = AXUIElementCreateApplication(pid)
 		AXUIElementSetMessagingTimeout(appElement, 1.0)
 		let windows = Array(axElementArray(appElement, attribute: kAXWindowsAttribute as CFString).prefix(128))
-		guard !windows.isEmpty else { return nil }
+		guard !windows.isEmpty else { return windowId.flatMap { visiblePopupMenuElement(pid: pid, windowId: $0) } }
 		guard let windowId else {
 			return windows.first
 		}
@@ -2748,7 +2776,7 @@ final class Bridge {
 				}
 			}
 		}
-		return nil
+		return visiblePopupMenuElement(pid: pid, windowId: windowId)
 	}
 
 	private func findDescendant(startingAt root: AXUIElement, maxDepth: Int, predicate: (AXUIElement) -> Bool) -> AXUIElement? {
@@ -3277,24 +3305,84 @@ final class Bridge {
 		return candidates
 	}
 
-	private func openMenuElements(pid: Int32, messagingTimeout: Float = 1.0) -> [AXUIElement] {
+	// Hidden menu-bar menus exist in AX trees even when a different popup is
+	// visible. Enumeration order and same-PID ownership cannot pair these roots.
+	private func popupMenuFrameMatches(axFrame: CGRect, cgFrame: CGRect) -> Bool {
+		let values = [axFrame.origin.x, axFrame.origin.y, axFrame.width, axFrame.height,
+			cgFrame.origin.x, cgFrame.origin.y, cgFrame.width, cgFrame.height]
+		guard values.allSatisfy({ $0.isFinite }), axFrame.width > 1, axFrame.height > 1,
+			cgFrame.width > 1, cgFrame.height > 1 else { return false }
+		// Allow a small menu border difference, never an arbitrary nearby root.
+		return abs(axFrame.origin.x - cgFrame.origin.x) <= 4
+			&& abs(axFrame.origin.y - cgFrame.origin.y) <= 4
+			&& abs(axFrame.width - cgFrame.width) <= 4
+			&& abs(axFrame.height - cgFrame.height) <= 4
+	}
+
+	private func popupMenuPairIndices(menuFrames: [CGRect], candidateFrames: [CGRect]) -> [Int: Int] {
+		var menuMatches = Array(repeating: [Int](), count: menuFrames.count)
+		var candidateMatches = Array(repeating: [Int](), count: candidateFrames.count)
+		for (menuIndex, frame) in menuFrames.enumerated() {
+			for (candidateIndex, bounds) in candidateFrames.enumerated() {
+				if popupMenuFrameMatches(axFrame: frame, cgFrame: bounds) {
+					menuMatches[menuIndex].append(candidateIndex)
+					candidateMatches[candidateIndex].append(menuIndex)
+				}
+			}
+		}
+		var pairs: [Int: Int] = [:]
+		for (candidateIndex, matches) in candidateMatches.enumerated() {
+			if matches.count == 1, let menuIndex = matches.first, menuMatches[menuIndex].count == 1 {
+				pairs[candidateIndex] = menuIndex
+			}
+		}
+		return pairs
+	}
+
+	private func openMenuElements(pid: Int32, candidates: [CGWindowCandidate], messagingTimeout: Float = 1.0) -> [AXUIElement] {
 		let app = AXUIElementCreateApplication(pid)
 		AXUIElementSetMessagingTimeout(app, messagingTimeout)
-		let descendants = collectDescendants(startingAt: app, maxDepth: 6)
-		var menus = descendants.filter { (stringAttribute($0, attribute: kAXRoleAttribute as CFString) ?? "") == "AXMenu" }
-		if menus.isEmpty,
-			let focused = copyAttribute(app, attribute: kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement)
-		{
-			var current: AXUIElement? = focused
-			while let element = current {
-				if (stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? "") == "AXMenu" {
+		var menus: [AXUIElement] = []
+		func appendMenuAncestors(_ start: AXUIElement) {
+			var current: AXUIElement? = start
+			for _ in 0..<32 {
+				guard let element = current else { break }
+				var owner: pid_t = 0
+				guard AXUIElementGetPid(element, &owner) == .success, owner == pid else { break }
+				if stringAttribute(element, attribute: kAXRoleAttribute as CFString) == "AXMenu",
+					candidates.contains(where: { popupMenuFrameMatches(axFrame: frameForWindow(element), cgFrame: $0.bounds) }),
+					!menus.contains(where: { sameElement($0, element) }) {
 					menus.append(element)
-					break
 				}
-				current = copyAttribute(element, attribute: kAXParentAttribute as CFString).flatMap(asAXElement)
+				current = parentElement(element)
+			}
+		}
+		// A popup can be absent from AXChildren but present in focus/hit-test
+		// ancestry. Both are read-only and bind to the target owner and geometry.
+		if let focused = copyAttribute(app, attribute: kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement) {
+			appendMenuAncestors(focused)
+		}
+		for candidate in candidates {
+			if let hit = hitTestElement(at: CGPoint(x: candidate.bounds.midX, y: candidate.bounds.midY)) {
+				appendMenuAncestors(hit)
+			}
+		}
+		let pairs = popupMenuPairIndices(menuFrames: menus.map { frameForWindow($0) }, candidateFrames: candidates.map { $0.bounds })
+		if pairs.count == candidates.count { return menus }
+		for element in collectDescendants(startingAt: app, maxDepth: 8, maxNodes: 1000) {
+			if stringAttribute(element, attribute: kAXRoleAttribute as CFString) == "AXMenu" {
+				appendMenuAncestors(element)
 			}
 		}
 		return menus
+	}
+
+	private func visiblePopupMenuElement(pid: Int32, windowId: UInt32) -> AXUIElement? {
+		let candidates = cgPopupMenuCandidates(pid: pid, entries: allCGWindowEntries())
+		guard let index = candidates.firstIndex(where: { $0.windowId == windowId }) else { return nil }
+		let menus = openMenuElements(pid: pid, candidates: candidates)
+		let pairs = popupMenuPairIndices(menuFrames: menus.map { frameForWindow($0) }, candidateFrames: candidates.map { $0.bounds })
+		return pairs[index].map { menus[$0] }
 	}
 
 	private func bestCandidate(for element: AXUIElement, candidates: [CGWindowCandidate]) -> CGWindowCandidate? {

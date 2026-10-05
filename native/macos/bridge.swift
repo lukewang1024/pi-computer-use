@@ -2063,18 +2063,23 @@ final class Bridge {
 		var element: AXUIElement?
 		var rawPoint: CGPoint?
 		var preflightCapsUnknown = false
+		let rootPreparationStarted = ProcessInfo.processInfo.systemUptime
 		let eventsLive = !deferRootDelta && ensureRootObserver(pid: pid)
 		let eventCursor = eventsLive ? rootEventCursor(pid: pid) : 0
+		let beforeSnapshotStarted = ProcessInfo.processInfo.systemUptime
 		let beforeRootSnapshot = deferRootDelta ? [:] : rootMetadataSnapshot(pid: pid)
+		let beforeSnapshotMs = (ProcessInfo.processInfo.systemUptime - beforeSnapshotStarted) * 1000
 		let beforeCgSignature = deferRootDelta ? [] : cgRootSignature(pid: pid)
 		let beforeFrontmostPid = deferRootDelta ? nil : NSWorkspace.shared.frontmostApplication?.processIdentifier
 		let beforeSheetCount = windowElement(pid: pid, windowId: record.windowId).map { sheetElements(of: $0).count } ?? 0
 		let beforeFocusedWindow = focusedWindowSummary(pid: pid)
+		let rootPreparationMs = (ProcessInfo.processInfo.systemUptime - rootPreparationStarted) * 1000
+		let actionAndVerificationStarted = ProcessInfo.processInfo.systemUptime
 		let beforeValue: String?
 		let beforeSelected: String?
 		func finish(_ response: [String: Any]) -> [String: Any] {
 			if deferRootDelta { return response }
-			return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
+			return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature, beforeSnapshotMs: beforeSnapshotMs, rootPreparationMs: rootPreparationMs, actionAndVerificationMs: (ProcessInfo.processInfo.systemUptime - actionAndVerificationStarted) * 1000)
 		}
 
 		if let ref = target["ref"] as? String {
@@ -2440,11 +2445,16 @@ final class Bridge {
 		guard actions.allSatisfy({ ($0["lookId"] as? String) == lookId }) else {
 			throw BridgeFailure(message: "actBatch actions must belong to one look", code: "invalid_args")
 		}
+		let rootPreparationStarted = ProcessInfo.processInfo.systemUptime
 		let eventsLive = ensureRootObserver(pid: pid)
 		let eventCursor = eventsLive ? rootEventCursor(pid: pid) : 0
+		let beforeSnapshotStarted = ProcessInfo.processInfo.systemUptime
 		let beforeRootSnapshot = rootMetadataSnapshot(pid: pid)
+		let beforeSnapshotMs = (ProcessInfo.processInfo.systemUptime - beforeSnapshotStarted) * 1000
 		let beforeCgSignature = cgRootSignature(pid: pid)
 		let beforeFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+		let rootPreparationMs = (ProcessInfo.processInfo.systemUptime - rootPreparationStarted) * 1000
+		let actionAndVerificationStarted = ProcessInfo.processInfo.systemUptime
 		let mayUsePhysicalInput = actions.contains { action in
 			(optionalStringArg(action, "policy") ?? "default") != "ax_only"
 		}
@@ -2479,7 +2489,7 @@ final class Bridge {
 		let outcome = outcomes.contains("didnt") ? "didnt" : (outcomes.contains("unknown") ? "unknown" : "worked")
 		var response: [String: Any] = ["outcome": outcome, "performed": ["transaction": true, "actionCount": steps.count], "steps": steps]
 		if let stoppedAt { response["stoppedAt"] = stoppedAt }
-		return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
+		return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature, beforeSnapshotMs: beforeSnapshotMs, rootPreparationMs: rootPreparationMs, actionAndVerificationMs: (ProcessInfo.processInfo.systemUptime - actionAndVerificationStarted) * 1000)
 	}
 
 	private func rootIdentity(_ root: [String: Any]) -> String {
@@ -2545,7 +2555,7 @@ final class Bridge {
 	// events can only accelerate the decision, never make it. A cheap
 	// CGWindowList id-set poll detects real-window appearance/closure early;
 	// the AX diff runs once at the first signal or at timeout.
-	private func attachRootDelta(to response: [String: Any], before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32, eventsLive: Bool, eventCursor: UInt64, beforeCgSignature: Set<UInt32>) -> [String: Any] {
+	private func attachRootDelta(to response: [String: Any], before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32, eventsLive: Bool, eventCursor: UInt64, beforeCgSignature: Set<UInt32>, beforeSnapshotMs: Double, rootPreparationMs: Double, actionAndVerificationMs: Double) -> [String: Any] {
 		var output = response
 		var performed = output["performed"] as? [String: Any] ?? [:]
 
@@ -2553,6 +2563,7 @@ final class Bridge {
 		// rebuilt list row; a genuinely closed root also leaves the CG set.
 		let signalNotifications: Set<String> = ["AXWindowCreated", "AXSheetCreated", "AXMenuOpened", "AXMenuClosed", "AXFocusedWindowChanged"]
 		var source = "snapshot"
+		let signalWaitStarted = ProcessInfo.processInfo.systemUptime
 		let deadline = Date().addingTimeInterval(0.40)
 		while Date() < deadline {
 			if cgRootSignature(pid: pid) != beforeCgSignature { source = "cg-poll"; break }
@@ -2561,16 +2572,38 @@ final class Bridge {
 			usleep(30_000)
 		}
 
-		var delta = rootDelta(before: before, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+		let signalWaitMs = (ProcessInfo.processInfo.systemUptime - signalWaitStarted) * 1000
+		var snapshotCount = 0
+		var afterSnapshotMs = 0.0
+		var settleWaitMs = 0.0
+		func timedDelta() -> [[String: Any]] {
+			let started = ProcessInfo.processInfo.systemUptime
+			let value = rootDelta(before: before, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+			afterSnapshotMs += (ProcessInfo.processInfo.systemUptime - started) * 1000
+			snapshotCount += 1
+			return value
+		}
+		var delta = timedDelta()
 		if delta.isEmpty && source != "snapshot" {
 			// A signal fired but the AX tree can lag the CG window; give it a
 			// bounded moment to catch up.
 			for _ in 0..<3 where delta.isEmpty {
+				let settleStarted = ProcessInfo.processInfo.systemUptime
 				usleep(80_000)
-				delta = rootDelta(before: before, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+				settleWaitMs += (ProcessInfo.processInfo.systemUptime - settleStarted) * 1000
+				delta = timedDelta()
 			}
 		}
 		performed["deltaSource"] = source
+		performed["rootDeltaTimings"] = [
+			"beforeSnapshotMs": beforeSnapshotMs,
+			"rootPreparationMs": rootPreparationMs,
+			"actionAndVerificationMs": actionAndVerificationMs,
+			"signalWaitMs": signalWaitMs,
+			"afterSnapshotMs": afterSnapshotMs,
+			"afterSnapshotCount": snapshotCount,
+			"settleWaitMs": settleWaitMs,
+		]
 		output["performed"] = performed
 		if !delta.isEmpty { output["rootDelta"] = delta }
 		return output

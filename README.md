@@ -121,6 +121,14 @@ The SDK launches that exact app with its normal LaunchServices lifecycle.
 never launches or restarts that external helper. Configuring both socket
 variables is rejected before helper operations.
 
+macOS action receipts include `performed.rootDeltaTimings` for root preparation,
+the action and its verification, signal polling, post-action AX snapshots and
+settling waits. Durations use a monotonic clock. `beforeSnapshotMs` is a subset
+of `rootPreparationMs`; do not add both to a total. `afterSnapshotCount` includes
+the initial snapshot and any existing bounded catch-up attempts. These timings
+exclude earlier request validation, host startup and transport, and do not prove
+an action's effect. Input validation, dispatch policy and retry limits are unchanged.
+
 
 ### Navigation performance sampling
 

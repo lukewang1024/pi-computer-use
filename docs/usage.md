@@ -98,6 +98,15 @@ act_ui({
 
 Steps run sequentially against one resource and retain helper checks. The native helper uses one root baseline and final settle for the transaction, and the bridge returns one final observation. If a transition can change the meaning of later refs or requires a decision, send one action, inspect the returned state, then continue.
 
+Desktop `act_ui` accepts `observationMode: "semantic"` when the next decision
+only needs the current UI tree. This skips the post-action screenshot and OCR,
+returns fresh semantic refs and a successor state, and keeps the input delivery,
+foreground, exact-window and stale-state checks. Image-coordinate actions from that
+outline-only successor require a fresh image-bearing observation. The default
+`"fused"` behavior still captures pixels. Pixel-only input states cannot request
+a semantic successor; observe a semantic or fused state first. This option is
+currently desktop-only and is rejected for CDP browser contexts before input.
+
 For browser CDP actions with `expect`, the snapshot that satisfies the condition
 is returned as the successor state. It is collected after input within the same
 resource write epoch; the bridge does not collect another full accessibility

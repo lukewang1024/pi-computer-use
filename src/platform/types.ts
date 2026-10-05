@@ -156,6 +156,8 @@ export interface PlatformTarget {
 	pid?: number;
 	windowId?: number;
 	rootRef?: string;
+	/** Exact native window reference forwarded by the shared bridge. */
+	windowRef?: string;
 }
 
 export interface PlatformObserveRequest {

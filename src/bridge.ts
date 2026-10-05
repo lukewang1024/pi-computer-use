@@ -2140,7 +2140,7 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 		transport: steps.find((step) => step.transport)?.transport,
 		inputDispatch: steps.find((step) => step.inputDispatch)?.inputDispatch,
 		error: steps.find((step) => step.error)?.error,
-		backgroundFirst: true,
+		backgroundFirst: steps[0]?.backgroundFirst,
 		escalatedToForeground: Boolean(fallback),
 		escalationReason: fallback?.escalationReason,
 		backgroundAttempt: fallback?.backgroundAttempt,

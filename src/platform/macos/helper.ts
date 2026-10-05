@@ -338,6 +338,12 @@ export class MacosHelperClient {
 
 	async diagnosticsCommand(signal?: AbortSignal): Promise<PlatformDiagnostics> {
 		const result = await this.command<any>("diagnostics", {}, { signal });
+		const probe = result?.permissionProbe;
+		const permissionProbe = probe && typeof probe.inFlight === "boolean"
+			&& typeof probe.positiveCached === "boolean" && Number.isSafeInteger(probe.waiters)
+			&& probe.waiters >= 0
+			? { inFlight: probe.inFlight, waiters: probe.waiters, positiveCached: probe.positiveCached }
+			: undefined;
 		const diagnostics = {
 			protocolVersion: Math.trunc(toFiniteNumber(result?.protocolVersion, 0)),
 			architectureVersion: Math.trunc(toFiniteNumber(result?.architectureVersion, 0)),
@@ -355,6 +361,7 @@ export class MacosHelperClient {
 			screenRecording: toBoolean(result?.screenRecording),
 			postEventAccess: typeof result?.postEventAccess === "boolean" ? result.postEventAccess : undefined,
 			optionalImageFailure: result?.optionalImageFailure === true,
+			permissionProbe,
 		};
 		this.diagnosticsCache = diagnostics;
 		return diagnostics;

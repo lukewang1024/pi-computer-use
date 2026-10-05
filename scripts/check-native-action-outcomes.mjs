@@ -132,6 +132,37 @@ try{
   assert.equal(calls.length,actionsBefore,'Observation uncertainty must not send input');
  }
  currentPlatformBackend.observe=nativeObserve;
+ // A summary describes the first dispatched step, not a constant runtime default.
+ // The controlled backend sends no native input. Unknown effects are not replayed.
+ // Restore controlled readiness and observation after fault-injection checks.
+ currentPlatformBackend.ensureReady=async()=>({lastPermissionCheckAt:Date.now()});
+ currentPlatformBackend.observe=async(request,options)=>{const observed=await nativeObserve(request,options);return {...observed,image:request.includeImage!==false?{jpegBase64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN1sAAAAASUVORK5CYII=',mimeType:'image/png',width:1,height:1}:undefined};};
+ outcome='unknown';calls=[];
+ const summaryFound=await call('find_roots',{text:root.title});
+ let summaryState=await call('observe_ui',{root:summaryFound.details.windows[0].windowRef,mode:'visual'});
+ let summaryField=await call('search_ui',{stateId:summaryState.details.capture.stateId,text:'Field',role:'textbox'});
+ let summaryRef=summaryField.details.matches.find(m=>m.matchReason==='exact').ref;
+ const foregroundSummary=await call('act_ui',{stateId:summaryState.details.capture.stateId,actions:[{action:'click',x:0,y:0}],observationMode:'semantic'});
+ assert.equal(foregroundSummary.details.execution.steps.length,1);
+ assert.equal(foregroundSummary.details.execution.steps[0].backgroundFirst,false);
+ assert.equal(foregroundSummary.details.execution.backgroundFirst,false,'Direct foreground input must not be summarized as background-first');
+ assert.equal(calls.length,1,'Unknown foreground effect must not be replayed');
+ summaryState=await call('observe_ui',{root:summaryFound.details.windows[0].windowRef,mode:'semantic'});
+ summaryField=await call('search_ui',{stateId:summaryState.details.capture.stateId,text:'Field',role:'textbox'});
+ summaryRef=summaryField.details.matches.find(m=>m.matchReason==='exact').ref;
+ const backgroundSummary=await call('act_ui',{stateId:summaryState.details.capture.stateId,actions:[{action:'typeText',ref:summaryRef,text:'new'}],observationMode:'semantic'});
+ assert.equal(backgroundSummary.details.execution.steps[0].backgroundFirst,true);
+ assert.equal(backgroundSummary.details.execution.backgroundFirst,true,'Semantic background attempt stays background-first');
+ assert.equal(calls.length,2,'Unknown semantic effect must not be replayed');
+ outcome='worked';calls=[];
+ summaryState=await call('observe_ui',{root:summaryFound.details.windows[0].windowRef,mode:'visual'});
+ summaryField=await call('search_ui',{stateId:summaryState.details.capture.stateId,text:'Field',role:'textbox'});
+ summaryRef=summaryField.details.matches.find(m=>m.matchReason==='exact').ref;
+ const mixedSummary=await call('act_ui',{stateId:summaryState.details.capture.stateId,actions:[{action:'click',x:0,y:0},{action:'typeText',ref:summaryRef,text:'mixed'}],observationMode:'semantic'});
+ assert.equal(mixedSummary.details.execution.steps.length,2);
+ assert.deepEqual(mixedSummary.details.execution.steps.map(s=>s.backgroundFirst),[false,true]);
+ assert.equal(mixedSummary.details.execution.backgroundFirst,false,'Mixed summary reports its first step; later delivery stays in per-step traces');
+ assert.equal(calls.length,2);
  console.log('Registered native action outcome integration passed (3 controlled outcomes; no native input)');
 }finally{
  await shutdownComputerUseSession();

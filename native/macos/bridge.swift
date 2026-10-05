@@ -3607,6 +3607,8 @@ final class Bridge {
 		if #available(macOS 14.0, *) {
 			let semaphore = DispatchSemaphore(value: 0)
 			let capturedImage = Box<CGImage?>(nil)
+			let capturedFrame = Box<CGRect?>(nil)
+			let capturedOwner = Box<Int32?>(nil)
 			let capturedError = Box<Error?>(nil)
 
 			let task = Task {
@@ -3636,6 +3638,8 @@ final class Bridge {
 					let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
 					trace.mark("imageEnd")
 					try Task.checkCancellation()
+					capturedFrame.value = window.frame
+					capturedOwner.value = window.owningApplication?.processID
 					capturedImage.value = image
 				} catch {
 					trace.mark("taskError", ["errorType": String(describing: type(of: error))])
@@ -3670,7 +3674,13 @@ final class Bridge {
 				throw BridgeFailure(message: "Capture failed", code: "capture_failed", details: trace.snapshot())
 			}
 
-			return CapturedWindowImage(image: image, windowId: windowId, frame: currentWindowBounds(windowId: windowId) ?? CGRect(x: 0, y: 0, width: image.width, height: image.height))
+			let current = windowInfo(windowId: windowId)
+			guard let frame = verifiedCapturedWindowFrame(capturedFrame: capturedFrame.value,
+				capturedPid: capturedOwner.value, currentFrame: current?.bounds, currentPid: current?.pid) else {
+				throw BridgeFailure(message: "Window moved, resized, disappeared, or changed owner during capture; observe again before input", code: "capture_geometry_changed", details: trace.snapshot())
+			}
+			trace.mark("frameReuse", ["source": "capture-sc-window", "geometryVerified": true, "secondShareableEnumeration": false])
+			return CapturedWindowImage(image: image, windowId: windowId, frame: frame)
 		}
 		defer { trace.mark("taskCompletion", ["taskCompleted": true]) }
 		if let payload = try tracedFallback() {

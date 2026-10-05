@@ -42,6 +42,11 @@ try{
   await assert.rejects(()=>call(executeAct,{stateId:observed.details.capture.stateId,actions:[{action:'commit',ref:button(observed)}]}),/different window|no longer available|no longer exists|not found/i);
   assert.equal(inputs.length,0,'Remapped exact root must reject before dispatch');
  }
+ roots=[owned,other];inputs=[];
+ const semantic=await observeOwned();
+ const focus=await call(executeAct,{stateId:semantic.details.capture.stateId,actions:[{action:'press',ref:button(semantic)}]});
+ assert.equal(inputs.length,1);assert.equal(inputs[0].params.nativeFocusOnly,true);assert.equal(inputs[0].target.ref,owned.rootRef+'-button');
+ assert.equal(focus.details.execution.outcome,'unknown','Unconfirmed native focus must not become a pointer replay');
  roots=[owned,other];inputs=[];const fresh=await observeOwned();
  await assert.rejects(()=>call(executeAct,{stateId:fresh.details.capture.stateId,actions:[{action:'commit',ref:'@e999999'}]}),/reference|ref|outline/i);assert.equal(inputs.length,0);
  console.log('Public native commit routing passed: exact modal/window, unknown outcome without replay, two remaps and stale ref; mocked backend only');

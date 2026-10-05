@@ -306,6 +306,7 @@ interface ResolvedTarget extends CurrentTarget {
 interface WindowRefRecord {
 	/** Causal delta roots retain their kind; sheets may share a CG window id. */
 	rootKind?: string;
+	appearedAt?: number;
 	ref: string;
 	appName: string;
 	bundleId?: string;
@@ -866,7 +867,16 @@ async function resolveTargetByWindowSelector(selector: RootSelector, signal?: Ab
 	const fromRef = runtimeState.windowRefs.get(normalized);
 	if (fromRef) {
 		const app: HelperApp = { appName: fromRef.appName, bundleId: fromRef.bundleId, pid: fromRef.pid };
-		const windows = await listWindows(fromRef.pid, signal);
+		let windows = await listWindows(fromRef.pid, signal);
+		// Word can briefly expose no AX roots while building a new gallery.
+		// Retry only empty reads for a recent, exactly identified appeared window.
+		// Never replay the action, retry transport failures, or follow a replacement.
+		for (let attempt = 0; attempt < 2 && windows.length === 0
+			&& fromRef.rootKind === "window" && fromRef.windowId
+			&& fromRef.appearedAt !== undefined && Date.now() - fromRef.appearedAt <= 500; attempt++) {
+			await sleep(75, signal);
+			windows = await listWindows(fromRef.pid, signal);
+		}
 		// A known identity must never fall back to another same-title window.
 		const match = fromRef.windowId
 			? windows.find((window) => window.windowId === fromRef.windowId && (!fromRef.rootKind || window.kind === fromRef.rootKind))
@@ -1220,6 +1230,7 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 		pid: delta.pid,
 		windowTitle: delta.title ?? "(untitled)",
 		rootKind: delta.kind,
+		appearedAt: delta.change === "appeared" ? Date.now() : undefined,
 		windowId: delta.kind === "window" && Number.isInteger(delta.windowId) && delta.windowId! > 0 ? delta.windowId : undefined,
 		nativeWindowRef: delta.ref,
 		framePoints: { x: 0, y: 0, w: 1, h: 1 },

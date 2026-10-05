@@ -2549,6 +2549,15 @@ final class Bridge {
 
 	private func rootDeltaItem(change: String, root: [String: Any], pid: Int32) -> [String: Any] {
 		var item: [String: Any] = ["change": change, "kind": root["kind"] as? String ?? "window", "title": root["title"] as? String ?? "", "pid": root["pid"] as? Int ?? Int(pid)]
+		// Sheets can share the parent CG window id. Only exact window pairings
+		// may bind a newly appeared public root to a physical window identity.
+		if root["kind"] as? String == "window",
+		   let metadata = root["metadata"] as? [String: Any],
+		   let pairing = metadata["pairing"] as? [String: Any],
+		   pairing["confidence"] as? String == "exact",
+		   let windowId = root["windowId"] as? Int, windowId > 0 {
+			item["windowId"] = windowId
+		}
 		if let isModal = root["isModal"] as? Bool { item["isModal"] = isModal }
 		if let metadata = root["metadata"] as? [String: Any] { item["metadata"] = metadata }
 		if let ref = root["rootRef"] as? String ?? root["windowRef"] as? String { item["ref"] = ref }

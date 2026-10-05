@@ -135,6 +135,8 @@ export interface HelperActPerformed {
 }
 
 export interface PlatformRootDelta {
+	/** Exact native window identity, when available for a window root. */
+	windowId?: number;
 	change: "appeared" | "closed" | "focused";
 	kind: string;
 	ref?: string;

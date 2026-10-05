@@ -2252,6 +2252,11 @@ final class Bridge {
 				&& ((params["clickCount"] as? NSNumber)?.intValue ?? 1) == 1
 			var focusSettable = DarwinBoolean(false)
 			let focusCapability = AXUIElementIsAttributeSettable(element, kAXFocusedAttribute as CFString, &focusSettable)
+			let nativeFocusOnly = params["nativeFocusOnly"] as? Bool ?? false
+			if nativeFocusOnly && !(textRoles.contains(elementRole) && !isWeb && isSingleLeftClick
+				&& focusCapability == .success && focusSettable.boolValue) {
+				throw BridgeFailure(message: "Outline-only native focus is unavailable; no pointer input was sent", code: "unsupported")
+			}
 			if textRoles.contains(elementRole), !isWeb, isSingleLeftClick,
 				focusCapability == .success, focusSettable.boolValue {
 				// Ref-scoped native text clicks can establish focus without a pointer.

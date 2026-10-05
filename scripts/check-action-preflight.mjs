@@ -68,6 +68,14 @@ for(const action of [{action:'click',ref:'@e1',button:'right'},{action:'click',r
 assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,node(){return {...focusable,canFocus:false};}})[0].target,{x:20,y:30});
 assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,platform:'windows'})[0].target,{x:20,y:30});
 assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,macEnv),/Stale/);
+for(const operation of ['press','click']){
+ const semanticFocus=preflightActionSequence([{action:operation,ref:'@e1'}],false,{...macEnv,image:undefined})[0];
+ assert.deepEqual(semanticFocus.target,{ref:'native-text'});assert.equal(semanticFocus.params.nativeFocusOnly,true);assert.equal(semanticFocus.needsForeground,false);
+}
+assert.equal(nativeFocus.params.nativeFocusOnly,undefined,'Image-bearing focus preserves existing routing');
+for(const action of [{action:'click',ref:'@e1',button:'right'},{action:'click',ref:'@e1',clickCount:2}]){
+ assert.throws(()=>preflightActionSequence([action],false,{...macEnv,image:undefined,validatePoint(){throw Error('Image required');}}),/Image/);
+}
 console.log('Native macOS focus routing and pointer-gesture boundaries passed');
 
 // A focusable Word comment button without AXPress still uses pointer delivery.

@@ -2225,6 +2225,25 @@ final class Bridge {
 			return refreshed
 		}
 
+		if action == "commit" {
+			guard let element, target["ref"] is String,
+				!hasAncestorRole(element, role: "AXWebArea"),
+				let boundWindow = windowElement(pid: pid, windowId: record.windowId),
+				isElement(element, descendantOf: boundWindow)
+			else { throw BridgeFailure(message: "Native value commit requires a current native element in the observed window", code: "stale_ref") }
+			guard actionNames(element).contains("AXConfirm") else {
+				throw BridgeFailure(message: "Element does not declare AXConfirm; no input was sent", code: "unsupported")
+			}
+			let status = AXUIElementPerformAction(element, "AXConfirm" as CFString)
+			performed["delivery"] = "ax"
+			performed["nativeAction"] = "AXConfirm"
+			performed["apiStatus"] = status.rawValue
+			// Returned AX success proves dispatch, not that an application saved
+			// its value. Never retry or substitute keyboard/pointer input.
+			return finish(["outcome": "unknown", "performed": performed,
+				"evidence": ["actionReturned": true, "apiSucceeded": status == .success]])
+		}
+
 		if let element, action == "press" || action == "click" {
 			let elementRole = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
 			let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText", "AXSecureTextField"]

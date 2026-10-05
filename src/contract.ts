@@ -73,7 +73,7 @@ export interface UiCondition {
 }
 
 export interface UiAction {
-	action: "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
+	action: "commit" | "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
 	ref?: string;
 	x?: number;
 	y?: number;

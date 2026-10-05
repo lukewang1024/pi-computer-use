@@ -1,6 +1,24 @@
+import Foundation
+import CoreGraphics
+
 struct ControlledError: Error { let code: String; let completed: Bool? }
 @main struct Tests {
     static func main() throws {
+        let frame = CGRect(x: -500, y: 35, width: 900, height: 600)
+        precondition(verifiedCapturedWindowFrame(capturedFrame: frame, capturedPid: 42, currentFrame: frame, currentPid: 42) == frame)
+        for changed in [CGRect(x: -499, y: 35, width: 900, height: 600),
+                        CGRect(x: -500, y: 35, width: 901, height: 600)] {
+            precondition(verifiedCapturedWindowFrame(capturedFrame: frame, capturedPid: 42, currentFrame: changed, currentPid: 42) == nil)
+        }
+        precondition(verifiedCapturedWindowFrame(capturedFrame: frame, capturedPid: 42, currentFrame: frame, currentPid: 43) == nil)
+        precondition(verifiedCapturedWindowFrame(capturedFrame: frame, capturedPid: nil, currentFrame: frame, currentPid: 42) == nil)
+        precondition(verifiedCapturedWindowFrame(capturedFrame: frame, capturedPid: 42, currentFrame: nil, currentPid: 42) == nil)
+        for invalid in [CGRect.zero, CGRect.infinite, CGRect.null,
+                        CGRect(x: Double.nan, y: 0, width: 10, height: 10)] {
+            precondition(verifiedCapturedWindowFrame(capturedFrame: invalid, capturedPid: 42, currentFrame: invalid, currentPid: 42) == nil)
+        }
+        precondition(classifyOptionalImageFailure(code: "capture_geometry_changed", message: "changed", taskCompleted: true) == nil)
+        print("PASS captured geometry: same frame/owner only; move, resize, missing owner/window and invalid geometry reject")
         var captures = 0
         func attempt(_ error: ControlledError?, allowed: Bool = true) throws -> (value: Int?, failure: OptionalImageFailure?) {
             try captureOptionalImage(allowed: allowed, operation: {

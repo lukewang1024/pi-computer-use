@@ -1,3 +1,6 @@
+import Foundation
+import CoreGraphics
+
 struct OptionalImageFailure {
     let code: String
     let message: String
@@ -20,4 +23,16 @@ func captureOptionalImage<Value>(allowed: Bool, operation: () throws -> Value,
         // Returning semantic evidence never retries capture or claims cancellation completed.
         return (nil, failure)
     }
+}
+
+func verifiedCapturedWindowFrame(capturedFrame: CGRect?, capturedPid: Int32?,
+    currentFrame: CGRect?, currentPid: Int32?) -> CGRect? {
+    guard let frame = capturedFrame, let current = currentFrame,
+        let pid = capturedPid, pid > 0, currentPid == pid,
+        !frame.isEmpty, !frame.isInfinite, !frame.isNull,
+        frame.origin.x.isFinite, frame.origin.y.isFinite,
+        frame.width.isFinite, frame.height.isFinite,
+        frame.width > 0, frame.height > 0, current == frame
+    else { return nil }
+    return frame
 }

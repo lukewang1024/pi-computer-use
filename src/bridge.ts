@@ -304,6 +304,8 @@ interface ResolvedTarget extends CurrentTarget {
 }
 
 interface WindowRefRecord {
+	/** Causal delta roots retain their kind; sheets may share a CG window id. */
+	rootKind?: string;
 	ref: string;
 	appName: string;
 	bundleId?: string;
@@ -698,9 +700,9 @@ function assertBrowserUseAllowed(target: { appName: string; bundleId?: string })
 	}
 }
 
-function windowRecordIdentity(record: Pick<WindowRefRecord, "pid" | "windowId" | "nativeWindowRef" | "windowTitle" | "framePoints">): string {
+function windowRecordIdentity(record: Pick<WindowRefRecord, "pid" | "windowId" | "nativeWindowRef" | "windowTitle" | "framePoints" | "rootKind">): string {
 	if (record.windowId && record.windowId > 0) {
-		return `pid:${record.pid}|id:${record.windowId}`;
+		return `pid:${record.pid}|id:${record.windowId}${record.rootKind ? `|kind:${record.rootKind}` : ""}`;
 	}
 	if (record.nativeWindowRef) {
 		return `pid:${record.pid}|ref:${record.nativeWindowRef}`;
@@ -857,7 +859,7 @@ async function resolveTargetByWindowSelector(selector: RootSelector, signal?: Ab
 	}
 
 	const current = operationState().currentTarget;
-	if (current?.windowRef === normalized) {
+	if (current?.windowRef === normalized && !runtimeState.windowRefs.get(normalized)?.rootKind) {
 		return await resolveCurrentTarget(signal);
 	}
 
@@ -865,10 +867,12 @@ async function resolveTargetByWindowSelector(selector: RootSelector, signal?: Ab
 	if (fromRef) {
 		const app: HelperApp = { appName: fromRef.appName, bundleId: fromRef.bundleId, pid: fromRef.pid };
 		const windows = await listWindows(fromRef.pid, signal);
-		const match =
-			(fromRef.windowId ? windows.find((window) => window.windowId === fromRef.windowId) : undefined) ??
-			(fromRef.nativeWindowRef ? windows.find((window) => window.windowRef === fromRef.nativeWindowRef) : undefined) ??
-			windows.find((window) => normalizeText(window.title || "(untitled)") === normalizeText(fromRef.windowTitle));
+		// A known identity must never fall back to another same-title window.
+		const match = fromRef.windowId
+			? windows.find((window) => window.windowId === fromRef.windowId && (!fromRef.rootKind || window.kind === fromRef.rootKind))
+			: fromRef.nativeWindowRef
+				? windows.find((window) => window.windowRef === fromRef.nativeWindowRef)
+				: windows.find((window) => normalizeText(window.title || "(untitled)") === normalizeText(fromRef.windowTitle));
 		if (!match) {
 			throw new Error(`Root ref '${normalized}' is stale. Call find_roots again and choose a current window.`);
 		}
@@ -1204,7 +1208,8 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 	if (!delta.ref) return undefined;
 	if (delta.ref.startsWith("@r")) return delta.ref;
 	for (const record of runtimeState.windowRefs.values()) {
-		if (record.nativeWindowRef === delta.ref || record.ref === delta.ref) return record.ref;
+		if ((!record.rootKind || record.rootKind === delta.kind) && record.pid === delta.pid && (record.nativeWindowRef === delta.ref || record.ref === delta.ref)
+			&& (delta.windowId === undefined || record.windowId === delta.windowId)) return record.ref;
 	}
 	const ref = `@r${runtimeState.nextRootRefIndex++}`;
 	const current = operationState().currentTarget;
@@ -1214,6 +1219,8 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 		bundleId: current?.pid === delta.pid ? current.bundleId : undefined,
 		pid: delta.pid,
 		windowTitle: delta.title ?? "(untitled)",
+		rootKind: delta.kind,
+		windowId: delta.kind === "window" && Number.isInteger(delta.windowId) && delta.windowId! > 0 ? delta.windowId : undefined,
 		nativeWindowRef: delta.ref,
 		framePoints: { x: 0, y: 0, w: 1, h: 1 },
 		scaleFactor: 1,

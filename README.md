@@ -183,3 +183,7 @@ fallback. Missing capability, stale references, browser targets, and other
 platforms reject the action. A returned confirmation reports `unknown` because
 AX success alone does not prove the application saved the value; observe the
 result and independently verify saved output. Do not automatically replay it.
+
+### Native macOS invocation
+
+When a fresh native element declares `AXPress`, use `{"action":"invoke","ref":"@eN"}` to invoke that action once. This also supports text controls where ordinary `press` focuses the editor. Invoke keeps the exact observed window and reference, rejects unsupported targets before dispatch, and has no pointer or keyboard fallback. Its result remains `unknown`: inspect fresh state and independently verify the effect before proceeding or repeating an action. Browser targets and other platforms are unsupported.

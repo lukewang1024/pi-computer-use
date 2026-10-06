@@ -33,3 +33,11 @@ func walkObservedOutline<Element, Node>(
         }
     }
 }
+
+// Capability and availability are independent. A provider may declare a value
+// setter even when the editor is disabled; retain false and unknown verbatim.
+func observedAvailability(canPress: Bool, hasConfirm: Bool, canSetValue: Bool,
+                          isTextInput: Bool, read: () -> Bool?) -> Bool? {
+    guard canPress || hasConfirm || canSetValue || isTextInput else { return nil }
+    return read()
+}

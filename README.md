@@ -170,6 +170,22 @@ This closes an identity fallback gap; it does not establish that every Office UI
 
 Native `observe_ui` reports `targetResolutionMs` before the observation pipeline, `resultBuildMs` for result construction, and `observeRequestMs` spanning target resolution through result construction. The total includes the pipeline and result construction; do not add it to its components. These timings exclude earlier request validation, browser/CDP observations, host startup, transport, and final response serialization. They do not prove action effects or identify the cause of time outside the measured stages.
 
+Browser observations report monotonic wall times in `details.diagnostics.timings`:
+CDP discovery, connection, text read, accessibility read, optional image capture,
+parallel collection, outline construction, disconnect and the complete snapshot.
+Parallel text, accessibility and image phases overlap; do not add them together
+or add the snapshot total to its components. An omitted capture has no capture
+measurement. A failed accessibility read retains its partial-coverage marker
+and measured read duration. Browser result construction separately reports
+restore, diff, fold and total times in `browserResultTimings`. These measurements
+are retained by `evaluate_browser`, which additionally reports `evaluationMs`
+for its requested expression and associated CDP connection, excluding scheduler
+admission. Browser `wait_for` reports the final snapshot's diagnostics, not the
+total time or all snapshots in its polling loop. These measurements
+add no CDP requests or retries and exclude Host startup, transport and final
+response serialization. They identify measured stages, not action success or a
+general speedup.
+
 Execution summaries report `backgroundFirst` from the first dispatched step. For mixed delivery, inspect each step; a direct foreground action is not reported as background-first. An unknown effect remains unknown and is not automatically replayed.
 
 ### Native macOS value confirmation

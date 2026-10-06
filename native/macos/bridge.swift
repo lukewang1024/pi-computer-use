@@ -2243,12 +2243,25 @@ final class Bridge {
 				let boundWindow = windowElement(pid: pid, windowId: record.windowId),
 				isElement(element, descendantOf: boundWindow), !hasAncestorRole(element, role: "AXWebArea")
 			else { throw BridgeFailure(message: "Selection requires a current native editor in the exact observed window", code: "stale_ref") }
-			let role = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
-			let subrole = stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
+			func selectionAttribute(_ name: CFString) -> (AXError, AnyObject?) {
+				var raw: AnyObject?
+				let status = AXUIElementCopyAttributeValue(element, name, &raw)
+				return (status, status == .success ? raw : nil)
+			}
+			let (roleStatus, roleRaw) = selectionAttribute(kAXRoleAttribute as CFString)
+			let (subroleStatus, subroleRaw) = selectionAttribute(kAXSubroleAttribute as CFString)
+			let (enabledStatus, enabledRaw) = selectionAttribute(kAXEnabledAttribute as CFString)
+			let role = roleRaw as? String ?? ""
+			let subrole = subroleRaw as? String ?? ""
+			let enabled = (enabledRaw as? Bool) ?? (enabledRaw as? NSNumber)?.boolValue
 			guard ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText"].contains(role),
-				!isSecureTextElement(role: role, subrole: subrole),
-				boolAttribute(element, attribute: kAXEnabledAttribute as CFString) != false
-			else { throw BridgeFailure(message: "Selection requires an enabled nonsecure native editor", code: "unsupported") }
+				!isSecureTextElement(role: role, subrole: subrole), enabled != false
+			else {
+				throw BridgeFailure(message: "Selection requires an enabled nonsecure native editor; "
+					+ selectionPreflightMetadata(role: role, subrole: subrole, enabled: enabled,
+						roleStatus: Int(roleStatus.rawValue), subroleStatus: Int(subroleStatus.rawValue),
+						enabledStatus: Int(enabledStatus.rawValue)), code: "unsupported")
+			}
 			let app = AXUIElementCreateApplication(pid)
 			func editorFocusMatches() -> Bool {
 				guard let focused = copyAttribute(app, attribute: kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement),

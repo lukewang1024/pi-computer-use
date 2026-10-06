@@ -161,9 +161,15 @@ check("INV-6 static note is derived and disposable", () => {
 });
 
 check("INV-7 static no label-confirm press regex", () => {
+	// Action names such as invoke contain "ok" without being label heuristics.
+	const labelRegex = /\/[^/\n]*\b(confirm|ok|continue|apply)\b[^/\n]*\/[gimsuyd]*[\s\S]{0,200}(\bpress\b|AXPress|axPress|axPerformActionElement)/i;
+	const labelComparison = /\b(confirm|ok|continue|apply)\b[\s\S]{0,80}(includes|startsWith|endsWith|===|==)[\s\S]{0,200}(\bpress\b|AXPress|axPress|axPerformActionElement)/i;
+	assert(labelRegex.test('/confirm|ok/i.test(label); AXPress'));
+	assert(labelComparison.test('"Continue" === label; AXPress'));
+	assert(!labelComparison.test('operation === "invoke"; actions.includes("press")'));
 	for (const [file, text] of srcFiles) {
-		assert(!/\/[^/\n]*(confirm|ok|continue|apply)[^/\n]*\/[gimsuyd]*[\s\S]{0,200}(\bpress\b|AXPress|axPress|axPerformActionElement)/i.test(text), `confirm-label press regex appears in src/${file}`);
-		assert(!/(confirm|ok|continue|apply)[\s\S]{0,80}(includes|startsWith|endsWith|===|==)[\s\S]{0,200}(\bpress\b|AXPress|axPress|axPerformActionElement)/i.test(text), `confirm-label press comparison appears in src/${file}`);
+		assert(!labelRegex.test(text), `confirm-label press regex appears in src/${file}`);
+		assert(!labelComparison.test(text), `confirm-label press comparison appears in src/${file}`);
 	}
 });
 

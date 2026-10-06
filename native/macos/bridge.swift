@@ -2225,18 +2225,24 @@ final class Bridge {
 			return refreshed
 		}
 
-		if action == "commit" {
+		if action == "commit" || action == "invoke" {
+			let nativeAction = action == "commit" ? "AXConfirm" : "AXPress"
+			var elementPID: pid_t = 0
 			guard let element, target["ref"] is String,
+				AXUIElementGetPid(element, &elementPID) == .success, elementPID == pid, record.windowId > 0,
 				!hasAncestorRole(element, role: "AXWebArea"),
 				let boundWindow = windowElement(pid: pid, windowId: record.windowId),
 				isElement(element, descendantOf: boundWindow)
-			else { throw BridgeFailure(message: "Native value commit requires a current native element in the observed window", code: "stale_ref") }
-			guard actionNames(element).contains("AXConfirm") else {
-				throw BridgeFailure(message: "Element does not declare AXConfirm; no input was sent", code: "unsupported")
+			else { throw BridgeFailure(message: "Native action requires a current native element in the observed window", code: "stale_ref") }
+			guard boolAttribute(element, attribute: kAXEnabledAttribute as CFString) != false else {
+				throw BridgeFailure(message: "Target control is disabled; no input was sent", code: "unsupported")
 			}
-			let status = AXUIElementPerformAction(element, "AXConfirm" as CFString)
+			guard actionNames(element).contains(nativeAction) else {
+				throw BridgeFailure(message: "Element does not declare \(nativeAction); no input was sent", code: "unsupported")
+			}
+			let status = AXUIElementPerformAction(element, nativeAction as CFString)
 			performed["delivery"] = "ax"
-			performed["nativeAction"] = "AXConfirm"
+			performed["nativeAction"] = nativeAction
 			performed["apiStatus"] = status.rawValue
 			// Returned AX success proves dispatch, not that an application saved
 			// its value. Never retry or substitute keyboard/pointer input.

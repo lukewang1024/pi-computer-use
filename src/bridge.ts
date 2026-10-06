@@ -1390,6 +1390,7 @@ function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, 
 	const base = { lookId: look.lookId, pid: target.pid, target: action.target, policy };
 	return (() => {
 		switch (action.action) {
+			case "invoke":
 			case "commit": return { ...base, action: action.action, params: { delivery } };
 			case "press":
 			case "click": return { ...base, action: action.action, params: { ...action.params, delivery } };
@@ -2438,7 +2439,7 @@ function validateActionTarget(action: UiAction): void {
 	if ((action.action === "click" || action.action === "moveMouse") && hasRef === hasPoint) {
 		throw new Error(`${action.action} requires exactly one target: ref or x/y coordinates.`);
 	}
-	if (action.action === "commit" && (!hasRef || hasPoint)) throw new Error("commit requires only a native element ref.");
+	if ((action.action === "commit" || action.action === "invoke") && (!hasRef || hasPoint)) throw new Error(`${action.action} requires only a native element ref.`);
 	if (action.action === "press" && !hasRef) throw new Error("press requires an actionable ref.");
 	if (action.action === "scroll" && toFiniteNumber(action.scrollX, 0) === 0 && toFiniteNumber(action.scrollY, 0) === 0) throw new Error("scroll requires a non-zero scrollX or scrollY delta.");
 	if (action.clickCount !== undefined && (!Number.isInteger(action.clickCount) || action.clickCount < 1 || action.clickCount > 3)) throw new Error("clickCount must be an integer from 1 to 3.");

@@ -70,6 +70,9 @@ export interface CdpPageSnapshot {
 		cdp: "connected";
 		targetCount: number;
 		accessibilityCoverage?: CdpAccessibilityCoverage;
+		/** Monotonic wall times. Parallel collection phases overlap. */
+		timings?: Partial<Record<"discoveryMs" | "connectMs" | "textReadMs" | "accessibilityReadMs" | "imageCaptureMs" | "collectionMs" | "outlineBuildMs" | "snapshotMs" | "disconnectMs", number>>;
+		browserResultTimings?: { restoreMs: number; diffMs: number; foldMs: number; resultBuildMs: number };
 	};
 }
 
@@ -998,18 +1001,29 @@ export async function cdpCaptureForContext(contextId: string): Promise<CdpViewpo
 }
 
 export async function cdpSnapshotForContext(contextId: string, options: { includeImage?: boolean } = {}): Promise<CdpPageSnapshot | undefined> {
-	const page = await cdpPageForContext(contextId);
+	const started = performance.now();
+	const timings: NonNullable<CdpPageSnapshot["diagnostics"]["timings"]> = {};
+	const measure = async <T>(key: keyof typeof timings, run: () => Promise<T>): Promise<T> => {
+		const phaseStarted = performance.now();
+		try { return await run(); }
+		finally { timings[key] = performance.now() - phaseStarted; }
+	};
+	const page = await measure("discoveryMs", () => cdpPageForContext(contextId));
 	if (!page?.webSocketDebuggerUrl) return undefined;
 
-	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
+	const tab = await measure("connectMs", () => CdpTab.connect(page.webSocketDebuggerUrl!, page.id, page.title));
 	try {
+		const collectionStarted = performance.now();
 		const [textValue, nodes, image] = await Promise.all([
-			tab.evaluate("document.body ? document.body.innerText : ''").catch(() => ""),
-			tab.accessibilityTree().catch(() => { tab.accessibilityCoverage.failed = true; return []; }),
-			options.includeImage ? tab.captureViewport() : Promise.resolve(undefined),
+			measure("textReadMs", () => tab.evaluate("document.body ? document.body.innerText : ''")).catch(() => ""),
+			measure("accessibilityReadMs", () => tab.accessibilityTree()).catch(() => { tab.accessibilityCoverage.failed = true; return []; }),
+			options.includeImage ? measure("imageCaptureMs", () => tab.captureViewport()) : Promise.resolve(undefined),
 		]);
+		timings.collectionMs = performance.now() - collectionStarted;
 		const snapshotId = randomUUID();
+		const outlineStarted = performance.now();
 		const { targets, outline } = cdpSnapshotOutline(snapshotId, nodes);
+		timings.outlineBuildMs = performance.now() - outlineStarted;
 		return {
 			contextId,
 			image,
@@ -1021,10 +1035,13 @@ export async function cdpSnapshotForContext(contextId: string, options: { includ
 			text: typeof textValue === "string" ? textValue : String(textValue ?? ""),
 			targets,
 			outline,
-			diagnostics: { cdp: "connected", targetCount: targets.length, accessibilityCoverage: { ...tab.accessibilityCoverage } },
+			diagnostics: { cdp: "connected", targetCount: targets.length, accessibilityCoverage: { ...tab.accessibilityCoverage }, timings },
 		};
 	} finally {
+		const disconnectStarted = performance.now();
 		tab.close();
+		timings.disconnectMs = performance.now() - disconnectStarted;
+		timings.snapshotMs = performance.now() - started;
 	}
 }
 

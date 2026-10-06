@@ -116,3 +116,25 @@ for(const changed of [{actions:['AXShowMenu']},{pictureOnly:true},{wireRef:undef
 assert(Value.Check(schema,{stateId:'S1',actions:[{action:'commit',ref:'@e1'}]}));
 assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'commit',x:10,y:10}]}));
 console.log('Native AXConfirm preflight, no-fallback and no-replay boundaries passed');
+
+{
+// Explicit Invoke preserves AXPress on text controls without a pointer fallback.
+const confirmNode={...focusable,role:'AXComboBox',actions:['AXShowMenu','AXPress'],canPress:false};
+const confirmEnv={...macEnv,image:undefined,node(ref){if(ref!=='@e1')throw Error('Stale reference');return confirmNode;},center(){throw Error('No coordinate fallback allowed');}};
+const confirmation=preflightActionSequence([{action:'invoke',ref:'@e1'}],false,confirmEnv)[0];
+assert.deepEqual(confirmation.target,{ref:'native-text'});
+assert.equal(confirmation.needsForeground,false);
+assert.equal(confirmation.establishesFocus,false);
+for(const outcome of ['worked','unknown','didnt']) assert.equal(canRetryInForeground(confirmation,outcome,false),false);
+for(const platform of ['windows','linux']) assert.throws(()=>preflightActionSequence([{action:'invoke',ref:'@e1'}],false,{...confirmEnv,platform}),/macOS desktop/);
+assert.throws(()=>preflightActionSequence([{action:'invoke',ref:'@e1'}],false,{...confirmEnv,headless:true}),/macOS desktop/);
+assert.throws(()=>preflightActionSequence([{action:'invoke',x:10,y:10}],false,confirmEnv),/element reference/);
+assert.throws(()=>preflightActionSequence([{action:'invoke',ref:'@missing'}],false,confirmEnv),/Stale/);
+for(const changed of [{actions:['AXShowMenu']},{pictureOnly:true},{wireRef:undefined},{isEnabled:false}]) {
+ assert.throws(()=>preflightActionSequence([{action:'invoke',ref:'@e1'}],false,{...confirmEnv,node(){return {...confirmNode,...changed};}}),/AXPress|disabled/);
+}
+assert(Value.Check(schema,{stateId:'S1',actions:[{action:'invoke',ref:'@e1'}]}));
+assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'invoke',x:10,y:10}]}));
+console.log('Native AXPress preflight, no-fallback and no-replay boundaries passed');
+
+}

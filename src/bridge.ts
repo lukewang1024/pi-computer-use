@@ -1314,7 +1314,7 @@ async function helperAct(
 		}
 		return candidate;
 	};
-	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
+	const textTimeout = action.action !== "selectText" && "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
 	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
 		try {

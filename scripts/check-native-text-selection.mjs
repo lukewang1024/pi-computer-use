@@ -6,7 +6,7 @@ const original={...backend};
 const makeRoot=(windowId,rootRef,title,extra={})=>({kind:'window',windowId,rootRef,windowRef:rootRef,pid:100029,appName:'Root pin fixture',title,zOrder:5,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isOnscreen:true,isFocused:false,isMain:true,isMinimized:false,isModal:false,...extra});
 const owned=makeRoot(71,'native-owned','Owned root pin fixture');
 const other=makeRoot(72,'native-other','Another document dialog',{kind:'sheet',zOrder:0,isFocused:true,isModal:true});
-let roots=[owned,other],inputs=[],looks=0,nodeEnabled, nativeOutcome="worked", nativeError;const lookRoots=new Map();
+let roots=[owned,other],inputs=[],looks=0,nodeEnabled, nativeOutcome="worked", nativeError, nativeTimeouts=[];const lookRoots=new Map();
 const node=(ref,role,title,extra={})=>({ref,role,title,subrole:'',identifier:'',description:'',value:'',actions:[],canPress:false,canFocus:false,canSetValue:false,canScroll:false,canIncrement:false,canDecrement:false,isTextInput:false,focused:false,offscreen:false,pictureOnly:false,truncated:false,text:[],children:[],rect:{x:0,y:0,w:20,h:20},...extra});
 Object.assign(backend,{
  name:"macos",
@@ -18,7 +18,7 @@ Object.assign(backend,{
   const root=roots.find(r=>r.rootRef===request.target.windowRef)??roots.find(r=>r.windowId===request.target.windowId);assert(root,'Observation must address an existing exact root');
   const lookId='root-pin-look-'+(++looks);lookRoots.set(lookId,root);return parseLookResponse({lookId,capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1,isModal:root.isModal,role:root.kind,subrole:''},outline:node(root.rootRef,'window',root.title,{children:[node(root.rootRef+'-button','AXComboBox','Font Size',{isTextInput:true,canFocus:true,canPress:true,actions:['AXConfirm','AXPress'],isEnabled:nodeEnabled})]}),timings:{}});
  },
- act:async request=>{inputs.push(request);if(nativeError)throw nativeError;return {outcome:nativeOutcome,performed:{grounding:'description',delivery:'ax'},evidence:{selectionVerified:nativeOutcome==='worked'}};},shutdown:async()=>{},
+ act:async (request,options)=>{nativeTimeouts.push(options.timeoutMs);inputs.push(request);if(nativeError)throw nativeError;return {outcome:nativeOutcome,performed:{grounding:'description',delivery:'ax'},evidence:{selectionVerified:nativeOutcome==='worked'}};},shutdown:async()=>{},
 });
 const call=(fn,params)=>fn('root-pin-regression',params,undefined,undefined,{cwd:process.cwd(),hasUI:false});
 async function observeOwned(){const found=await call(executeFind,{text:owned.title});const target=found.details.windows.filter(r=>r.windowId===owned.windowId);assert.equal(target.length,1);return await call(executeObserve,{root:target[0].windowRef,mode:'semantic'});}
@@ -51,6 +51,9 @@ try {
  assert.equal(lookRoots.get(inputs[0].lookId).windowId,71);assert.equal(inputs[0].target.ref,owned.rootRef+'-button');
  assert.equal(inputs[0].params.expectedValue,value);assert.equal(inputs[0].params.selectionMode,'end');
  assert.equal(result.details.execution.outcome,'worked');
+ const shortTimeout=nativeTimeouts.at(-1);observed=await observeOwned();const longNeedle='x'.repeat(100000);
+ await call(executeAct,{stateId:observed.details.capture.stateId,actions:[{...action(button(observed)),text:longNeedle,expectedValue:longNeedle}]});
+ assert.equal(nativeTimeouts.at(-1),shortTimeout,'Selection must retain the fixed native budget rather than a character-by-character typing timeout');
  roots=[owned];inputs=[];nativeOutcome='unknown';observed=await observeOwned();
  result=await call(executeAct,{stateId:observed.details.capture.stateId,actions:[action(button(observed)),{action:'typeText',ref:button(observed),text:'must not be sent'}]});
  assert.equal(inputs.length,1,'Unverified selection stops later typing with no fallback/replay');

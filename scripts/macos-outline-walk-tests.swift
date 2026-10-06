@@ -16,6 +16,26 @@ final class Node {
 }
 @main struct Tests {
     static func main() {
+        var availabilityReads = 0
+        let denied = { availabilityReads += 1; return Optional(false) }
+        precondition(observedAvailability(canPress: false, hasConfirm: false,
+            canSetValue: true, isTextInput: true, read: denied) == false)
+        precondition(availabilityReads == 1, "Disabled editable provider must be observed")
+        precondition(observedAvailability(canPress: false, hasConfirm: false,
+            canSetValue: false, isTextInput: true, read: denied) == false)
+        precondition(observedAvailability(canPress: true, hasConfirm: false,
+            canSetValue: false, isTextInput: false, read: denied) == false)
+        precondition(observedAvailability(canPress: false, hasConfirm: true,
+            canSetValue: false, isTextInput: false, read: denied) == false)
+        let readsBeforeStatic = availabilityReads
+        precondition(observedAvailability(canPress: false, hasConfirm: false,
+            canSetValue: false, isTextInput: false, read: denied) == nil)
+        precondition(availabilityReads == readsBeforeStatic, "Static nodes must not probe availability")
+        precondition(observedAvailability(canPress: false, hasConfirm: false,
+            canSetValue: true, isTextInput: false, read: { nil }) == nil)
+        precondition(observedAvailability(canPress: false, hasConfirm: false,
+            canSetValue: true, isTextInput: false, read: { true }) == true)
+
         func run(_ root: Element, limit: Int = 2000, budget: @escaping () -> Bool = { true }) -> (Node, [String], [String]) {
             let node = Node(root, root: true)
             var reads: [String] = []; var descriptions: [String] = [root.name]

@@ -240,6 +240,7 @@ interface BrowserObservationDetails {
 }
 
 interface EvaluateBrowserDetails {
+	diagnostics?: CdpPageSnapshot["diagnostics"] & { evaluationMs?: number };
 	tool: "evaluate_browser";
 	baseStateId: string;
 	stateId: string;
@@ -262,6 +263,7 @@ interface ReadTextDetails {
 }
 
 interface WaitForDetails {
+	diagnostics?: CdpPageSnapshot["diagnostics"];
 	tool: "wait_for";
 	stateId: string;
 	baseStateId?: string;
@@ -1621,14 +1623,23 @@ async function withBrowserWrite<T>(contextId: string, work: () => Promise<T>): P
 }
 
 function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string, epoch: number, tool: string, base?: { stateId: string; outline: SerializedOutline }): AgentToolResult<BrowserObservationDetails> {
+	const started = performance.now();
 	const { image: _image, ...snapshot } = browser;
 	savedStates.set({ stateId: browser.snapshotId, resourceKey, epoch, value: { kind: "browser", snapshot, outline: browser.outline } });
+	const restoreStarted = performance.now();
 	const currentOutline = restoreOutline(browser.outline);
-	const transition = base ? changesBetween(restoreOutline(base.outline), currentOutline, "wire") : undefined;
+	const previousOutline = base ? restoreOutline(base.outline) : undefined;
+	const restoreMs = performance.now() - restoreStarted;
+	const diffStarted = performance.now();
+	const transition = previousOutline ? changesBetween(previousOutline, currentOutline, "wire") : undefined;
+	const diffMs = performance.now() - diffStarted;
 	const useDiff = Boolean(transition && !transition.useFullView);
+	const foldStarted = performance.now();
 	const folded = foldToBudget(currentOutline);
+	const foldMs = performance.now() - foldStarted;
+	const diagnostics = { ...browser.diagnostics, browserResultTimings: { restoreMs, diffMs, foldMs, resultBuildMs: 0 } };
 	const root = { ref: storeBrowserRootRef(browser.contextId), kind: "browser_page" as const, title: browser.title, url: browser.url };
-	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text, diagnostics: browser.diagnostics };
+	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text, diagnostics };
 	const viewText = useDiff
 		? `Changes (${transition!.changedNodeCount}, ${base!.stateId} → ${browser.snapshotId}):\n${renderChanges(transition!.changes) || "(no element changes)"}\nUse stateId ${browser.snapshotId} for subsequent actions and queries.${tool === "evaluate_browser" ? " Get action refs from this state; do not reuse refs cached before evaluation." : ""}`
 		: folded.text;
@@ -1637,7 +1648,9 @@ function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string,
 		? `\nAccessibility coverage is partial: ${coverage.framesObserved} embedded frames observed, ${coverage.framesUnavailable} unavailable${coverage.framesTruncated ? ", bounded collection truncated" : ""}${coverage.failed ? ", main tree unavailable" : ""}.` : "";
 	const remoteControls = coverage?.readOnlyFrames
 		? `\n${coverage.readOnlyFrames} cross-process frames observed read-only. Input into these frames is unavailable.` : "";
-	return { content: [{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}${partial}${remoteControls}` }], details };
+	const result: AgentToolResult<BrowserObservationDetails> = { content: [{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}${partial}${remoteControls}` }], details };
+	diagnostics.browserResultTimings.resultBuildMs = performance.now() - started;
+	return result;
 }
 
 async function refreshBrowserSnapshot(contextId: string, tool: string, base?: { stateId: string; outline: SerializedOutline }, observed?: CdpPageSnapshot): Promise<AgentToolResult<BrowserObservationDetails>> {
@@ -1786,7 +1799,7 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 			const transition = changesBetween(restoreOutline(baseSnapshot.outline), successorOutline, "wire");
 			const useDiff = !transition.useFullView;
 			const renderedOutline = foldToBudget(successorOutline).text;
-			const details: WaitForDetails = { tool: "wait_for", stateId: lastSnapshot.snapshotId, baseStateId: baseSnapshot.snapshotId, view: useDiff ? "diff" : "full", changes: useDiff ? transition.changes : undefined, found, gone: found && gone || undefined, timedOut, nodeCount: lastSnapshot.targets.length, text, role, value, scopeRef, outline: lastSnapshot.outline, renderedOutline };
+			const details: WaitForDetails = { tool: "wait_for", stateId: lastSnapshot.snapshotId, baseStateId: baseSnapshot.snapshotId, view: useDiff ? "diff" : "full", changes: useDiff ? transition.changes : undefined, found, gone: found && gone || undefined, timedOut, nodeCount: lastSnapshot.targets.length, text, role, value, scopeRef, outline: lastSnapshot.outline, renderedOutline, diagnostics: lastSnapshot.diagnostics };
 			const message = found ? (gone ? "Condition disappeared." : "Condition appeared.") : `Timed out after ${timeoutMs}ms waiting for condition.`;
 			const viewText = useDiff ? `${renderChanges(transition.changes) || "(no element changes)"}\nUse stateId ${lastSnapshot.snapshotId} for subsequent actions and queries.` : renderedOutline;
 			return { content: [{ type: "text", text: `${message}\n${viewText}` }], details };
@@ -2639,10 +2652,13 @@ async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<Ag
 	const baseSnapshot = operationState().browserSnapshot;
 	if (!baseSnapshot) throw new Error("Browser evaluation requires a complete base observation.");
 	return await withBrowserWrite(contextId, async () => {
+		const evaluationStarted = performance.now();
 		const result = await cdpEvaluateForContext(contextId, expression);
+		const evaluationMs = performance.now() - evaluationStarted;
 		if (!result) throw new Error(`Browser context '${contextId}' is no longer available. Observe it again.`);
 		const successor = await refreshBrowserSnapshot(contextId, "evaluate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline });
 		const details: EvaluateBrowserDetails = {
+			diagnostics: successor.details.diagnostics ? { ...successor.details.diagnostics, evaluationMs } : undefined,
 			tool: "evaluate_browser",
 			baseStateId: baseSnapshot.snapshotId,
 			stateId: successor.details.stateId,

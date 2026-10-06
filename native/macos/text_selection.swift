@@ -21,3 +21,14 @@ func uniqueLiteralSelectionRange(value: String, expected: String, text: String, 
     if mode == "end" { return NSRange(location: NSMaxRange(match), length: 0) }
     return match
 }
+
+// Public AX type/state metadata only. Never include editor values or selectors.
+func selectionPreflightMetadata(role: String, subrole: String, enabled: Bool?,
+    roleStatus: Int, subroleStatus: Int, enabledStatus: Int) -> String {
+    let fields: [String: Any] = ["role": String(decoding: role.utf16.prefix(64), as: UTF16.self), "subrole": String(decoding: subrole.utf16.prefix(64), as: UTF16.self),
+        "enabled": enabled.map { $0 as Any } ?? "unknown",
+        "roleAPIStatus": roleStatus, "subroleAPIStatus": subroleStatus, "enabledAPIStatus": enabledStatus]
+    guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
+        let text = String(data: data, encoding: .utf8) else { return "AX metadata unavailable" }
+    return text
+}

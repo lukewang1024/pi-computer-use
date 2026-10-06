@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
-import { executeFind, executeNavigateBrowser, executeSearchUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
+import { executeFind, executeNavigateBrowser, executeEvaluateBrowser, executeSearchUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
 import { BROWSER_PERFORMANCE_SAMPLE } from '../src/browser-performance.ts';
 import { currentPlatformBackend } from '../src/platform/index.ts';
 
@@ -12,7 +12,7 @@ currentPlatformBackend.ensureReady = async () => ({lastPermissionCheckAt: Date.n
 currentPlatformBackend.listRoots = async () => [];
 currentPlatformBackend.getFrontmost = async () => {throw Error("Browser search must not query desktop foreground");};
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5l0AAAAASUVORK5CYII=';
-let port, present = true, badImage = false, axNodes=[], failPerformance=false, axResponseQueue=[];
+let port, present = true, badImage = false, axNodes=[], failPerformance=false, axResponseQueue=[], failAx=false;
 const calls = [], sockets = new Set();
 function frame(value) {
   const data = Buffer.from(JSON.stringify(value));
@@ -49,7 +49,10 @@ server.on('upgrade', (req, socket) => {
         }else result={result:{value:request.params.expression==='window.devicePixelRatio'?2:'Visible page text'}};
       }
       if(request.method==='Page.navigate')result={frameId:'owned-frame'};
-      if(request.method==='Accessibility.getFullAXTree')result={nodes:axResponseQueue.length ? axResponseQueue.shift() : axNodes};
+      if(request.method==='Accessibility.getFullAXTree'){
+        if(failAx){socket.write(frame({id:request.id,error:{message:'AX observation unavailable'}}));continue;}
+        result={nodes:axResponseQueue.length ? axResponseQueue.shift() : axNodes};
+      }
       if(request.method==='Page.getLayoutMetrics')result={cssVisualViewport:{clientWidth:1,clientHeight:1,pageX:0,pageY:0}};
       if(request.method==='Page.captureScreenshot')result={data:badImage?'invalid':pixel};
       socket.write(frame({id:request.id,result}));
@@ -68,6 +71,21 @@ try {
   const semantic=await tool(executeObserve,{root,mode:'semantic'});
   assert.equal(semantic.content.some(c=>c.type==='image'),false);
   assert.equal(calls.some(c=>c.method==='Page.captureScreenshot'),false,'semantic observation must not capture');
+  const timings=semantic.details.diagnostics.timings;
+  for(const key of ['discoveryMs','connectMs','textReadMs','accessibilityReadMs','collectionMs','outlineBuildMs','disconnectMs','snapshotMs']){
+    assert(Number.isFinite(timings[key])&&timings[key]>=0,key+' must be a finite nonnegative measured wall time');
+  }
+  assert.equal(timings.imageCaptureMs,undefined,'an omitted screenshot cannot report a capture measurement');
+  assert(timings.collectionMs>=Math.max(timings.textReadMs,timings.accessibilityReadMs));
+  const resultTimings=semantic.details.diagnostics.browserResultTimings;
+  for(const value of Object.values(resultTimings))assert(Number.isFinite(value)&&value>=0);
+  assert(resultTimings.resultBuildMs>=resultTimings.restoreMs+resultTimings.diffMs+resultTimings.foldMs);
+  const beforePartial=calls.length;failAx=true;
+  const timedPartial=await tool(executeObserve,{root,mode:'semantic'});failAx=false;
+  assert.equal(timedPartial.details.diagnostics.accessibilityCoverage.failed,true,'timing collection must preserve partial observation failure');
+  assert(Number.isFinite(timedPartial.details.diagnostics.timings.accessibilityReadMs));
+  assert.equal(calls.slice(beforePartial).filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'measurement cannot retry AX reads');
+  assert.equal(calls.slice(beforePartial).some(c=>c.method.startsWith('Input.')),false,'measurement cannot dispatch input');
   const emptySearch=await tool(executeSearchUi,{stateId:semantic.details.stateId,role:'textbox'});
   assert.equal(emptySearch.details.matches.length,0);
   assert.equal(emptySearch.details.stateId,semantic.details.stateId,'empty browser search must preserve its browser state');
@@ -78,6 +96,7 @@ try {
   assert.equal(waited.details.found,false);
   assert.equal(waited.details.timedOut,true);
   assert.equal(waited.details.baseStateId,semantic.details.stateId);
+  assert(Number.isFinite(waited.details.diagnostics.timings.snapshotMs),'wait must expose its final snapshot timing');
   assert.equal(calls.some(c=>c.method==='Page.captureScreenshot'),false,'condition polling must not capture');
   const controller=new AbortController();controller.abort();
   await assert.rejects(()=>executeWaitFor('aborted',{stateId:waited.details.stateId,text:'Never present',timeoutMs:1000},controller.signal,undefined,ctx));
@@ -94,6 +113,14 @@ try {
     const text=await tool(executeReadText,{stateId:result.details.stateId,ref:result.details.outline.root.ref});
     assert(text.content.some(c=>c.type==='text'&&c.text.includes('Visible page text')),'successor state must remain readable');
   }
+  const beforeEvaluation=calls.length;
+  const measuredEvaluation=await tool(executeEvaluateBrowser,{stateId:waited.details.stateId,expression:'1'});
+  assert(Number.isFinite(measuredEvaluation.details.diagnostics.evaluationMs));
+  assert(Number.isFinite(measuredEvaluation.details.diagnostics.timings.snapshotMs),'evaluation must retain successor snapshot timings');
+  assert(Number.isFinite(measuredEvaluation.details.diagnostics.browserResultTimings.resultBuildMs));
+  assert.equal(calls.slice(beforeEvaluation).filter(c=>c.method==='Runtime.evaluate').length,2,'evaluation and existing body read only; measurement adds no evaluations');
+  assert.equal(calls.slice(beforeEvaluation).filter(c=>c.method==='Accessibility.getFullAXTree').length,1);
+  assert.equal(calls.slice(beforeEvaluation).some(c=>c.method.startsWith('Input.')),false);
   axNodes=[
     {nodeId:'readonly',role:{value:'textbox'},name:{value:'Read only'},backendDOMNodeId:17,properties:[{name:'readonly',value:{value:true}}]},
     {nodeId:'disabled',role:{value:'button'},name:{value:'Disabled'},backendDOMNodeId:18,properties:[{name:'disabled',value:{value:true}}]},

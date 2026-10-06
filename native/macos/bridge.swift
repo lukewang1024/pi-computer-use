@@ -2083,6 +2083,9 @@ final class Bridge {
 				stringAttribute($0, attribute: kAXRoleAttribute as CFString) != nil && frameForElement($0) != nil
 			} ?? false
 			let resolved: AXUIElement?
+			if action == "selectText" && !cachedIsLive {
+				throw BridgeFailure(message: "Native selection reference is stale; no selection was set", code: "stale_ref")
+			}
 			if cachedIsLive {
 				resolved = cached
 			} else {
@@ -2231,6 +2234,68 @@ final class Bridge {
 			element = refreshed
 			performed["refound"] = true
 			return refreshed
+		}
+
+		if action == "selectText" {
+			var elementPID: pid_t = 0
+			guard let element, target["ref"] is String,
+				AXUIElementGetPid(element, &elementPID) == .success, elementPID == pid, record.windowId > 0,
+				let boundWindow = windowElement(pid: pid, windowId: record.windowId),
+				isElement(element, descendantOf: boundWindow), !hasAncestorRole(element, role: "AXWebArea")
+			else { throw BridgeFailure(message: "Selection requires a current native editor in the exact observed window", code: "stale_ref") }
+			let role = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
+			let subrole = stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
+			guard ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText"].contains(role),
+				!isSecureTextElement(role: role, subrole: subrole),
+				boolAttribute(element, attribute: kAXEnabledAttribute as CFString) != false
+			else { throw BridgeFailure(message: "Selection requires an enabled nonsecure native editor", code: "unsupported") }
+			let app = AXUIElementCreateApplication(pid)
+			func editorFocusMatches() -> Bool {
+				guard let focused = copyAttribute(app, attribute: kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement),
+					let window = copyAttribute(app, attribute: kAXFocusedWindowAttribute as CFString).flatMap(asAXElement)
+				else { return false }
+				return sameElement(focused, element) && sameElement(window, boundWindow)
+					&& boolAttribute(element, attribute: kAXFocusedAttribute as CFString) == true
+			}
+			var settable = DarwinBoolean(false)
+			let capability = AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &settable)
+			guard capability == .success && settable.boolValue, editorFocusMatches() else {
+				throw BridgeFailure(message: "Editor focus or native selection capability is unavailable; no selection was set", code: "unsupported")
+			}
+			guard let expected = params["expectedValue"] as? String, let text = params["text"] as? String,
+				let value = valueAttribute(element),
+				let requested = uniqueLiteralSelectionRange(value: value, expected: expected, text: text, mode: params["selectionMode"] as? String ?? "range")
+			else { throw BridgeFailure(message: "Editor value changed or selection text is missing/ambiguous; no selection was set", code: "selection_precondition") }
+			var range = CFRange(location: requested.location, length: requested.length)
+			guard let selection = AXValueCreate(.cfRange, &range) else {
+				throw BridgeFailure(message: "Cannot construct native selection range", code: "invalid_args")
+			}
+			// Exactly one setter. No focus changes, keys, coordinates, refinding,
+			// retry or foreground escalation can substitute for selection proof.
+			let status = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, selection)
+			var observed = CFRange(location: -1, length: -1)
+			let raw = copyAttribute(element, attribute: kAXSelectedTextRangeAttribute as CFString)
+			let rangeRead: Bool
+			if let raw, CFGetTypeID(raw) == AXValueGetTypeID() {
+				let ax = unsafeBitCast(raw, to: AXValue.self)
+				rangeRead = AXValueGetType(ax) == .cfRange && AXValueGetValue(ax, .cfRange, &observed)
+			} else { rangeRead = false }
+			let valueMatches = valueAttribute(element).map { exactSelectionValue($0, expected) } ?? false
+			let focusMatches = editorFocusMatches()
+			var afterPID: pid_t = 0
+			let identityMatches = AXUIElementGetPid(element, &afterPID) == .success && afterPID == pid
+				&& isElement(element, descendantOf: boundWindow)
+				&& windowElement(pid: pid, windowId: record.windowId).map { sameElement($0, boundWindow) } == true
+			let rangeMatches = rangeRead && observed.location == range.location && observed.length == range.length
+			let verified = status == .success && rangeMatches && valueMatches && focusMatches && identityMatches
+			performed["delivery"] = "ax"
+			performed["grounding"] = "description"
+			performed["apiStatus"] = status.rawValue
+			return finish(["outcome": verified ? "worked" : "unknown", "performed": performed,
+				"evidence": ["selectionVerified": verified, "rangeRead": rangeRead, "rangeMatches": rangeMatches,
+					"valueUnchanged": valueMatches, "editorFocusMatches": focusMatches, "identityMatches": identityMatches,
+					"selectionRange": ["location": range.location, "length": range.length],
+					"observedRange": ["location": observed.location, "length": observed.length]]])
 		}
 
 		if action == "commit" || action == "invoke" {

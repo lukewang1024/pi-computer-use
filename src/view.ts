@@ -1,4 +1,4 @@
-import { serializeOutlineNode, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type SerializedOutlineNode } from "./outline.ts";
+import { serializeOutlineNodeShallow, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type SerializedOutlineNode } from "./outline.ts";
 
 function numericRef(ref: string): number {
 	const match = /^@e(\d+)$/.exec(ref);
@@ -71,7 +71,7 @@ export function stabilizeRefs(base: Outline | undefined, next: Outline): Outline
 }
 
 function comparable(node: OutlineNode): Omit<SerializedOutlineNode, "children"> {
-	const { children: _children, ...fields } = serializeOutlineNode(node);
+	const { children: _children, ...fields } = serializeOutlineNodeShallow(node);
 	return {
 		...fields,
 		rect: fields.rect ? { x: Math.round(fields.rect.x), y: Math.round(fields.rect.y), w: Math.round(fields.rect.w), h: Math.round(fields.rect.h) } : undefined,
@@ -111,7 +111,7 @@ export function changesBetween(base: Outline, next: Outline, identity: "ref" | "
 	let structureChanged = false;
 	for (const node of next.nodes) {
 		const previous = before.get(key(node, next.root));
-		if (!previous) changes.push({ type: "added", ref: node.ref, parent: node.parent?.ref, node: { ...serializeOutlineNode(node), children: [] } });
+		if (!previous) changes.push({ type: "added", ref: node.ref, parent: node.parent?.ref, node: { ...serializeOutlineNodeShallow(node), children: [] } });
 		else {
 			// JSON omits undefined fields. A known availability becoming
 			// unknown needs a replacement view to clear the previous fact.

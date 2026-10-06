@@ -73,11 +73,14 @@ export interface UiCondition {
 }
 
 export interface UiAction {
-	action: "invoke" | "commit" | "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
+	action: "selectText" | "invoke" | "commit" | "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
 	ref?: string;
 	x?: number;
 	y?: number;
 	text?: string;
+	/** Exact full editable value observed before a native selection. */
+	expectedValue?: string;
+	selectionMode?: "range" | "start" | "end";
 	keys?: string[];
 	scrollX?: number;
 	scrollY?: number;

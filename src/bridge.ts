@@ -1314,7 +1314,7 @@ async function helperAct(
 		}
 		return candidate;
 	};
-	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
+	const textTimeout = action.action !== "selectText" && "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
 	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
 		try {
@@ -1362,7 +1362,7 @@ async function helperAct(
 			return transport;
 		}
 		const code = (error as Error & { code?: string })?.code;
-		if (code !== "foreground_required" || headless) throw error;
+		if (code !== "foreground_required" || headless || action.action === "selectText") throw error;
 		let foreground: HelperActResult;
 		try {
 			foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
@@ -1390,6 +1390,7 @@ function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, 
 	const base = { lookId: look.lookId, pid: target.pid, target: action.target, policy };
 	return (() => {
 		switch (action.action) {
+			case "selectText": return { ...base, action: action.action, params: { ...action.params, delivery } };
 			case "invoke":
 			case "commit": return { ...base, action: action.action, params: { delivery } };
 			case "press":
@@ -2440,7 +2441,7 @@ function validateActionTarget(action: UiAction): void {
 	if ((action.action === "click" || action.action === "moveMouse") && hasRef === hasPoint) {
 		throw new Error(`${action.action} requires exactly one target: ref or x/y coordinates.`);
 	}
-	if ((action.action === "commit" || action.action === "invoke") && (!hasRef || hasPoint)) throw new Error(`${action.action} requires only a native element ref.`);
+	if ((action.action === "selectText" || action.action === "commit" || action.action === "invoke") && (!hasRef || hasPoint)) throw new Error(`${action.action} requires only a native element ref.`);
 	if (action.action === "press" && !hasRef) throw new Error("press requires an actionable ref.");
 	if (action.action === "scroll" && toFiniteNumber(action.scrollX, 0) === 0 && toFiniteNumber(action.scrollY, 0) === 0) throw new Error("scroll requires a non-zero scrollX or scrollY delta.");
 	if (action.clickCount !== undefined && (!Number.isInteger(action.clickCount) || action.clickCount < 1 || action.clickCount > 3)) throw new Error("clickCount must be an integer from 1 to 3.");
@@ -2456,6 +2457,7 @@ async function performAct(params: ActParams, signal?: AbortSignal): Promise<Agen
 	for (const action of actions) validateActionTarget(action);
 	if (operationState().contextId) {
 		if (params.observationMode !== undefined) throw new Error("act_ui.observationMode is currently desktop-only.");
+		if (actions.some(action => action.action === "selectText")) throw new Error("selectText is only available for macOS native editors.");
 		return await performBrowserTransaction(params, actions, signal);
 	}
 	return await performDesktopTransaction(params, actions, signal);

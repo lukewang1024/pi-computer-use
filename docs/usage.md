@@ -197,3 +197,22 @@ a valid image, and all input retains its exact target/foreground preconditions.
 Use `observe_ui({root: nativeRootRef, mode: "pixels"})` when an exact Windows native window is known and only its pixels are needed. This mode skips UIA and OCR, requires a successful image, and marks the unobserved semantic subtree as truncated and picture-only. It does not return semantic element refs. Unsupported platforms, browser CDP roots, and omitted roots are rejected before capture. Search and semantic postconditions require a new semantic/fused observation.
 
 Coordinate actions remain subject to the existing headless policy, exact HWND foreground checks, captured geometry checks, and stale-reference guards. Their successor capture keeps pixel-only mode; a returned HID dispatch still has an unverified effect and must not be automatically replayed or treated as a verified edit. Inspect the fresh image independently. Native capture failure remains a failure, and older helpers that do not acknowledge skipping UIA cannot establish a pixel-only state. The new path does not make slow semantic provider reads bounded.
+
+### Verified native text selection on macOS
+
+`selectText` selects a unique literal substring in an already focused native
+editor. Supply its current `ref`, the complete exact `expectedValue`, and `text`.
+`selectionMode` defaults to `range`; `start` and `end` collapse the caret at the
+matching substring boundary. Unicode range offsets are computed in the helper.
+The operation rejects changed values, ambiguous text (including overlapping
+matches), disabled or secure fields, stale references, web areas, and unsupported
+selection attributes before setting a range. It does not change focus or fall
+back to keyboard or pointer input.
+
+A `worked` result requires the selected range to be read back exactly, unchanged
+text, and the same focused editor and observed window. An unverified setter
+returns `unknown` and stops remaining actions. Do not replay it. This operation
+does not establish batch focus for targetless typing; use an explicit fresh
+editor ref, verify the resulting application state, and verify any saved edit
+independently. Application support for selection must be tested; API success
+alone does not establish that a Microsoft Word note can be edited accurately.

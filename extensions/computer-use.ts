@@ -26,6 +26,7 @@ const mouseButton = Type.Optional(Type.Union([Type.Literal("left"), Type.Literal
 const clickByRef = Type.Object({ action: Type.Literal("click"), ref: Type.String(), button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
 const clickByPoint = Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
 const uiAction = Type.Union([
+	Type.Object({ action: Type.Literal("selectText"), ref: Type.String({ description: "Focused macOS native editable ref; AX selection once, no keyboard/pointer fallback" }), text: Type.String({ minLength: 1, maxLength: 100000, description: "Exact unique literal substring" }), expectedValue: Type.String({ maxLength: 100000, description: "Exact complete freshly observed editor value; reject if changed" }), selectionMode: Type.Optional(Type.Union([Type.Literal("range"), Type.Literal("start"), Type.Literal("end")])) }, { additionalProperties: false }),
 	Type.Object({ action: Type.Literal("commit"), ref: Type.String({ description: "macOS native element declaring AXConfirm; commits an edited value without keyboard or pointer fallback" }) }),
 	Type.Object({ action: Type.Literal("invoke"), ref: Type.String({ description: "macOS native element declaring AXPress; invokes once without focusing text fields or keyboard/pointer fallback; verify the effect before further actions" }) }),
 	Type.Object({ action: Type.Literal("press"), ref: Type.String({ description: "Actionable outline ref" }) }),

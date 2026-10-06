@@ -191,6 +191,7 @@ export interface PlatformActRequestBase {
 }
 
 export type PlatformActRequest = PlatformActRequestBase & (
+	| { action: "selectText"; params: { text: string; expectedValue: string; selectionMode: "range" | "start" | "end" } & PlatformActDeliveryParam }
 	| { action: "commit" | "invoke"; params: PlatformActDeliveryParam }
 	| { action: "press" | "click"; params: { button?: PlatformMouseButton; clickCount?: number } & PlatformActDeliveryParam }
 	| { action: "setText"; params: { text: string } & PlatformActDeliveryParam }

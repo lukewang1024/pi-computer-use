@@ -1727,12 +1727,14 @@ final class Bridge {
 			focused: boolAttribute(element, attribute: kAXFocusedAttribute as CFString) == true,
 			offscreen: offscreen
 		)
-		// Match the native Invoke/Commit availability guard without adding
-		// an AX round trip for unrelated tree containers or text-only nodes.
-		// Missing AXEnabled remains unknown, not implicitly enabled/disabled.
-		if node.canPress || actions.contains("AXConfirm") {
-			node.isEnabled = boolAttribute(element, attribute: kAXEnabledAttribute as CFString)
-		}
+		// Observe availability for every input-capable node, including editors
+		// whose provider declares a setter while AXEnabled is false.
+		// Unrelated containers/static text incur no AXEnabled round trip.
+		node.isEnabled = observedAvailability(canPress: node.canPress,
+			hasConfirm: actions.contains("AXConfirm"), canSetValue: node.canSetValue,
+			isTextInput: node.isTextInput) {
+				boolAttribute(element, attribute: kAXEnabledAttribute as CFString)
+			}
 		if node.canScroll {
 			let rows = axElementArray(element, attribute: kAXRowsAttribute as CFString)
 			let visibleRows = axElementArrayIfPresent(element, attribute: kAXVisibleRowsAttribute as CFString)

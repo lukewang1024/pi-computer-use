@@ -92,6 +92,7 @@ export interface OutlineSearchMatch {
 	ref: string;
 	role: string;
 	label: string;
+	isEnabled?: boolean;
 	actions: string[];
 	path: string;
 	matchReason?: "exact" | "prefix" | "substring" | "fuzzy" | "filter";
@@ -119,7 +120,7 @@ export interface OutlineDiff {
 	changedNodeCount: number;
 	fullNodeCount: number;
 	useFullView: boolean;
-	reason?: "root_replaced" | "change_budget_exceeded" | "identity_confidence_low" | "structure_changed";
+	reason?: "root_replaced" | "change_budget_exceeded" | "identity_confidence_low" | "structure_changed" | "availability_unknown";
 }
 
 export type SerializedOutlineNode = Omit<OutlineNode, "parent" | "children"> & { children: SerializedOutlineNode[] };
@@ -354,6 +355,7 @@ function foldedSummary(node: OutlineNode): string {
 
 function annotationText(node: OutlineNode): string {
 	const annotations = [
+		node.isEnabled === false ? "disabled" : undefined,
 		node.offscreen ? "offscreen" : undefined,
 		node.pictureOnly ? "pictureOnly" : undefined,
 		node.truncated ? "truncated" : undefined,
@@ -489,7 +491,7 @@ export function searchOutlineRanked(outline: Outline, text?: string, role?: stri
 		const label = outlineNodeLabel(node);
 		const match = query ? rankedTextMatch([label, node.identifier, node.title, node.description, node.value, ...node.text.map((item) => item.string)], query) : undefined;
 		if (query && !match) continue;
-		const result = { ref: node.ref, role: node.role, label, actions: node.actions, path: outlineNodePath(node), matchReason: match?.reason ?? "filter" as const, score: match?.score ?? 1, node, order };
+		const result = { ref: node.ref, role: node.role, label, isEnabled: node.isEnabled, actions: node.actions, path: outlineNodePath(node), matchReason: match?.reason ?? "filter" as const, score: match?.score ?? 1, node, order };
 		(match?.reason === "fuzzy" ? fuzzy : strong).push(result);
 	}
 	const rank = { exact: 0, prefix: 1, substring: 2, filter: 3, fuzzy: 4 } as const;
@@ -513,7 +515,7 @@ export function searchOutline(outline: Outline, text?: string, role?: string, ac
 		if (query && !haystack.includes(query)) continue;
 		if (roleQuery && node.role !== roleQuery) continue;
 		if (actionQuery && !actionMatches(node, actionQuery)) continue;
-		matches.push({ ref: node.ref, role: node.role, label, actions: node.actions, path: outlineNodePath(node), node });
+		matches.push({ ref: node.ref, role: node.role, label, isEnabled: node.isEnabled, actions: node.actions, path: outlineNodePath(node), node });
 		if (matches.length >= limit) break;
 	}
 	return matches;

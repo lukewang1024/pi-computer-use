@@ -199,6 +199,7 @@ final class LookNode {
 	var offscreen: Bool
 	var pictureOnly: Bool
 	var truncated: Bool
+	var isEnabled: Bool?
 	var scrollExtent: [String: Int]?
 	var text: [[String: Any]]
 	var children: [LookNode]
@@ -249,6 +250,7 @@ final class LookNode {
 			"rect": ["x": rect.origin.x, "y": rect.origin.y, "w": rect.width, "h": rect.height],
 			"children": children.map { $0.payload() },
 		]
+		if let isEnabled { output["isEnabled"] = isEnabled }
 		if focused { output["focused"] = true }
 		if offscreen { output["offscreen"] = true }
 		if pictureOnly { output["pictureOnly"] = true }
@@ -1725,6 +1727,12 @@ final class Bridge {
 			focused: boolAttribute(element, attribute: kAXFocusedAttribute as CFString) == true,
 			offscreen: offscreen
 		)
+		// Match the native Invoke/Commit availability guard without adding
+		// an AX round trip for unrelated tree containers or text-only nodes.
+		// Missing AXEnabled remains unknown, not implicitly enabled/disabled.
+		if node.canPress || actions.contains("AXConfirm") {
+			node.isEnabled = boolAttribute(element, attribute: kAXEnabledAttribute as CFString)
+		}
 		if node.canScroll {
 			let rows = axElementArray(element, attribute: kAXRowsAttribute as CFString)
 			let visibleRows = axElementArrayIfPresent(element, attribute: kAXVisibleRowsAttribute as CFString)

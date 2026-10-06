@@ -12,6 +12,7 @@ export function describeActionExecution(attempted: number, requested: number, ou
 export type ActionTarget = { ref: string } | { x: number; y: number } | { focus: { x: number; y: number } };
 
 export type PreparedAction =
+	| { action: "selectText"; target: ActionTarget; params: { text: string; expectedValue: string; selectionMode: "range" | "start" | "end" }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "commit" | "invoke"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "press" | "click"; target: ActionTarget; params: { button?: MouseButtonName; clickCount?: number; nativeFocusOnly?: boolean }; establishesFocus: boolean; usesCurrentFocus: false; needsForeground: boolean }
 	| { action: "setText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
@@ -215,11 +216,29 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 	if ((operation === "commit" || operation === "invoke") && (env.platform !== "macos" || env.headless || !action.ref)) {
 		throw new Error("Native action requires a macOS desktop element reference.");
 	}
-	if (action.ref && ["invoke", "commit", "press", "click", "setText", "typeText", "keypress"].includes(operation)
+	if (action.ref && ["selectText", "invoke", "commit", "press", "click", "setText", "typeText", "keypress"].includes(operation)
 		&& env.node(action.ref).isEnabled === false) {
 		throw new Error("Target control is disabled; input was not sent.");
 	}
 
+	if (operation === "selectText") {
+		if (env.platform !== "macos" || env.headless || !action.ref || action.x !== undefined || action.y !== undefined) {
+			throw new Error("selectText requires only a macOS desktop native editor ref.");
+		}
+		const node = env.node(action.ref);
+		if (!node.isTextInput || node.pictureOnly || !node.wireRef) throw new Error("selectText requires a native text editor.");
+		if (typeof action.text !== "string" || !action.text.length || action.text.length > 100_000
+			|| typeof action.expectedValue !== "string" || action.expectedValue.length > 100_000) {
+			throw new Error("selectText requires nonempty text and an exact expectedValue (at most 100000 UTF-16 units).");
+		}
+		const selectionMode = action.selectionMode ?? "range";
+		if (!["range", "start", "end"].includes(selectionMode)) throw new Error("Invalid selectText.selectionMode.");
+		const start = action.expectedValue.indexOf(action.text);
+		if (start < 0 || action.expectedValue.indexOf(action.text, start + 1) >= 0) {
+			throw new Error("selectText text must occur exactly once in expectedValue.");
+		}
+		return { action: operation, target: { ref: node.wireRef }, params: { text: action.text, expectedValue: action.expectedValue, selectionMode }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
+	}
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
 	if (operation === "commit" || operation === "invoke") {
 		const nativeAction = nativeSemanticActions[operation];

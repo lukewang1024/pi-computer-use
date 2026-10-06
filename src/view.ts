@@ -113,6 +113,11 @@ export function changesBetween(base: Outline, next: Outline, identity: "ref" | "
 		const previous = before.get(key(node, next.root));
 		if (!previous) changes.push({ type: "added", ref: node.ref, parent: node.parent?.ref, node: { ...serializeOutlineNode(node), children: [] } });
 		else {
+			// JSON omits undefined fields. A known availability becoming
+			// unknown needs a replacement view to clear the previous fact.
+			if (previous.isEnabled !== undefined && node.isEnabled === undefined) {
+				return { changes: [], changedNodeCount: next.nodes.length, fullNodeCount: next.nodes.length, useFullView: true, reason: "availability_unknown" };
+			}
 			if (identity === "wire") {
 				const oldParent = previous.parent ? key(previous.parent, base.root) : undefined;
 				const newParent = node.parent ? key(node.parent, next.root) : undefined;

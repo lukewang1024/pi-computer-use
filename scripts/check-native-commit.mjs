@@ -16,9 +16,9 @@ Object.assign(backend,{
  isBrowserApp:()=>false,isChromeFamilyApp:()=>false,actBatch:undefined,
  observe:async request=>{
   const root=roots.find(r=>r.rootRef===request.target.windowRef)??roots.find(r=>r.windowId===request.target.windowId);assert(root,'Observation must address an existing exact root');
-  const lookId='root-pin-look-'+(++looks);lookRoots.set(lookId,root);return parseLookResponse({lookId,capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1,isModal:root.isModal,role:root.kind,subrole:''},outline:node(root.rootRef,'window',root.title,{children:[node(root.rootRef+'-button','AXComboBox','Font Size',{isTextInput:true,canFocus:true,actions:['AXConfirm']})]}),timings:{}});
+  const lookId='root-pin-look-'+(++looks);lookRoots.set(lookId,root);return parseLookResponse({lookId,capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1,isModal:root.isModal,role:root.kind,subrole:''},outline:node(root.rootRef,'window',root.title,{children:[node(root.rootRef+'-button','AXComboBox','Font Size',{isTextInput:true,canFocus:true,actions:['AXConfirm','AXPress']})]}),timings:{}});
  },
- act:async request=>{inputs.push(request);return {outcome:'unknown',performed:{grounding:'description',delivery:'ax',nativeAction:'AXConfirm'}};},shutdown:async()=>{},
+ act:async request=>{inputs.push(request);return {outcome:'unknown',performed:{grounding:'description',delivery:'ax',nativeAction:request.action==='invoke'?'AXPress':'AXConfirm'}};},shutdown:async()=>{},
 });
 const call=(fn,params)=>fn('root-pin-regression',params,undefined,undefined,{cwd:process.cwd(),hasUI:false});
 async function observeOwned(){const found=await call(executeFind,{text:owned.title});const target=found.details.windows.filter(r=>r.windowId===owned.windowId);assert.equal(target.length,1);return await call(executeObserve,{root:target[0].windowRef,mode:'semantic'});}
@@ -49,5 +49,21 @@ try{
  assert.equal(focus.details.execution.outcome,'unknown','Unconfirmed native focus must not become a pointer replay');
  roots=[owned,other];inputs=[];const fresh=await observeOwned();
  await assert.rejects(()=>call(executeAct,{stateId:fresh.details.capture.stateId,actions:[{action:'commit',ref:'@e999999'}]}),/reference|ref|outline/i);assert.equal(inputs.length,0);
+ for(const focused of [false,true]){
+  roots=[{...owned,isFocused:focused},other];inputs=[];
+  const observed=await observeOwned();
+  const acted=await call(executeAct,{stateId:observed.details.capture.stateId,actions:[{action:'invoke',ref:button(observed)},{action:'commit',ref:button(observed)}]});
+  assert.equal(inputs.length,1,'Unknown Invoke must stop the remaining batch without replay');
+  assert.equal(inputs[0].action,'invoke');assert.equal(acted.details.execution.outcome,'unknown');
+  assert.equal(inputs[0].target.ref,owned.rootRef+'-button');assert.equal(lookRoots.get(inputs[0].lookId).windowId,71);
+ }
+ for(const changed of [{...owned,windowId:73},{...owned,rootRef:'native-replacement',windowRef:'native-replacement'}]){
+  roots=[owned,other];inputs=[];const observed=await observeOwned();roots=[changed,other];
+  await assert.rejects(()=>call(executeAct,{stateId:observed.details.capture.stateId,actions:[{action:'invoke',ref:button(observed)}]}),/different window|no longer available|no longer exists|not found/i);
+  assert.equal(inputs.length,0,'Invoke on a remapped root must reject before dispatch');
+ }
+ roots=[owned,other];inputs=[];const invokeFresh=await observeOwned();
+ await assert.rejects(()=>call(executeAct,{stateId:invokeFresh.details.capture.stateId,actions:[{action:'commit',ref:button(invokeFresh)},{action:'invoke',ref:'@e999999'}]}),/reference|ref|outline/i);
+ assert.equal(inputs.length,0,'Invalid later Invoke rejects the entire batch before its first action');
  console.log('Public native commit routing passed: exact modal/window, unknown outcome without replay, two remaps and stale ref; mocked backend only');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

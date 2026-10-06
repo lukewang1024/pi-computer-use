@@ -12,7 +12,7 @@ export function describeActionExecution(attempted: number, requested: number, ou
 export type ActionTarget = { ref: string } | { x: number; y: number } | { focus: { x: number; y: number } };
 
 export type PreparedAction =
-	| { action: "commit"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
+	| { action: "commit" | "invoke"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "press" | "click"; target: ActionTarget; params: { button?: MouseButtonName; clickCount?: number; nativeFocusOnly?: boolean }; establishesFocus: boolean; usesCurrentFocus: false; needsForeground: boolean }
 	| { action: "setText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "typeText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: false }
@@ -208,23 +208,26 @@ function containsEditable(node: OutlineNode): boolean {
 	return node.children.some(containsEditable);
 }
 
+const nativeSemanticActions = { invoke: "AXPress", commit: "AXConfirm" } as const;
+
 export function prepareAction(action: UiAction, state: ActionState, env: ActionEnvironment): PreparedAction {
 	const operation = action.action;
-	if (operation === "commit" && (env.platform !== "macos" || env.headless || !action.ref)) {
-		throw new Error("Native value commit requires a macOS desktop element reference.");
+	if ((operation === "commit" || operation === "invoke") && (env.platform !== "macos" || env.headless || !action.ref)) {
+		throw new Error("Native action requires a macOS desktop element reference.");
 	}
-	if (action.ref && ["commit", "press", "click", "setText", "typeText", "keypress"].includes(operation)
+	if (action.ref && ["invoke", "commit", "press", "click", "setText", "typeText", "keypress"].includes(operation)
 		&& env.node(action.ref).isEnabled === false) {
 		throw new Error("Target control is disabled; input was not sent.");
 	}
 
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
-	if (operation === "commit") {
+	if (operation === "commit" || operation === "invoke") {
+		const nativeAction = nativeSemanticActions[operation];
 		const node = env.node(action.ref!);
-		if (node.pictureOnly || !node.wireRef || !node.actions.includes("AXConfirm")) {
-			throw new Error("Target does not declare native AXConfirm; no input was sent.");
+		if (node.pictureOnly || !node.wireRef || !node.actions.includes(nativeAction)) {
+			throw new Error(`Target does not declare native ${nativeAction}; no input was sent.`);
 		}
-		return { action: "commit", target: { ref: node.wireRef }, params: {}, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
+		return { action: operation, target: { ref: node.wireRef }, params: {}, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 	}
 	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
 	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));

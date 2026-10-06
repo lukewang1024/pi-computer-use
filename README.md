@@ -187,3 +187,5 @@ result and independently verify saved output. Do not automatically replay it.
 ### Native macOS invocation
 
 When a fresh native element declares `AXPress`, use `{"action":"invoke","ref":"@eN"}` to invoke that action once. This also supports text controls where ordinary `press` focuses the editor. Invoke keeps the exact observed window and reference, rejects unsupported targets before dispatch, and has no pointer or keyboard fallback. Its result remains `unknown`: inspect fresh state and independently verify the effect before proceeding or repeating an action. Browser targets and other platforms are unsupported.
+
+For native macOS controls declaring `AXPress` or `AXConfirm`, `isEnabled` reports the observed `AXEnabled` value when available. A missing value is unknown. Outline, `search_ui` and `inspect_ui` summaries mark disabled controls; declared actions describe capability and do not guarantee current availability. An observed disabled target rejects before native dispatch, and the helper independently rechecks availability immediately before an explicit native action.

@@ -40,3 +40,23 @@ for(const [before,after] of [[undefined,false],[undefined,true],[false,true],[tr
  assert.equal(serialized.changes.find(c=>c.type==='updated').fields.isEnabled,after);
 }
 console.log('PASS availability deltas retain false/true and replace the view when availability becomes unknown');
+
+// A comparison of node-local fields must not repeatedly serialize descendants.
+// Count child accesses instead of asserting noisy machine-specific timings.
+let chain=node('leaf','Leaf');
+for(let i=0;i<160;i++) chain=node(`group-${i}`,`Group ${i}`,[chain]);
+const deepA=outline(chain),deepB=restoreOutline(serializeOutline(deepA));
+let childReads=0;
+for(const tree of [deepA,deepB]) for(const item of tree.nodes){
+ const children=item.children;
+ Object.defineProperty(item,'children',{enumerable:true,get(){childReads++;return children;}});
+}
+const deepDiff=changesBetween(deepA,deepB);
+assert.equal(deepDiff.changedNodeCount,0);
+assert.ok(childReads < 8*(deepA.nodes.length+deepB.nodes.length), 'Node comparison recursively walked descendants');
+deepB.nodes.at(-1).value='Changed leaf';
+const leafDiff=changesBetween(deepA,deepB);
+assert.equal(leafDiff.changedNodeCount,1);
+assert.equal(leafDiff.changes[0].fields.value,'Changed leaf');
+assert.equal(leafDiff.changes[0].ref,deepB.nodes.at(-1).ref);
+console.log('PASS deep-tree comparison has bounded child reads and preserves leaf evidence');

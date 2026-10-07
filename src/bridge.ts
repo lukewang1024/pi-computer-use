@@ -13,7 +13,7 @@ import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outco
 import { validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
-import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineSearchMatch } from "./outline.ts";
+import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineAncestors, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineAncestors, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type FocusWindowParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
@@ -297,6 +297,7 @@ interface OutlineToolDetails {
 	matches?: SerializedOutlineSearchMatch[];
 	target?: SerializedOutlineNode;
 	subtree?: SerializedOutlineSubtree;
+	ancestors?: SerializedOutlineAncestors;
 	note?: WindowNote;
 }
 
@@ -2114,6 +2115,7 @@ async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Pr
 
 /** Pure cached-outline inspection. */
 async function performInspectUi(params: InspectUiParams): Promise<AgentToolResult<OutlineToolDetails>> {
+	if (params.includeAncestors !== undefined && typeof params.includeAncestors !== "boolean") throw new Error("inspect_ui.includeAncestors must be boolean.");
 	const state = operationState();
 	const outline = currentOutlineOrThrow(params.stateId);
 	const ref = trimOrUndefined(params.ref);
@@ -2121,6 +2123,7 @@ async function performInspectUi(params: InspectUiParams): Promise<AgentToolResul
 	const target = nodeByRef(outline, ref);
 	if (!target) throw new Error(`Outline ref '${ref}' is not available in the current outline.`);
 	const details: OutlineToolDetails = { tool: "inspect_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, target: serializeOutlineNodeShallow(target), note: state.currentNote };
+	if (params.includeAncestors === true) details.ancestors = serializeOutlineAncestors(target, outline.root);
 	const fields = [
 		formatOutlineNodeLabel(target),
 		`path: ${outlineNodePath(target)}`,

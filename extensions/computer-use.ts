@@ -125,7 +125,7 @@ const inspectUiTool = defineTool({
 	label: "Inspect UI",
 	description: "Inspect one exact outline ref with fields, geometry, capabilities, and annotations.",
 	promptSnippet: "Use when a target's evidence or provenance matters.",
-	parameters: Type.Object({ ref: Type.String(), stateId }),
+	parameters: Type.Object({ ref: Type.String(), stateId, includeAncestors: Type.Optional(Type.Boolean({ description: "Include up to 32 cached structural ancestors; reject truncated chains before selecting by scope." })) }),
 	execute: executeInspectUi,
 });
 

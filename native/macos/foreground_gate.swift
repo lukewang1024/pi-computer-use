@@ -263,3 +263,14 @@ func foregroundRejectedActResult(details: [String: Any]) -> [String: Any] {
 	if partial { result["inputDispatch"] = inputDispatch }
 	return result
 }
+
+
+// AX cannot-complete may arrive after modal processing has already taken effect.
+// One attempted native action never authorizes a retry or physical fallback.
+func performNativeActionOnce(invoke: () -> Int) -> [String: Any] {
+    let status = invoke()
+    return [
+        "outcome": status == 0 ? "worked" : "unknown",
+        "evidence": ["nativeActionAttempted": true, "axStatus": status, "inputRetryProhibited": true],
+    ]
+}

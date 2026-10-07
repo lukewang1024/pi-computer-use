@@ -2477,17 +2477,16 @@ final class Bridge {
 						"evidence": ["nativeActionAttempted": true, "axStatus": Int(status.rawValue), "inputRetryProhibited": true]])
 				}
 				let cursorPoint = try? coordinatePoint()
-				var status = AXUIElementPerformAction(element, kAXPressAction as CFString)
-				if status != .success, let refreshed = refreshElement(), supportsAction(refreshed, action: kAXPressAction as CFString) {
-					status = AXUIElementPerformAction(refreshed, kAXPressAction as CFString)
+				let attempt = performNativeActionOnce {
+					Int(AXUIElementPerformAction(element, kAXPressAction as CFString).rawValue)
 				}
-				if status == .success {
-					performed["grounding"] = "description"
-					performed["delivery"] = "ax"
-					if let cursorPoint { animateCursor(at: cursorPoint) }
-				} else {
-					try executeCoordinates(coordinatePoint())
+				performed["grounding"] = "description"
+				performed["delivery"] = "ax"
+				if attempt["outcome"] as? String != "worked" {
+					return finish(["outcome": "unknown", "performed": performed,
+						"evidence": attempt["evidence"]!])
 				}
+				if let cursorPoint { animateCursor(at: cursorPoint) }
 			} else {
 				try executeCoordinates(coordinatePoint())
 			}

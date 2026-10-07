@@ -197,6 +197,23 @@ private struct ForegroundGateTests {
             FocusedCGCandidateSnapshot(windowId: 20390, ownerPid: target.pid, frame: CGRect(origin: CGPoint(x: 103, y: 100), size: CGSize(width: 800, height: 600)), title: nil, isOnscreen: true)
         ] { precondition(pairs([ax], [other]).isEmpty) }
 
+        // Model a modal action that takes effect and then returns cannotComplete.
+        // Native status cannot authorize a second invocation or a pointer action.
+        for status in [0, -25204, -25202, -25206] {
+            var invocations = 0
+            var modalOpen = false
+            let result = performNativeActionOnce {
+                invocations += 1
+                modalOpen.toggle()
+                return status
+            }
+            precondition(invocations == 1 && modalOpen)
+            precondition(result["outcome"] as? String == (status == 0 ? "worked" : "unknown"))
+            let evidence = result["evidence"] as! [String: Any]
+            precondition(evidence["axStatus"] as? Int == status)
+            precondition(evidence["nativeActionAttempted"] as? Bool == true)
+            precondition(evidence["inputRetryProhibited"] as? Bool == true)
+        }
 		print("native foreground gate tests passed")
 	}
 }

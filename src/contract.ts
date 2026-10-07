@@ -39,6 +39,8 @@ export interface LaunchBrowserParams {
 export interface EvaluateBrowserParams {
 	stateId: string;
 	expression: string;
+	/** Omit the returned tree only; always collect and retain a complete successor state. */
+	includeOutline?: boolean;
 }
 
 export interface ObserveParams extends ObserveTargetParams {

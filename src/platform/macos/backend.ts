@@ -104,6 +104,7 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
 		return parseLookResponse(await macosHelper.command("look", {
+			...(request.focusContext === true ? { focusContext: true } : {}),
 			baseLookId: request.baseLookId,
 			windowId: request.target.windowId,
 			windowRef: request.target.windowRef ?? request.target.rootRef,

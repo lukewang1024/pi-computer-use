@@ -91,6 +91,7 @@ const observeTool = defineTool({
 	parameters: Type.Object({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
 		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused"), Type.Literal("pixels")], { description: "Observation mode, default fused" })),
+		focusContext: Type.Optional(Type.Boolean({ description: "macOS native roots only: bounded read-only diagnosis of the application's actual focused element. Defaults false; does not authorize input or create refs for unobserved elements." })),
 	}),
 	execute: executeObserve,
 });

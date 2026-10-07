@@ -1,3 +1,5 @@
+import { parseFocusContext, type FocusContext } from "./focus-context.ts";
+
 export interface OutlineRect {
 	x: number;
 	y: number;
@@ -74,6 +76,7 @@ export interface LookWindow {
 }
 
 export interface LookResponse {
+	focusContext?: FocusContext;
 	lookId: string;
 	capturedAt: number;
 	window: LookWindow;
@@ -226,6 +229,7 @@ export function parseLookResponse(raw: unknown): LookResponse {
 	const readText = isRecord(record.readText) ? record.readText : undefined;
 	const requestedReadText = readText?.requested === "auto" || readText?.requested === "always" || readText?.requested === "never" ? readText.requested : undefined;
 	const look: LookResponse = {
+		focusContext: parseFocusContext(record.focusContext),
 		lookId: toString(record.lookId),
 		capturedAt: toNumber(record.capturedAt, Date.now() / 1000),
 		window: {

@@ -42,7 +42,7 @@ export interface EvaluateBrowserParams {
 }
 
 export interface ObserveParams extends ObserveTargetParams {
-	mode?: "semantic" | "visual" | "fused" | "pixels";
+	mode?: "semantic" | "visual" | "fused" | "pixels" | "metrics";
 	/** Opt-in macOS focused-element diagnosis; never grants input authority. */
 	focusContext?: boolean;
 	/** Internal capture override; not part of the model-facing schema. */

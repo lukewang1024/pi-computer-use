@@ -16,8 +16,8 @@ export type PreparedAction =
 	| { action: "commit" | "invoke"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "press" | "click"; target: ActionTarget; params: { button?: MouseButtonName; clickCount?: number; nativeFocusOnly?: boolean }; establishesFocus: boolean; usesCurrentFocus: false; needsForeground: boolean }
 	| { action: "setText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
-	| { action: "typeText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: false }
-	| { action: "keypress"; target: ActionTarget; params: { keys: string[] }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: false }
+	| { action: "typeText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: boolean }
+	| { action: "keypress"; target: ActionTarget; params: { keys: string[] }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: boolean }
 	| { action: "scroll"; target: ActionTarget; params: { scrollX: number; scrollY: number }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "drag"; target: ActionTarget; params: { path: Array<{ x: number; y: number }> }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "moveMouse"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
@@ -267,8 +267,8 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 		case "press":
 		case "click": return { action: operation, target, params: { button: mouseButton(action.button), clickCount: clickCount(action.clickCount), ...(!env.image && env.platform === "macos" && "ref" in target && env.node(action.ref!).isTextInput ? { nativeFocusOnly: true } : {}) }, establishesFocus, usesCurrentFocus: false, needsForeground };
 		case "setText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
-		case "typeText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus, needsForeground: false };
-		case "keypress": return { action: operation, target, params: { keys: keys(action.keys, env.platform) }, establishesFocus: false, usesCurrentFocus, needsForeground: false };
+		case "typeText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus, needsForeground: !env.headless && env.platform === "macos" };
+		case "keypress": return { action: operation, target, params: { keys: keys(action.keys, env.platform) }, establishesFocus: false, usesCurrentFocus, needsForeground: !env.headless && env.platform === "macos" };
 		case "scroll": return { action: operation, target, params: { scrollX: scrollDelta(action.scrollX), scrollY: scrollDelta(action.scrollY) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "drag": return { action: operation, target, params: { path: path(action.path, env) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "moveMouse": return { action: operation, target, params: {}, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };

@@ -58,6 +58,8 @@ export interface SearchUiParams extends StateTargetParams {
 }
 
 export interface ExpandUiParams extends StateTargetParams {
+	/** Return a bounded structured subtree instead of repeated rendered context. */
+	includeSubtree?: boolean;
 	ref: string;
 	depth?: number;
 }

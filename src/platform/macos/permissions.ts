@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ensurePermissions, requestPermissions, type PermissionBridge, type PermissionKind, type PermissionStatus } from "../../permissions.ts";
-import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
+import { parseMacosPermissionStatus } from "./permission-status.ts";
 import type { PlatformDiagnostics, PlatformReadyState } from "../types.ts";
 import { HELPER_APP_PATH, macosHelper } from "./helper.ts";
 import { assertPlatformArchitecture } from "../architecture.ts";
@@ -13,7 +13,7 @@ const SIGNING_MIGRATION_WARNING =
 	"A missing permission does not identify why macOS reports it missing. If the helper identity changed, " +
 	"macOS may require reviewing the existing grant.";
 
-const PERMISSION_REQUEST_OPTION = "Request missing macOS permissions";
+const PERMISSION_REQUEST_OPTION = "Request macOS permissions / direct screenshot access";
 const PERMISSION_RECHECK_OPTION = "Recheck permissions (restart helper)";
 
 const macosPermissionKinds = [
@@ -26,6 +26,9 @@ function permissionStatusSummary(status: PermissionStatus): string {
 		`Accessibility: ${status.accessibility ? "granted" : "missing"}`,
 		`Screen Recording: ${status.screenRecording ? "granted" : "missing"}`,
 	];
+	if (status.captureReadiness === "not-probed") {
+		lines.push("Direct screenshot access: not tested; capture may require a separate system confirmation.");
+	}
 	if (status.screenRecordingPreflight && !status.screenRecording) {
 		lines.push(
 			"(Screen Recording reads granted in the TCC database but a live capture probe failed — " +
@@ -40,7 +43,7 @@ function permissionPrompt(status: PermissionStatus, helperPath: string, hint?: s
 		? `Warning: the helper is not running as the installed pi-computer-use.app (executable: ${status.source.executablePath ?? "unknown"}). Grants may attach to the launching app instead.`
 		: undefined;
 	return [
-		"Explicitly manage missing macOS permissions for the pi-computer-use helper.",
+		"Explicitly manage macOS permissions and optional direct screenshot access.",
 		permissionStatusSummary(status),
 		"",
 		`Helper: pi-computer-use.app (${helperPath})`,
@@ -50,6 +53,7 @@ function permissionPrompt(status: PermissionStatus, helperPath: string, hint?: s
 		SIGNING_MIGRATION_WARNING,
 		"",
 		"A request is made only if you select the explicit request option below.",
+		"A direct screenshot probe may show a separate system confirmation even when basic recording permission is granted.",
 	].filter(Boolean).join("\n");
 }
 
@@ -59,30 +63,7 @@ function missingPermissionMessage(kinds: PermissionKind[]): string {
 
 async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus> {
 	const result = await macosHelper.command<any>("checkPermissions", {}, { signal });
-	const rawSource = result?.source;
-	return {
-		accessibility: toBoolean(result?.accessibility),
-		// Authoritative: the helper's live ScreenCaptureKit probe.
-		screenRecording: toBoolean(result?.screenRecordingCapturable),
-		// Keep the preflight value separate: disagreement means stale per-process
-		// TCC cache or a grant row belonging to another app identity.
-		screenRecordingPreflight: toBoolean(result?.screenRecordingPreflight),
-		source: rawSource && typeof rawSource === "object"
-			? {
-				// macOS attributes Accessibility / Screen Recording grants to the
-				// responsible process at the top of the launch chain. "helper-app"
-				// is the canonical installed app via LaunchServices; "caller" means
-				// grants would attach to the launching app instead.
-				attribution: rawSource.attribution === "helper-app" ? "helper-app" : "caller",
-				pid: Math.trunc(toFiniteNumber(rawSource.pid, 0)) || undefined,
-				parentPid: Math.trunc(toFiniteNumber(rawSource.parentPid, 0)) || undefined,
-				executablePath: toOptionalString(rawSource.executablePath),
-				parentPath: toOptionalString(rawSource.parentPath),
-				parentBundleId: toOptionalString(rawSource.parentBundleId),
-				os: toOptionalString(rawSource.macOS),
-			}
-			: undefined,
-	};
+	return parseMacosPermissionStatus(result);
 }
 
 async function registerPermissions(signal?: AbortSignal): Promise<void> {
@@ -101,7 +82,7 @@ function macosPermissionBridge(): PermissionBridge {
 			incompleteError: (helperPath) => `pi-computer-use permissions are missing. This readiness check did not request them. Run /computer-use permissions to explicitly request or open the relevant settings pane. ${GRANT_INSTRUCTIONS} Helper path: ${helperPath}`,
 			requestOption: PERMISSION_REQUEST_OPTION,
 			recheckOption: PERMISSION_RECHECK_OPTION,
-			readyMessage: "pi-computer-use is ready.",
+			readyMessage: "macOS permission checks completed. Direct screenshot access is verified only by an actual capture.",
 			stillMissing: missingPermissionMessage,
 		},
 		checkPermissions,
@@ -146,6 +127,7 @@ export async function ensureMacosReady(
 		accessibility: helperDiagnostics.accessibility === true,
 		screenRecording: helperDiagnostics.screenRecording === true,
 		screenRecordingPreflight: helperDiagnostics.screenRecording === true,
+		captureReadiness: "not-probed",
 	};
 	if (!permissionStatus.accessibility) throw new Error(`Accessibility is unavailable for the helper. Readiness did not request permission. Helper path: ${HELPER_APP_PATH}`);
 	return { permissionStatus, lastPermissionCheckAt: Date.now(), helperDiagnostics };

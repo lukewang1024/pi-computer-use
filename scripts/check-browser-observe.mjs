@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
-import { executeFind, executeNavigateBrowser, executeEvaluateBrowser, executeSearchUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
+import { executeFind, executeNavigateBrowser, executeEvaluateBrowser, executeSearchUi, executeExpandUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
 import { BROWSER_PERFORMANCE_SAMPLE } from '../src/browser-performance.ts';
 import { currentPlatformBackend } from '../src/platform/index.ts';
 
@@ -264,6 +264,30 @@ try {
   await assert.rejects(()=>tool(executeAct,{stateId:projectionBase.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
   const included=await tool(executeEvaluateBrowser,{stateId:projected.details.stateId,expression:'1'});
   assert(included.details.outline);assert.equal(included.details.outlineIncluded,true,'default keeps the complete response contract');
+  axNodes=[
+    {nodeId:'local-root',role:{value:'RootWebArea'},childIds:['local-nav','outside']},
+    {nodeId:'local-nav',parentId:'local-root',role:{value:'navigation'},name:{value:'Contents'},childIds:['local-button']},
+    {nodeId:'local-button',parentId:'local-nav',role:{value:'button'},name:{value:'Toggle Features subsection'},backendDOMNodeId:78},
+    {nodeId:'outside',parentId:'local-root',role:{value:'button'},name:{value:'Unrelated'},backendDOMNodeId:79}
+  ];
+  const localBase=await tool(executeObserve,{root,mode:'semantic'});
+  const localSearch=await tool(executeSearchUi,{stateId:localBase.details.stateId,role:'navigation',text:'Contents'});
+  const navRef=localSearch.details.matches[0].ref;
+  const cachedStart=calls.length;
+  await assert.rejects(()=>tool(executeExpandUi,{stateId:localBase.details.stateId,ref:navRef,includeSubtree:'yes'}),/must be boolean/);
+  const structured=await tool(executeExpandUi,{stateId:localBase.details.stateId,ref:navRef,depth:8,includeSubtree:true});
+  assert.equal(structured.details.subtree.root.ref,navRef);
+  assert.equal(structured.details.subtree.root.children[0].title,'Toggle Features subsection');
+  assert.equal(structured.details.subtree.truncated,false);
+  assert.equal(structured.details.renderedOutline,undefined);
+  assert(!JSON.stringify(structured.details.subtree).includes('Unrelated'));
+  assert.equal(calls.length,cachedStart,'structured expansion uses the saved snapshot without CDP collection or input');
+  const legacy=await tool(executeExpandUi,{stateId:localBase.details.stateId,ref:navRef,depth:8});
+  assert.equal(legacy.details.subtree,undefined);assert.equal(typeof legacy.details.renderedOutline,'string');
+  await assert.rejects(()=>tool(executeExpandUi,{stateId:included.details.stateId,ref:navRef,includeSubtree:true}),/not available/i);
+  const refusedInputStart=calls.length;
+  await assert.rejects(()=>tool(executeAct,{stateId:projectionBase.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
+  assert.equal(calls.slice(refusedInputStart).filter(c=>c.method.startsWith('Input.')).length,0,'stale input remains refused without dispatch');
   console.log('Browser observe executor integration checks passed');
 } finally {
   await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);

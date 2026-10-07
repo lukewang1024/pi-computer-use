@@ -550,6 +550,41 @@ export function serializeOutlineNodeShallow(node: OutlineNode): SerializedOutlin
 	return { ...rest, children: [] };
 }
 
+export interface SerializedOutlineSubtree {
+	root: SerializedOutlineNode;
+	nodeCount: number;
+	maxDepth: number;
+	maxNodes: number;
+	truncated: boolean;
+}
+
+/** Copy cached hierarchy without parent pointers or mutating actionable nodes. */
+export function serializeOutlineSubtree(node: OutlineNode, maxDepth = 3, maxNodes = 500): SerializedOutlineSubtree {
+	if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 8 || !Number.isInteger(maxNodes) || maxNodes < 1 || maxNodes > 500) {
+		throw new Error("Structured subtree budgets must be depth 1..8 and nodes 1..500.");
+	}
+	let nodeCount = 0;
+	let truncated = false;
+	const seen = new Set<OutlineNode>();
+	const copy = (current: OutlineNode, depth: number): SerializedOutlineNode => {
+		const result = serializeOutlineNodeShallow(current);
+		nodeCount++;
+		if (current.truncated) truncated = true;
+		if (seen.has(current) || (depth >= maxDepth && current.children.length > 0)) {
+			result.truncated = truncated = true;
+			return result;
+		}
+		seen.add(current);
+		for (const child of current.children) {
+			if (nodeCount >= maxNodes) { result.truncated = truncated = true; break; }
+			result.children.push(copy(child, depth + 1));
+		}
+		return result;
+	};
+	const root = copy(node, 0);
+	return { root, nodeCount, maxDepth, maxNodes, truncated };
+}
+
 export function restoreOutline(serialized: SerializedOutline): Outline {
 	const nodes: OutlineNode[] = [];
 	const refToWireRef = new Map<string, string>();

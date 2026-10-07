@@ -704,3 +704,29 @@ export function graftScopedOutline(outline: Outline, targetRef: string, scoped: 
 	rebuildIndexes(outline);
 	return target;
 }
+
+
+export interface SerializedOutlineAncestors {
+	rootRef: string;
+	nodes: Array<{ ref: string; role: string; title: string }>;
+	nodeCount: number;
+	maxNodes: number;
+	truncated: boolean;
+}
+
+/** Serialize only parent identities; never infer structural scope from a display path. */
+export function serializeOutlineAncestors(node: OutlineNode, root: OutlineNode, maxNodes = 32): SerializedOutlineAncestors {
+	if (!Number.isInteger(maxNodes) || maxNodes < 1 || maxNodes > 32) throw new Error("Ancestor budget must be 1..32.");
+	const nodes: SerializedOutlineAncestors["nodes"] = [];
+	const seen = new Set<OutlineNode>([node]);
+	let current = node.parent;
+	let reachedRoot = node === root;
+	while (current && nodes.length < maxNodes && !seen.has(current)) {
+		seen.add(current);
+		nodes.push({ ref: current.ref, role: current.role, title: current.title });
+		if (current === root) { reachedRoot = true; break; }
+		current = current.parent;
+	}
+	nodes.reverse();
+	return { rootRef: root.ref, nodes, nodeCount: nodes.length, maxNodes, truncated: !reachedRoot };
+}

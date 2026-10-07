@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
-import { executeFind, executeNavigateBrowser, executeEvaluateBrowser, executeSearchUi, executeExpandUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
+import { executeFind, executeNavigateBrowser, executeEvaluateBrowser, executeSearchUi, executeExpandUi,executeInspectUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
 import { BROWSER_PERFORMANCE_SAMPLE } from '../src/browser-performance.ts';
 import { currentPlatformBackend } from '../src/platform/index.ts';
 
@@ -282,6 +282,17 @@ try {
   assert.equal(structured.details.renderedOutline,undefined);
   assert(!JSON.stringify(structured.details.subtree).includes('Unrelated'));
   assert.equal(calls.length,cachedStart,'structured expansion uses the saved snapshot without CDP collection or input');
+  const targetRef=structured.details.subtree.root.children[0].ref;
+  await assert.rejects(()=>tool(executeInspectUi,{stateId:localBase.details.stateId,ref:targetRef,includeAncestors:'yes'}),/must be boolean/);
+  const inspect=await tool(executeInspectUi,{stateId:localBase.details.stateId,ref:targetRef,includeAncestors:true});
+  assert.equal(inspect.details.stateId,localBase.details.stateId);
+  assert.equal(inspect.details.ancestors.truncated,false);
+  assert.equal(inspect.details.ancestors.nodes.at(-1).ref,navRef);
+  assert.equal(inspect.details.ancestors.nodes.at(-1).title,'Contents');
+  assert.equal(inspect.details.target.ref,targetRef);
+  assert.equal(calls.length,cachedStart,'structured ancestors issue no CDP collection or input');
+  const ordinaryInspect=await tool(executeInspectUi,{stateId:localBase.details.stateId,ref:targetRef});
+  assert.equal(ordinaryInspect.details.ancestors,undefined,'default inspection remains unchanged');
   const legacy=await tool(executeExpandUi,{stateId:localBase.details.stateId,ref:navRef,depth:8});
   assert.equal(legacy.details.subtree,undefined);assert.equal(typeof legacy.details.renderedOutline,'string');
   await assert.rejects(()=>tool(executeExpandUi,{stateId:included.details.stateId,ref:navRef,includeSubtree:true}),/not available/i);

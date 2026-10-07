@@ -186,7 +186,7 @@ const evaluateBrowserTool = defineTool({
 	description: "Evaluate targeted JavaScript in a CDP browser-page state; returned output is strictly bounded.",
 	promptSnippet: "Prefer observe/search/read; return selected fields, aggregates, or bounded slices. Evaluation returns a new state: use its outline or search again before acting.",
 	promptGuidelines: ["Browser @e refs are unique to each observation. Old refs are rejected against the returned stateId; obtain action refs from its outline or search again.", "After a failed browser write, observe_ui again before checking results; do not replay the input."],
-	parameters: Type.Object({ stateId, expression: Type.String({ maxLength: 65_536 }) }),
+	parameters: Type.Object({ stateId, expression: Type.String({ maxLength: 65_536 }), includeOutline: Type.Optional(Type.Boolean({ description: "Default true. Set false when only the evaluation value is needed. The full successor state is still refreshed and retained; use search_ui on the returned state before acting." })) }),
 	execute: executeEvaluateBrowser,
 });
 

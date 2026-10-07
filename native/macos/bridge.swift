@@ -1364,7 +1364,7 @@ final class Bridge {
 		let windows = Array(axElementArray(appElement, attribute: kAXWindowsAttribute as CFString).prefix(128))
 		let focusedWindow = copyAttribute(appElement, attribute: kAXFocusedWindowAttribute as CFString).flatMap(asAXElement)
 		let candidates = cgWindowCandidates(pid: pid, entries: cgEntries, includeFloating: true)
-		let pairings = windowPairings(windows: windows, candidates: candidates)
+		let pairings = windowPairings(windows: windows, candidates: candidates, pid: pid)
 
 		var output: [[String: Any]] = []
 		for (zIndex, window) in windows.enumerated() {
@@ -2987,7 +2987,7 @@ final class Bridge {
 					let windows = Array(axElementArray(app, attribute: kAXWindowsAttribute as CFString).prefix(128))
 					let matches = windows.filter { sameElement($0, stored) }
 					guard matches.count == 1 else { return nil }
-					let pairings = windowPairings(windows: windows, candidates: cgWindowCandidates(pid: pid, includeFloating: true))
+					let pairings = windowPairings(windows: windows, candidates: cgWindowCandidates(pid: pid, includeFloating: true), pid: pid)
 					guard pairings[ObjectIdentifier(matches[0])]?.candidate?.windowId == windowId else { return nil }
 					return matches[0]
 				}
@@ -3003,7 +3003,7 @@ final class Bridge {
 			return windows.first
 		}
 		let candidates = cgWindowCandidates(pid: pid, includeFloating: true)
-		let pairings = windowPairings(windows: windows, candidates: candidates)
+		let pairings = windowPairings(windows: windows, candidates: candidates, pid: pid)
 		for window in windows {
 			if pairings[ObjectIdentifier(window)]?.candidate?.windowId == windowId {
 				return window
@@ -3636,10 +3636,10 @@ final class Bridge {
 	}
 
 	private func pairingForWindow(_ window: AXUIElement, pid: Int32) -> WindowPairing {
-		windowPairings(windows: [window], candidates: cgWindowCandidates(pid: pid, includeFloating: true))[ObjectIdentifier(window)] ?? WindowPairing(candidate: nil, score: -Double.greatestFiniteMagnitude, confidence: "low")
+		windowPairings(windows: [window], candidates: cgWindowCandidates(pid: pid, includeFloating: true), pid: pid)[ObjectIdentifier(window)] ?? WindowPairing(candidate: nil, score: -Double.greatestFiniteMagnitude, confidence: "low")
 	}
 
-	private func windowPairings(windows: [AXUIElement], candidates: [CGWindowCandidate]) -> [ObjectIdentifier: WindowPairing] {
+	private func windowPairings(windows: [AXUIElement], candidates: [CGWindowCandidate], pid: Int32) -> [ObjectIdentifier: WindowPairing] {
 		// Office floating dialogs are not layer-zero document windows. Only a
 		// unique visible geometry match in BOTH directions can admit them;
 		// same-PID ownership, enumeration order and weighted title ranking cannot.
@@ -3659,6 +3659,35 @@ final class Bridge {
 			usedWindows.insert(key)
 			usedCandidateIds.insert(candidate.windowId)
 		}
+		let floatingIds = Set(candidates.filter { $0.layer != 0 && $0.isOnscreen && !usedCandidateIds.contains($0.windowId) }.map { $0.windowId })
+		if !floatingIds.isEmpty {
+	        // Some native floating windows declare AXStandardWindow rather than a
+	        // dialog subrole. Keep the exact PID and use the same strict geometry /
+	        // compatible-title proof as foreground mapping, in BOTH directions.
+	        // A layer-zero title-ranked neighbor cannot stand in for this window.
+	        let snapshots = windows.enumerated().map { index, window in
+	            FocusedAXNodeSnapshot(token: "window-\(index)", frame: strictFrameForWindow(window),
+	                title: stringAttribute(window, attribute: kAXTitleAttribute as CFString), isSheet: false)
+	        }
+	        let cgSnapshots = candidates.map {
+	            FocusedCGCandidateSnapshot(windowId: $0.windowId, ownerPid: pid,
+	                frame: $0.bounds, title: $0.title, isOnscreen: $0.isOnscreen)
+	        }
+	        let standardPairs = uniqueVisibleWindowPairs(axNodes: snapshots,
+	            candidates: cgSnapshots, targetPid: pid, eligibleIds: floatingIds)
+	        for (index, window) in windows.enumerated() {
+	            let key = ObjectIdentifier(window)
+	            guard !usedWindows.contains(key),
+	                stringAttribute(window, attribute: kAXRoleAttribute as CFString) == "AXWindow",
+	                stringAttribute(window, attribute: kAXSubroleAttribute as CFString) == "AXStandardWindow",
+	                let id = standardPairs["window-\(index)"], !usedCandidateIds.contains(id),
+	                let candidate = candidates.first(where: { $0.windowId == id }) else { continue }
+	            output[key] = WindowPairing(candidate: candidate, score: 120, confidence: "high")
+	            usedWindows.insert(key)
+	            usedCandidateIds.insert(id)
+	        }
+		}
+
 		var pairs: [(window: AXUIElement, candidate: CGWindowCandidate, score: Double)] = []
 		for window in windows {
 			let title = stringAttribute(window, attribute: kAXTitleAttribute as CFString) ?? ""

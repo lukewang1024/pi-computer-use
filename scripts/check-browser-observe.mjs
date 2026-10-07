@@ -110,6 +110,28 @@ try {
   await assert.rejects(()=>tool(executeAct,{stateId:semantic.details.stateId,actions:[{action:'press',ref:'@e999999'}]}),/requires an actionable @e ref owned by/);
   await assert.rejects(()=>tool(executeAct,{stateId:semantic.details.stateId,actions:[{action:'keypress',ref:semantic.details.outline.root.ref,keys:['Enter']}]}),/requires an actionable @e ref owned by/);
   await assert.rejects(()=>tool(executeAct,{stateId:'missing-state',actions:[{action:'click',x:1,y:1}]}),/unavailable or was evicted/);
+  {
+    const priorNodes=axNodes;
+    axNodes=[{nodeId:'receipt-heading',role:{value:'heading'},name:{value:'Bounded Ready'},backendDOMNodeId:900},
+      ...Array.from({length:40},(_,i)=>({nodeId:'bulk-'+i,role:{value:'button'},name:{value:'Bulk '+i+' '+ 'x'.repeat(400)},backendDOMNodeId:1000+i}))];
+    const beforeCompact=calls.length;
+    const compact=await tool(executeWaitFor,{stateId:semantic.details.stateId,text:'Bounded Ready',role:'heading',timeoutMs:1,includeOutline:false});
+    assert.equal(compact.details.found,true);assert.equal(compact.details.view,'condition');
+    assert.equal(compact.details.outline,undefined);assert.equal(compact.details.renderedOutline,undefined);
+    assert.equal(compact.details.changes,undefined);assert.equal(compact.details.diagnostics,undefined);
+    assert(compact.details.stateId);assert.equal(compact.details.baseStateId,semantic.details.stateId);
+    assert(Buffer.byteLength(JSON.stringify(compact))<1200,'large UI must not be copied into compact receipt');
+    assert.equal(calls.slice(beforeCompact).filter(c=>c.method==='Accessibility.getFullAXTree').length,1);
+    assert.equal(calls.slice(beforeCompact).some(c=>c.method.startsWith('Input.')||c.method==='Page.navigate'||c.method==='Page.captureScreenshot'),false);
+    const searched=await tool(executeSearchUi,{stateId:compact.details.stateId,text:'Bounded Ready',role:'heading'});
+    assert.equal(searched.details.matches.length,1,'fresh cached state remains queryable');
+    const invalidBefore=calls.length;
+    await assert.rejects(tool(executeWaitFor,{stateId:compact.details.stateId,text:'Bounded Ready',includeOutline:'false'}),/boolean/);
+    assert.equal(calls.length,invalidBefore,'invalid compact option issues no remote request');
+    const timeout=await tool(executeWaitFor,{stateId:compact.details.stateId,text:'Never present',timeoutMs:1,includeOutline:false});
+    assert.equal(timeout.details.found,false);assert.equal(timeout.details.timedOut,true);assert.equal(timeout.details.outline,undefined);
+    axNodes=priorNodes;
+  }
   const waited=await tool(executeWaitFor,{stateId:semantic.details.stateId,text:'Never present',timeoutMs:1});
   assert.equal(waited.details.found,false);
   assert.equal(waited.details.timedOut,true);

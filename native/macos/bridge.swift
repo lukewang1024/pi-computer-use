@@ -1610,7 +1610,86 @@ final class Bridge {
 		}
 		if let imagePayload { response["image"] = imagePayload }
 		if let ocrDiagnostics { response["ocrDiagnostics"] = ocrDiagnostics }
+		if boolArg(request, "focusContext") == true {
+			response["focusContext"] = focusedContext(pid: pid, window: window, outline: outline)
+		}
 		return response
+	}
+
+	// Optional synchronous read: no capture, focus mutation, or ref allocation.
+	// AXFocused on individual nodes is not the application's unique focused element.
+	private func focusedContext(pid: Int32, window: AXUIElement, outline: LookNode, budgetMs: Double = 750) -> [String: Any] {
+		let started = ProcessInfo.processInfo.systemUptime
+		let deadline = started + budgetMs / 1000
+		func expired() -> Bool { ProcessInfo.processInfo.systemUptime >= deadline }
+		func finish(_ fields: [String: Any]) -> [String: Any] {
+			var result = fields
+			if expired() { result = ["status": "budget_exceeded", "scopeVerified": false] }
+			result["readOnly"] = true
+			result["elapsedMs"] = max(0, (ProcessInfo.processInfo.systemUptime - started) * 1000)
+			return result
+		}
+		func read(_ element: AXUIElement, _ attribute: CFString) -> AnyObject? {
+			guard !expired() else { return nil }
+			guard AXUIElementSetMessagingTimeout(element, 0.05) == .success else { return nil }
+			var value: AnyObject?
+			guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+			return value
+		}
+		let app = AXUIElementCreateApplication(pid)
+		guard let focused = read(app, kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement),
+			pidForElement(focused) == pid else {
+			return finish(["status": "unavailable", "scopeVerified": false])
+		}
+		var pending = [outline]
+		var matches: [LookNode] = []
+		var visited = 0
+		while !pending.isEmpty, visited < 5000, !expired() {
+			let node = pending.removeLast()
+			visited += 1
+			if let element = node.element, sameElement(element, focused) { matches.append(node) }
+			pending.append(contentsOf: node.children)
+		}
+		if !pending.isEmpty { return finish(["status": "budget_exceeded", "scopeVerified": false]) }
+		if matches.count > 1 { return finish(["status": "ambiguous", "scopeVerified": true]) }
+		if let node = matches.first {
+			let secure = node.role == "AXSecureTextField" || node.subrole == "AXSecureTextField"
+			var result: [String: Any] = ["status": "matched", "scopeVerified": true, "wireRef": node.ref,
+				"role": node.role, "subrole": node.subrole, "isSecure": secure,
+				"canSetValue": node.canSetValue, "isTextInput": node.isTextInput]
+			if let enabled = node.isEnabled { result["isEnabled"] = enabled }
+			if !secure { result["title"] = String(node.title.prefix(256)); result["description"] = String(node.description.prefix(256)) }
+			return finish(result)
+		}
+		// A focused descendant may be absent from a bounded/scoped outline. Prove
+		// exact ownership first, but never mint a new actionable ref for it.
+		var current: AXUIElement? = focused
+		var withinWindow = false
+		for _ in 0..<20 {
+			guard let element = current, !expired() else { break }
+			if sameElement(element, window) { withinWindow = true; break }
+			current = read(element, kAXParentAttribute as CFString).flatMap(asAXElement)
+		}
+		guard withinWindow else { return finish(["status": "unavailable", "scopeVerified": false]) }
+		let role = read(focused, kAXRoleAttribute as CFString) as? String
+		let subrole = read(focused, kAXSubroleAttribute as CFString) as? String
+		var result: [String: Any] = ["status": "unobserved", "scopeVerified": true]
+		if let role { result["role"] = role; result["isTextInput"] = ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText", "AXSecureTextField"].contains(role) }
+		if let subrole { result["subrole"] = subrole }
+		if let role, let subrole {
+			let secure = role == "AXSecureTextField" || subrole == "AXSecureTextField"
+			result["isSecure"] = secure
+			if !secure {
+				if let title = read(focused, kAXTitleAttribute as CFString) as? String { result["title"] = String(title.prefix(256)) }
+				if let description = read(focused, kAXDescriptionAttribute as CFString) as? String { result["description"] = String(description.prefix(256)) }
+			}
+		}
+		if let enabled = read(focused, kAXEnabledAttribute as CFString) as? Bool { result["isEnabled"] = enabled }
+		if !expired(), AXUIElementSetMessagingTimeout(focused, 0.05) == .success {
+			var settable = DarwinBoolean(false)
+			if AXUIElementIsAttributeSettable(focused, kAXValueAttribute as CFString, &settable) == .success { result["canSetValue"] = settable.boolValue }
+		}
+		return finish(result)
 	}
 
 	private func elapsedMs(_ start: Date) -> Int {

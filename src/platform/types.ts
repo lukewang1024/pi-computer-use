@@ -166,6 +166,7 @@ export interface PlatformTarget {
 
 export interface PlatformObserveRequest {
 	target: PlatformTarget;
+	focusContext?: boolean;
 	/** Existing immutable look whose untouched refs/coordinate geometry survive a scoped refresh. */
 	baseLookId?: string;
 	readText: "auto" | "always" | "never";

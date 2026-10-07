@@ -248,6 +248,22 @@ try {
   const beforeTimeout=calls.length;
   await assert.rejects(()=>tool(executeAct,{stateId:plain.details.stateId,actions:[{action:'click',x:1,y:1}],expect:{text:'Never present',timeoutMs:1}}),/delivered but its postcondition was not satisfied/);
   assert.equal(calls.slice(beforeTimeout).filter(c=>c.method==='Input.dispatchMouseEvent').length,2,'timeout must not replay the delivered action');
+  // A projected response still advances state and retains fresh searchable refs.
+  axNodes=[{nodeId:'projection-root',role:{value:'RootWebArea'},childIds:['projection-control']},{nodeId:'projection-control',parentId:'projection-root',role:{value:'button'},name:{value:'Projection control'},backendDOMNodeId:77}];
+  const projectionBase=await tool(executeObserve,{root,mode:'semantic'});
+  const invalidStart=calls.length;
+  await assert.rejects(()=>tool(executeEvaluateBrowser,{stateId:projectionBase.details.stateId,expression:'mutation()',includeOutline:'no'}),/must be boolean/);
+  assert.equal(calls.length,invalidStart,'invalid projection must not evaluate JavaScript');
+  const projectionStart=calls.length;
+  const projected=await tool(executeEvaluateBrowser,{stateId:projectionBase.details.stateId,expression:'1',includeOutline:false});
+  assert.equal(projected.details.outline,undefined);assert.equal(projected.details.outlineIncluded,false);
+  assert.notEqual(projected.details.stateId,projectionBase.details.stateId);
+  assert.equal(calls.slice(projectionStart).filter(c=>c.method==='Accessibility.getFullAXTree').length,1);
+  const projectionMatch=await tool(executeSearchUi,{stateId:projected.details.stateId,text:'Projection control',role:'button'});
+  assert.equal(projectionMatch.details.matches.length,1,'full successor remains available for fresh grounding');
+  await assert.rejects(()=>tool(executeAct,{stateId:projectionBase.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
+  const included=await tool(executeEvaluateBrowser,{stateId:projected.details.stateId,expression:'1'});
+  assert(included.details.outline);assert.equal(included.details.outlineIncluded,true,'default keeps the complete response contract');
   console.log('Browser observe executor integration checks passed');
 } finally {
   await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);

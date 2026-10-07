@@ -194,6 +194,7 @@ mod native {
                 click(
                     x,
                     y,
+                    args,
                     request
                         .params
                         .get("button")
@@ -204,6 +205,7 @@ mod native {
             }
             "moveMouse" => {
                 let (x, y) = point.ok_or_else(|| invalid("moveMouse requires resolvedPoint"))?;
+                guard_point(args, x, y)?;
                 unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
                 ok("unknown", "coordinates", "hid")
             }
@@ -216,7 +218,7 @@ mod native {
                     .iter()
                     .map(point_value_required)
                     .collect::<Result<Vec<_>, _>>()?;
-                drag(&points)?;
+                drag(&points, args)?;
                 ok("unknown", "coordinates", "hid")
             }
             "scroll" => {
@@ -231,7 +233,7 @@ mod native {
                     .get("scrollX")
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0);
-                scroll(x, y, dx, dy)?;
+                scroll(x, y, dx, dy, args)?;
                 ok("unknown", grounding, "hid")
             }
             "typeText" => {
@@ -246,7 +248,7 @@ mod native {
             }
             "setText" => {
                 if let Some((x, y)) = point {
-                    click(x, y, "left")?;
+                    click(x, y, args, "left")?;
                 }
                 hotkey(&[VK_CONTROL], VK_A)?;
                 let text = request
@@ -360,8 +362,16 @@ mod native {
         }
     }
 
-    fn click(x: i32, y: i32, button: &str) -> Result<(), ProtocolError> {
+    fn guard_point(args: &Value, x: i32, y: i32) -> Result<(), ProtocolError> {
+        let hwnd = args["pointerGuard"]["hwnd"].as_i64().ok_or_else(|| invalid("Pointer input requires an observed HWND guard"))?;
+        let pid = args["pointerGuard"]["pid"].as_u64().ok_or_else(|| invalid("Pointer input requires an observed PID guard"))?;
+        crate::window::require_pointer_target(hwnd as isize, pid, x, y)
+    }
+
+    fn click(x: i32, y: i32, args: &Value, button: &str) -> Result<(), ProtocolError> {
+        guard_point(args, x, y)?;
         unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
+        guard_point(args, x, y)?;
         let (down, up) = match button {
             "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
             "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
@@ -370,11 +380,13 @@ mod native {
         send(&[mouse(down, 0), mouse(up, 0)])
     }
 
-    fn drag(points: &[(i32, i32)]) -> Result<(), ProtocolError> {
+    fn drag(points: &[(i32, i32)], args: &Value) -> Result<(), ProtocolError> {
         if points.len() < 2 {
             return Err(invalid("drag requires at least two points"));
         }
+        for &(x, y) in points { guard_point(args, x, y)?; }
         unsafe { SetCursorPos(points[0].0, points[0].1) }.map_err(input_failed)?;
+        guard_point(args, points[0].0, points[0].1)?;
         send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?;
         for &(x, y) in &points[1..] {
             unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
@@ -382,8 +394,10 @@ mod native {
         send(&[mouse(MOUSEEVENTF_LEFTUP, 0)])
     }
 
-    fn scroll(x: i32, y: i32, dx: f64, dy: f64) -> Result<(), ProtocolError> {
+    fn scroll(x: i32, y: i32, dx: f64, dy: f64, args: &Value) -> Result<(), ProtocolError> {
+        guard_point(args, x, y)?;
         unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
+        guard_point(args, x, y)?;
         let mut inputs = Vec::new();
         if dy != 0.0 {
             inputs.push(mouse(

@@ -611,6 +611,39 @@ pub fn ensure_foreground(hwnd: isize, expected_pid: u64) -> Result<(), ProtocolE
     }
 }
 
+#[cfg(windows)]
+unsafe fn observe_pointer_hit(x: i32, y: i32) -> (isize, isize, u64) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
+    let hit = WindowFromPoint(POINT { x, y });
+    let root = GetAncestor(hit, GA_ROOT);
+    let mut pid = 0;
+    GetWindowThreadProcessId(root, Some(&mut pid));
+    (hit.0 as isize, root.0 as isize, u64::from(pid))
+}
+
+/// A foreground window can still be covered by another top-level window,
+/// including a same-process owned popup. Child controls of the exact target
+/// are allowed; PID or owner-chain equality alone never authorizes a click.
+pub fn require_pointer_target(hwnd: isize, expected_pid: u64, x: i32, y: i32) -> Result<(), ProtocolError> {
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, expected_pid, x, y);
+        Err(ProtocolError::new("Pointer hit testing requires Windows", ErrorCode::UnsupportedPlatform))
+    }
+    #[cfg(windows)]
+    unsafe {
+        require_foreground(hwnd, expected_pid)?;
+        let (hit, root, hit_pid) = observe_pointer_hit(x, y);
+        if hit == 0 || root != hwnd || hit_pid != expected_pid {
+            return Err(ProtocolError::new(format!(
+                "Pointer target is occluded; physical input was not sent: targetHwnd={hwnd}; targetPid={expected_pid}; point=({x},{y}); hitHwnd={}; hitRootHwnd={}; hitPid={hit_pid}", hit, root), ErrorCode::OccludedTarget));
+        }
+        // Re-observe foreground after the hit test; never activate the hit window.
+        require_foreground(hwnd, expected_pid)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -620,6 +653,30 @@ mod unit_tests {
     use super::*;
     #[cfg(not(windows))]
     use crate::error::ErrorCode;
+
+    #[cfg(windows)]
+    #[test]
+    fn pointer_hit_keeps_child_controls_but_distinguishes_same_process_overlay() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let target = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, w!("BUTTON"), w!("CU pointer test"), WS_POPUP | WS_VISIBLE,
+                100, 100, 120, 120, None, None, None, None).unwrap();
+            let child = CreateWindowExW(WINDOW_EX_STYLE(0), w!("BUTTON"), w!("child"), WS_CHILD | WS_VISIBLE,
+                10, 10, 60, 60, target, None, None, None).unwrap();
+            let (hit, root, pid) = observe_pointer_hit(120, 120);
+            assert_eq!(hit, child.0 as isize);
+            assert_eq!(root, target.0 as isize);
+            let overlay = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, w!("BUTTON"), w!("same PID popup"), WS_POPUP | WS_VISIBLE,
+                110, 110, 80, 80, None, None, None, None).unwrap();
+            let (_, covered_root, covered_pid) = observe_pointer_hit(120, 120);
+            assert_eq!(covered_pid, pid);
+            assert_eq!(covered_root, overlay.0 as isize);
+            assert_ne!(covered_root, target.0 as isize);
+            DestroyWindow(overlay).unwrap();
+            DestroyWindow(target).unwrap();
+        }
+    }
 
     #[test]
     fn excludes_office_border_hwnds_without_excluding_document_or_helper_windows() {

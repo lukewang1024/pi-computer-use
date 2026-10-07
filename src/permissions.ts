@@ -20,6 +20,8 @@ export interface PermissionStatus {
 	accessibility: boolean;
 	screenRecording: boolean;
 	screenRecordingPreflight?: boolean;
+	// Basic permission status does not prove direct ScreenCaptureKit consent.
+	captureReadiness?: "not-probed";
 	source?: PermissionSource;
 }
 
@@ -91,7 +93,10 @@ export async function requestPermissions(
 	signal?: AbortSignal,
 ): Promise<PermissionStatus> {
 	let status = await bridge.checkPermissions(signal);
-	if (allGranted(status, bridge.kinds)) {
+	// An explicit interactive permission workflow may offer a direct-capture
+	// request even when basic grants are present. Never probe merely to decide.
+	if (allGranted(status, bridge.kinds)
+		&& (status.captureReadiness !== "not-probed" || !ctx.hasUI)) {
 		if (ctx.hasUI) ctx.ui.notify(bridge.copy.readyMessage, "info");
 		return status;
 	}

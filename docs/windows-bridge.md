@@ -139,3 +139,12 @@ omitted nodes still participate in bounded ancestry marking. Diagnostic
 elapsed time. `rawTruncated` remains true whenever the original tree is incomplete.
 The change adds observable semantic refs; it does not loosen live element
 identity, exact-window focus, stale-reference or physical-input checks.
+
+
+Coordinate pointer input now checks `WindowFromPoint` and its exact `GA_ROOT`
+after activation and immediately before mouse-button or wheel dispatch. Child
+controls belonging to the observed HWND are allowed; a same-process floating
+window or an owned popup is still an occluder. Failure reports the target HWND,
+PID, point and hit HWND/root/PID without sending button or wheel input. Drag
+paths are checked before their first button-down. These checks reduce the
+foreground-to-pointer race; they do not make OS input dispatch atomic.

@@ -871,6 +871,7 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
             }
             let mut executable = args.clone();
             executable["resolvedPoint"] = json!(screen_point(&record, *x, *y));
+            executable["pointerGuard"] = json!({"hwnd": record.hwnd, "pid": record.pid});
             if parsed.action == "drag" {
                 if let Some(path) = parsed.params.get("path").and_then(Value::as_array) {
                     executable["resolvedPath"] = Value::Array(
@@ -1219,6 +1220,7 @@ fn coordinate_fallback(
         }
         let mut executable = args.clone();
         executable["resolvedPoint"] = json!({ "x": x, "y": y });
+        executable["pointerGuard"] = json!({"hwnd": element.hwnd, "pid": expected_pid});
         input::act(&executable)
     })
 }

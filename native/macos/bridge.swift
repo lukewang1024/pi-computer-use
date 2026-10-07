@@ -919,29 +919,21 @@ final class Bridge {
 	}
 
 	private func checkPermissions() -> [String: Any] {
-		permissionProbe.read(cacheWhen: { status in
-			status["accessibility"] as? Bool == true && status["screenRecordingCapturable"] as? Bool == true
-		}) {
-			let accessibility = AXIsProcessTrusted()
-			let screenRecordingPreflight: Bool
-			if #available(macOS 10.15, *) {
-				screenRecordingPreflight = CGPreflightScreenCaptureAccess()
-			} else {
-				screenRecordingPreflight = true
-			}
-			let capturable = screenRecordingCapturable()
-			let result: [String: Any] = [
-				"accessibility": accessibility,
-				// The live probe is authoritative; the preflight boolean is kept
-				// for diagnostics (a true/false split identifies a stale cache or
-				// a grant belonging to a different responsible process).
-				"screenRecording": capturable,
-				"screenRecordingPreflight": screenRecordingPreflight,
-				"screenRecordingCapturable": capturable,
-				"source": permissionSource(),
-			]
-			return result
+		// Read-only status must not enumerate ScreenCaptureKit content: that
+		// operation may request separate direct-capture consent on recent macOS.
+		let preflight: Bool
+		if #available(macOS 10.15, *) {
+			preflight = CGPreflightScreenCaptureAccess()
+		} else {
+			preflight = true
 		}
+		return [
+			"accessibility": AXIsProcessTrusted(),
+			"screenRecording": preflight,
+			"screenRecordingPreflight": preflight,
+			"captureReadiness": "not-probed",
+			"source": permissionSource(),
+		]
 	}
 
 	/// Register this process's identity with TCC for both grants so the app

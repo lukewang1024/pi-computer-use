@@ -13,7 +13,7 @@ import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outco
 import { validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
-import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
+import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type FocusWindowParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
@@ -296,6 +296,7 @@ interface OutlineToolDetails {
 	hasMore?: boolean;
 	matches?: SerializedOutlineSearchMatch[];
 	target?: SerializedOutlineNode;
+	subtree?: SerializedOutlineSubtree;
 	note?: WindowNote;
 }
 
@@ -2072,6 +2073,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 
 /** Reads cached outline; truncated refs trigger a scoped look. */
 async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
+	if (params.includeSubtree !== undefined && typeof params.includeSubtree !== "boolean") throw new Error("expand_ui.includeSubtree must be boolean.");
 	const state = operationState();
 	let outline = currentOutlineOrThrow(params.stateId);
 	const ref = trimOrUndefined(params.ref);
@@ -2098,6 +2100,12 @@ async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Pr
 		state.currentOutline = outline;
 		state.currentLook = { ...scoped, image: state.currentLook?.image, outline: outline.root, parsedOutline: outline };
 		persistOperation(state);
+	}
+	if (params.includeSubtree === true) {
+		const subtree = serializeOutlineSubtree(target, depth);
+		const details: OutlineToolDetails = { tool: "expand_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId,
+			target: serializeOutlineNodeShallow(target), subtree, note: state.currentNote };
+		return { content: [{ type: "text", text: `${formatOutlineNodeLabel(target)}\nStructured subtree: ${subtree.nodeCount} nodes${subtree.truncated ? " (truncated; inspect omitted regions before grounding)" : ""}. State ${outline.lookId}.` }], details };
 	}
 	const folded = foldToBudget(outline, { maxDepth: depth, maxNodes: 150 }, [target.ref]);
 	const details: OutlineToolDetails = { tool: "expand_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, target: serializeOutlineNodeShallow(target), renderedOutline: folded.text, note: state.currentNote };

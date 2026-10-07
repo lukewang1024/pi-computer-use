@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {changesBetween} from '../src/view.ts';
-import {parseLookResponse, graftScopedOutline, nodeByRef, serializeOutline, restoreOutline, searchOutline} from '../src/outline.ts';
+import {parseLookResponse, graftScopedOutline, nodeByRef, serializeOutline, restoreOutline, searchOutline, serializeOutlineSubtree} from '../src/outline.ts';
 const node=(ref,title,children=[],truncated=false)=>({ref,title,role:'AXGroup',children,truncated});
 const outline=root=>parseLookResponse({lookId:'test',outline:root,window:{}}).parsedOutline;
 const full=outline(node('window','Window',[node('pane','Document Pane',[node('old-body','Page 1 content')]),node('save','Save')]));
@@ -60,3 +60,30 @@ assert.equal(leafDiff.changedNodeCount,1);
 assert.equal(leafDiff.changes[0].fields.value,'Changed leaf');
 assert.equal(leafDiff.changes[0].ref,deepB.nodes.at(-1).ref);
 console.log('PASS deep-tree comparison has bounded child reads and preserves leaf evidence');
+
+// A structured disclosure must preserve hierarchy and refs without changing the
+// cached actionable graph; budget frontiers must never look complete.
+const local=outline(node('root','Outside',[node('nav','Contents',[node('button','Toggle Features'),node('links','Links',[node('link','Features')])]),node('unrelated','Unrelated')]));
+const nav=local.nodes.find(n=>n.wireRef==='nav');
+const before=JSON.stringify(serializeOutline(local));
+const complete=serializeOutlineSubtree(nav,8);
+assert.equal(complete.nodeCount,4);
+assert.equal(complete.truncated,false);
+assert.equal(complete.root.children[1].children[0].ref,local.nodes.find(n=>n.wireRef==='link').ref);
+assert.ok(!JSON.stringify(complete).includes('Unrelated'));
+assert.equal(JSON.stringify(serializeOutline(local)),before);
+const depthLimited=serializeOutlineSubtree(nav,1);
+assert.equal(depthLimited.truncated,true);
+assert.equal(depthLimited.root.children[1].truncated,true);
+const sizeLimited=serializeOutlineSubtree(nav,8,2);
+assert.equal(sizeLimited.nodeCount,2);
+assert.equal(sizeLimited.root.truncated,true);
+const partial=outline(node('partial','Partial',[],true));
+assert.equal(serializeOutlineSubtree(partial.root).truncated,true);
+for(const depth of [0,9,1.5])assert.throws(()=>serializeOutlineSubtree(nav,depth));
+for(const size of [0,501,1.5])assert.throws(()=>serializeOutlineSubtree(nav,3,size));
+const cycle=outline(node('cycle','Cycle'));
+cycle.root.children.push(cycle.root);
+assert.equal(serializeOutlineSubtree(cycle.root,8).truncated,true);
+assert.equal(cycle.root.truncated,false);
+console.log('PASS structured subtree ancestry, stable refs, nonmutation, depth/node budgets, partial and cyclic frontiers');

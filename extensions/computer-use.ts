@@ -116,7 +116,7 @@ const expandUiTool = defineTool({
 	label: "Expand UI",
 	description: "Unfold bounded local outline context for one @e ref.",
 	promptSnippet: "Expand a specific ref instead of dumping unrelated UI.",
-	parameters: Type.Object({ ref: Type.String(), depth: Type.Optional(Type.Number({ minimum: 1, maximum: 8, description: "Subtree depth, default 3" })), stateId }),
+	parameters: Type.Object({ ref: Type.String(), includeSubtree: Type.Optional(Type.Boolean({ description: "Return at most 500 structured subtree nodes; omit repeated rendered context. Check subtree.truncated before grounding." })), depth: Type.Optional(Type.Number({ minimum: 1, maximum: 8, description: "Subtree depth, default 3" })), stateId }),
 	execute: executeExpandUi,
 });
 

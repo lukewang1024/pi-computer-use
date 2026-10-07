@@ -175,6 +175,28 @@ private struct ForegroundGateTests {
 		precondition(bound(candidates: [FocusedCGCandidateSnapshot(windowId: target.windowId + 1, ownerPid: target.pid, frame: boundFrame, title: "Owned", isOnscreen: true)])?.selectedWindowId == nil)
 		precondition(bound(candidates: [FocusedCGCandidateSnapshot(windowId: target.windowId, ownerPid: 888, frame: boundFrame, title: "Owned", isOnscreen: true)])?.selectedWindowId == nil)
 		precondition(bound(candidates: [FocusedCGCandidateSnapshot(windowId: target.windowId, ownerPid: target.pid, frame: boundFrame, title: "Owned", isOnscreen: false)])?.selectedWindowId == nil)
+        let ax = FocusedAXNodeSnapshot(token: "floating", frame: boundFrame, title: "Find and Replace", isSheet: false)
+        let cg = FocusedCGCandidateSnapshot(windowId: 20390, ownerPid: target.pid,
+            frame: boundFrame, title: nil, isOnscreen: true)
+        func pairs(_ nodes: [FocusedAXNodeSnapshot] = [ax], _ candidates: [FocusedCGCandidateSnapshot] = [cg],
+                   ids: Set<UInt32> = [20390]) -> [String: UInt32] {
+            uniqueVisibleWindowPairs(axNodes: nodes, candidates: candidates, targetPid: target.pid, eligibleIds: ids)
+        }
+        precondition(pairs() == ["floating": 20390], "missing CG title requires unique geometry, not a nearby title-ranked window")
+        precondition(pairs(ids: []).isEmpty)
+        precondition(pairs([ax, FocusedAXNodeSnapshot(token: "duplicate", frame: boundFrame, title: ax.title, isSheet: false)]).isEmpty)
+        precondition(pairs([ax, ax]).isEmpty)
+        precondition(pairs([ax], [cg, cg]).isEmpty)
+        precondition(pairs([ax], [cg, FocusedCGCandidateSnapshot(windowId: 19152, ownerPid: target.pid, frame: boundFrame, title: nil, isOnscreen: true)]).isEmpty,
+            "a noneligible neighbor still makes the geometry ambiguous")
+        for other in [
+            FocusedCGCandidateSnapshot(windowId: 20390, ownerPid: 888, frame: boundFrame, title: nil, isOnscreen: true),
+            FocusedCGCandidateSnapshot(windowId: 20390, ownerPid: target.pid, frame: boundFrame, title: nil, isOnscreen: false),
+            FocusedCGCandidateSnapshot(windowId: 20390, ownerPid: target.pid, frame: boundFrame, title: "Other", isOnscreen: true),
+            FocusedCGCandidateSnapshot(windowId: 20390, ownerPid: target.pid, frame: nil, title: nil, isOnscreen: true),
+            FocusedCGCandidateSnapshot(windowId: 20390, ownerPid: target.pid, frame: CGRect(origin: CGPoint(x: 103, y: 100), size: CGSize(width: 800, height: 600)), title: nil, isOnscreen: true)
+        ] { precondition(pairs([ax], [other]).isEmpty) }
+
 		print("native foreground gate tests passed")
 	}
 }

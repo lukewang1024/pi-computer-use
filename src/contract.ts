@@ -65,6 +65,8 @@ export interface ExpandUiParams extends StateTargetParams {
 }
 
 export interface InspectUiParams extends StateTargetParams {
+	/** Include the cached structural ancestor chain, capped at 32 nodes. */
+	includeAncestors?: boolean;
 	ref: string;
 }
 

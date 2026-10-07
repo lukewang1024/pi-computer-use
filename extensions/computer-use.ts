@@ -157,7 +157,7 @@ const waitForTool = defineTool({
 	label: "Wait For",
 	description: "Wait for one scoped UI condition and return the successor state.",
 	promptSnippet: "Use after asynchronous UI changes instead of polling observe_ui.",
-	parameters: Type.Object({ ...conditionProperties, stateId }),
+	parameters: Type.Object({ ...conditionProperties, stateId, includeOutline: Type.Optional(Type.Boolean({ description: "Browser roots only: false returns a compact condition receipt without an outline or image. It retains a fresh state for search_ui; old element refs remain stale. Default true." })) }),
 	execute: executeWaitFor,
 });
 

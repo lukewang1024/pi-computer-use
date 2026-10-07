@@ -269,7 +269,7 @@ interface WaitForDetails {
 	tool: "wait_for";
 	stateId: string;
 	baseStateId?: string;
-	view: "full" | "diff";
+	view: "full" | "diff" | "condition";
 	changes?: OutlineChange[];
 	found: boolean;
 	gone?: boolean;
@@ -280,8 +280,8 @@ interface WaitForDetails {
 	role?: string;
 	value?: string;
 	scopeRef?: string;
-	outline: SerializedOutline;
-	renderedOutline: string;
+	outline?: SerializedOutline;
+	renderedOutline?: string;
 }
 
 interface OutlineToolDetails {
@@ -1784,6 +1784,8 @@ function conditionScopeNode(outline: Outline, condition: ReturnType<typeof valid
 
 async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Promise<AgentToolResult<WaitForDetails>> {
 	const contextId = operationState().contextId;
+	if (params.includeOutline !== undefined && typeof params.includeOutline !== "boolean") throw new Error("includeOutline must be a boolean.");
+	if (params.includeOutline === false && !isBrowserContextId(contextId)) throw new Error("Compact condition receipts require a browser root; no native wait was submitted.");
 	const condition = validateCondition(params);
 	const { text, role, value, scopeRef, scopeExact, gone, timeoutMs } = condition;
 
@@ -1799,6 +1801,13 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 		const finish = (found: boolean, timedOut?: boolean): AgentToolResult<WaitForDetails> => {
 			if (!lastSnapshot) throw new Error("Browser wait completed without an observation.");
 			savedStates.set({ stateId: lastSnapshot.snapshotId, resourceKey: state.resourceKey!, epoch: lastEpoch, value: { kind: "browser", snapshot: lastSnapshot, outline: lastSnapshot.outline } });
+			if (params.includeOutline === false) {
+				const details: WaitForDetails = { tool: "wait_for", stateId: lastSnapshot.snapshotId,
+					baseStateId: baseSnapshot.snapshotId, view: "condition", found, gone: found && gone || undefined,
+					timedOut, nodeCount: lastSnapshot.targets.length, text, role, value, scopeRef };
+				const message = found ? (gone ? "Condition disappeared." : "Condition appeared.") : `Timed out after ${timeoutMs}ms waiting for condition.`;
+				return { content: [{ type: "text", text: `${message}\nState ${lastSnapshot.snapshotId}. Search this state or observe again before using element refs.` }], details };
+			}
 			const successorOutline = restoreOutline(lastSnapshot.outline);
 			const transition = changesBetween(restoreOutline(baseSnapshot.outline), successorOutline, "wire");
 			const useDiff = !transition.useFullView;

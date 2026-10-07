@@ -1,3 +1,4 @@
+import { serializeFocusContext } from "./focus-context.ts";
 import { navigateWithPerformance, summarizeBrowserPerformance } from "./browser-performance.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { waitForBrowserStartup } from "./browser-startup.ts";
@@ -90,6 +91,7 @@ interface ExecutionTrace {
 }
 
 interface ComputerUseDetails {
+	focusContext?: ReturnType<typeof serializeFocusContext>;
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
 	observationTimings?: Record<string, number>;
 	uiaDiagnostics?: Record<string, unknown>;
@@ -1051,10 +1053,11 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean; includeElements?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean; includeElements?: boolean; focusContext?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
 	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find_roots and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
+		...(options.focusContext === true ? { focusContext: true } : {}),
 		baseLookId: options.baseLookId,
 		readText: options.readText,
 		scopeRef: options.scopeRef,
@@ -1074,13 +1077,13 @@ function noteWindowForTarget(target: ResolvedTarget | CurrentTarget, look?: Look
 	};
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean): Promise<CaptureResult> {
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean, focusContext = false): Promise<CaptureResult> {
 	const state = operationState();
 	const baseOutline = state.currentOutline;
 	const baseTarget = state.currentTarget;
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements }, signal);
+	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements, focusContext }, signal);
 	if (includeElements === false && (look.uiaDiagnostics?.status !== "skipped" || look.uiaDiagnostics?.reason !== "pixel_only_observation" || !look.image)) {
 		throw new Error("Native helper did not confirm pixel-only capture; no state was adopted.");
 	}
@@ -1145,6 +1148,7 @@ async function buildToolResult(
 			coordinateSpace: "window-relative-screenshot-pixels",
 		},
 		lookId: result.look.lookId,
+		focusContext: serializeFocusContext(result.look.focusContext, result.outline),
 		observationTimings: result.look.timings,
 		uiaDiagnostics: result.look.uiaDiagnostics,
 		ocrDiagnostics: result.look.ocrDiagnostics,
@@ -1872,9 +1876,11 @@ function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
 
 /** Side effects: captures/updates current target, capture state, look, and parsed outline. */
 async function performObserve(params: ObserveParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | BrowserObservationDetails>> {
+	if (params.focusContext !== undefined && typeof params.focusContext !== "boolean") throw new Error("focusContext must be a boolean.");
 	const requestedRoot = typeof params.root === "string" ? params.root : undefined;
 	if (requestedRoot && !/^@r\d+$/.test(requestedRoot)) throw new Error("observe_ui.root must be an exact @r ref issued by find_roots.");
 	const browserContextId = requestedRoot ? runtimeState.browserContextByRoot.get(requestedRoot) : undefined;
+	if (params.focusContext === true && (currentPlatformBackend.name !== "macos" || isBrowserContextId(browserContextId))) throw new Error("focusContext requires a macOS native root.");
 	if (params.mode === "pixels" && (currentPlatformBackend.name !== "windows" || !requestedRoot || isBrowserContextId(browserContextId))) {
 		throw new Error("mode=pixels requires an exact Windows native @r root; use visual for other roots.");
 	}
@@ -1928,7 +1934,7 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		}
 		if (imageMode !== "never" && runtimeState.helperDiagnostics?.optionalImageFailure === true) {
 			const imageStarted = performance.now();
-			const combined = await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true, true);
+			const combined = await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true, true, undefined, params.focusContext === true);
 			imageObservationMs = performance.now() - imageStarted;
 			imageError = combined.look.imageError;
 			imageCompletion = combined.look.imageDiagnostics?.nativeCompletion ?? "completed";
@@ -1936,12 +1942,12 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		}
 		// Publish real semantic evidence first; optional image failure cannot erase it.
 		const semanticStarted = performance.now();
-		const semantic = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, requestedTarget, false);
+		const semantic = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, requestedTarget, false, false, undefined, params.focusContext === true);
 		semanticObservationMs = performance.now() - semanticStarted;
 		if (imageMode === "never") return semantic;
 		const imageStarted = performance.now();
 		try {
-			return await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true);
+			return await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, true, false, undefined, params.focusContext === true);
 		} catch (error) {
 			throwIfAborted(signal);
 			imageError = (error instanceof Error ? error.message : String(error)).slice(0, 1024);

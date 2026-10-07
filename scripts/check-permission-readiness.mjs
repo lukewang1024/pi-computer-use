@@ -35,3 +35,38 @@ const controller=new AbortController();controller.abort();calls.length=0;
 await assert.rejects(()=>requestPermissions({hasUI:true,ui},bridge,'helper',controller.signal),/aborted/);
 assert(!calls.some(c=>c==='select'||c==='register'||c==='restart'||c.startsWith('open:')));
 console.log('Permission readiness regression checks passed (new coverage; no input or settings changes)');
+
+// Exercise the actual macOS result parser, including unknown direct consent.
+const {parseMacosPermissionStatus}=await import('../src/platform/macos/permission-status.ts');
+const basic=parseMacosPermissionStatus({accessibility:true,screenRecordingPreflight:true,captureReadiness:'not-probed'});
+assert.equal(basic.screenRecording,true);
+assert.equal(basic.captureReadiness,'not-probed');
+assert.equal(parseMacosPermissionStatus({accessibility:true,screenRecordingPreflight:false,captureReadiness:'not-probed'}).screenRecording,false);
+assert.equal(parseMacosPermissionStatus({screenRecordingPreflight:true,screenRecordingCapturable:false}).screenRecording,false,'legacy live failures remain failures');
+assert.equal(parseMacosPermissionStatus({screenRecordingPreflight:true,screenRecordingCapturable:true}).screenRecording,true);
+const {readFileSync}=await import('node:fs');
+const swift=readFileSync(new URL('../native/macos/bridge.swift',import.meta.url),'utf8');
+const readOnly=swift.slice(swift.indexOf('private func checkPermissions()'),swift.indexOf('private func registerPermissions()'));
+// Restrict to the method body; the explicit-grant documentation follows it.
+const body=readOnly.slice(0,readOnly.indexOf('/// Register this process'));
+assert(body.includes('CGPreflightScreenCaptureAccess()'));
+assert(body.includes('"captureReadiness": "not-probed"'));
+for(const api of ['screenRecordingCapturable()','SCShareableContent.','CGRequestScreenCaptureAccess()','AXIsProcessTrustedWithOptions(','screenRecordingProbe.read('])assert(!body.includes(api),`read-only status must not call ${api}`);
+const explicit=swift.slice(swift.indexOf('private func registerPermissions()'),swift.indexOf('private func openPermissionPane('));
+assert(explicit.includes('CGRequestScreenCaptureAccess()'));
+assert(explicit.includes('screenRecordingCapturable()'),'direct capture probe belongs to explicit grant only');
+console.log('macOS read-only permission status preserves unknown direct consent without live capture probing');
+
+status={accessibility:true,screenRecording:true,captureReadiness:'not-probed'};
+calls.length=0;choice='Cancel';
+assert.deepEqual(await ensurePermissions({hasUI:true,ui},bridge,'helper'),status);
+assert.deepEqual(calls,['check'],'unknown direct consent must not probe during readiness');
+calls.length=0;
+await requestPermissions({hasUI:true,ui},bridge,'helper');
+assert.deepEqual(calls,['check','select'],'basic grants do not silently trigger a direct capture probe');
+calls.length=0;choice='Request';
+assert.equal((await requestPermissions({hasUI:true,ui},bridge,'helper')).captureReadiness,'not-probed');
+assert.deepEqual(calls,['check','select','register','check','notify'],'probe registration requires an explicit selection');
+calls.length=0;
+assert.equal((await requestPermissions({hasUI:false},bridge,'helper')).captureReadiness,'not-probed');
+assert.deepEqual(calls,['check'],'noninteractive status must not raise direct capture consent');

@@ -45,7 +45,7 @@ server.on('upgrade', (req, socket) => {
       if(request.method==='Runtime.evaluate'){
         if(request.params.expression===BROWSER_PERFORMANCE_SAMPLE){
           if(failPerformance){socket.write(frame({id:request.id,error:{message:'metrics failed'}}));continue;}
-          result={result:{value:{navigation:{timeOriginMs:1},observation:{supported:[],entries:{}},loadWait:{complete:true}}}};
+          result={result:{value:{navigation:{timeOriginMs:1},observation:{supported:[],entries:{}},loadWait:{complete:true},documentIdentity:{consistent:true,url:"about:blank",timeOriginMs:1,title:"Owned page",heading:"Owned page"}}}};
         }else result={result:{value:request.params.expression==='window.devicePixelRatio'?2:'Visible page text'}};
       }
       if(request.method==='Page.navigate')result={frameId:'owned-frame'};
@@ -68,6 +68,24 @@ try {
   const roots=await tool(executeFind,{kind:'browser_page'});
   assert.equal(roots.details.windows.length,1);
   const root=roots.details.windows[0].windowRef;
+  {
+  await assert.rejects(tool(executeObserve,{mode:'metrics'}),/exact browser_page/);
+  const beforeMetricsOnly=calls.length;
+  const metrics=await tool(executeObserve,{root,mode:'metrics'});
+  assert.equal(metrics.details.kind,'browser_metrics');assert.equal(metrics.details.readOnly,true);
+  assert(metrics.details.performanceSample);assert.equal(metrics.details.stateId,undefined);
+  assert.equal(metrics.details.outline,undefined);assert.equal(metrics.content.some(c=>c.type==='image'),false);
+  assert(Number.isFinite(metrics.details.observationTimings.metricsReadMs));
+  const metricRequests=calls.slice(beforeMetricsOnly);
+  assert.equal(metricRequests.filter(c=>c.method==='Runtime.evaluate').length,1);
+  assert.equal(metricRequests.find(c=>c.method==='Runtime.evaluate').params.expression,BROWSER_PERFORMANCE_SAMPLE);
+  assert(!metricRequests.some(c=>c.method==='Accessibility.getFullAXTree'||c.method==='Page.captureScreenshot'||c.method==='Page.navigate'||c.method.startsWith('Input.')));
+  failPerformance=true;const beforeFailure=calls.length;
+  const failedMetrics=await tool(executeObserve,{root,mode:'metrics'});
+  assert.equal(failedMetrics.details.performanceSample,undefined);assert.equal(failedMetrics.details.performanceError.status,'unavailable');
+  assert.equal(failedMetrics.details.readOnly,true);assert.equal(calls.slice(beforeFailure).filter(c=>c.method==='Runtime.evaluate').length,1);
+  failPerformance=false;
+  }
   const semantic=await tool(executeObserve,{root,mode:'semantic'});
   assert.equal(semantic.content.some(c=>c.type==='image'),false);
   assert.equal(calls.some(c=>c.method==='Page.captureScreenshot'),false,'semantic observation must not capture');

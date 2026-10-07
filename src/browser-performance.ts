@@ -1,10 +1,11 @@
 /** Fixed, bounded measurements; never exposes arbitrary evaluation to callers. */
 export const BROWSER_PERFORMANCE_SAMPLE = String.raw`(async () => {
  const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+ const identityStart = {href:location.href,timeOrigin:performance.timeOrigin};
  const started = performance.now();
- while(document.readyState !== 'complete' && performance.now() - started < 5000)
+ while(document.readyState !== 'complete' && performance.now() - started < 3000)
    await new Promise(resolve => setTimeout(resolve, 100));
- const loadWait = {complete: document.readyState === 'complete', elapsedMs: performance.now()-started, budgetMs:5000};
+ const loadWait = {complete: document.readyState === 'complete', elapsedMs: performance.now()-started, budgetMs:3000};
  const entries={}, supported=[], observers=[], failures={};
  let truncated=false;
  const kinds=['paint','largest-contentful-paint','layout-shift','event','longtask'];
@@ -46,15 +47,42 @@ export const BROWSER_PERFORMANCE_SAMPLE = String.raw`(async () => {
    visibility:document.visibilityState,collectedAtMs:finite(performance.now()),
    collectorInstalledAfterNavigation:true,scope:'top-frame retained buffer; incomplete page lifetime'};
  const n=performance.getEntriesByType('navigation')[0];
- const navigation={url:location.origin+location.pathname,readyState:document.readyState,timeOriginMs:finite(performance.timeOrigin),
+ const navigation={url:(location.origin+location.pathname).slice(0,2048),readyState:document.readyState,timeOriginMs:finite(performance.timeOrigin),
    navigation:n?{type:typeof n.type==='string'?n.type.slice(0,32):'',durationMs:finite(n.duration),
      dnsMs:finite(n.domainLookupEnd-n.domainLookupStart),connectMs:finite(n.connectEnd-n.connectStart),
      requestToFirstByteMs:finite(n.responseStart-n.requestStart),domContentLoadedMs:finite(n.domContentLoadedEventEnd),
      loadEndMs:finite(n.loadEventEnd),transferBytes:finite(n.transferSize)}:null,
    paints:performance.getEntriesByType('paint').slice(0,64).map(p=>({name:typeof p.name==='string'?p.name.slice(0,128):'',startMs:finite(p.startTime)})),
    resourceCount:performance.getEntriesByType('resource').length};
- return {navigation,observation,loadWait};
+ const heading = document.querySelector?.('h1')?.textContent;
+ const documentIdentity={consistent:identityStart.href===location.href && identityStart.timeOrigin===performance.timeOrigin,
+   url:navigation.url,timeOriginMs:finite(performance.timeOrigin),
+   title:typeof document.title==='string'?document.title.slice(0,512):null,
+   heading:typeof heading==='string'?heading.trim().slice(0,512):null};
+ return {navigation,observation,loadWait,documentIdentity};
 })()`;
+
+export interface BrowserMetricsRead {
+	readOnly: true;
+	performanceSample?: Record<string, unknown>;
+	performanceError?: { status: "unavailable"; message: string; completion: "unconfirmed" };
+}
+
+/** Fixed read only: a failed sample never triggers navigation, input or refresh. */
+export async function readBrowserMetrics(contextId: string,
+	evaluate: (contextId: string, expression: string) => Promise<{ value: unknown } | undefined>): Promise<BrowserMetricsRead> {
+	try {
+		const result = await evaluate(contextId, BROWSER_PERFORMANCE_SAMPLE);
+		if (!result?.value || typeof result.value !== "object" || Array.isArray(result.value)) throw new Error("Structured performance sample unavailable.");
+		const sample = result.value as Record<string, unknown>;
+		const identity = sample.documentIdentity;
+		if (!identity || typeof identity !== "object" || (identity as Record<string, unknown>).consistent !== true) throw new Error("Document identity changed or could not be established during collection.");
+		return { readOnly: true, performanceSample: sample };
+	} catch (error) {
+		return { readOnly: true, performanceError: { status: "unavailable", completion: "unconfirmed",
+			message: (error instanceof Error ? error.message : String(error)).slice(0, 1024) } };
+	}
+}
 
 export interface NavigationPerformanceResult<T> {
 	observation: T;

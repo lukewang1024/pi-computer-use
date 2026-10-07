@@ -98,6 +98,25 @@ func decideFocusedMapping(
 	return FocusedMappingDecision(stage: "focused_element_unique_pairing", selectedWindowId: valid[0].windowId, candidateCount: candidates.count, validCandidateIds: [valid[0].windowId], ambiguous: false)
 }
 
+/// Resolve eligible visible window IDs without using title ranking or array order.
+/// Uniqueness is required in both directions across the supplied full inventory.
+func uniqueVisibleWindowPairs(
+    axNodes: [FocusedAXNodeSnapshot], candidates: [FocusedCGCandidateSnapshot],
+    targetPid: Int32, eligibleIds: Set<UInt32>
+) -> [String: UInt32] {
+    var proposed: [String: UInt32] = [:]
+    for node in axNodes {
+        let decision = decideFocusedMapping(focusedToken: node.token, axNodes: axNodes,
+            candidates: candidates, targetPid: targetPid)
+        if let id = decision.selectedWindowId, eligibleIds.contains(id) {
+            proposed[node.token] = id
+        }
+    }
+    var counts: [UInt32: Int] = [:]
+    for id in proposed.values { counts[id, default: 0] += 1 }
+    return proposed.filter { counts[$0.value] == 1 }
+}
+
 struct ForegroundGateReport {
 	let target: ForegroundTargetIdentity
 	let actual: ForegroundActualIdentity

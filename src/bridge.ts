@@ -248,7 +248,8 @@ interface EvaluateBrowserDetails {
 	stateId: string;
 	view: "full" | "diff";
 	changes?: OutlineChange[];
-	outline: SerializedOutline;
+	outline?: SerializedOutline;
+	outlineIncluded: boolean;
 	renderedOutline: string;
 }
 
@@ -2681,6 +2682,7 @@ async function performNavigateBrowser(params: NavigateBrowserParams): Promise<Ag
 }
 
 async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<AgentToolResult<EvaluateBrowserDetails>> {
+	if (params.includeOutline !== undefined && typeof params.includeOutline !== "boolean") throw new Error("evaluate_browser.includeOutline must be boolean.");
 	const contextId = browserContextForOperation();
 	const expression = typeof params.expression === "string" ? params.expression : "";
 	if (!contextId) throw new Error("evaluate_browser.stateId must belong to a browser observation.");
@@ -2700,7 +2702,8 @@ async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<Ag
 			stateId: successor.details.stateId,
 			view: successor.details.view,
 			changes: successor.details.changes,
-			outline: successor.details.outline,
+			outline: params.includeOutline === false ? undefined : successor.details.outline,
+			outlineIncluded: params.includeOutline !== false,
 			renderedOutline: successor.details.renderedOutline,
 		};
 		return { content: [...successor.content, { type: "text", text: `Evaluation value: ${JSON.stringify(result.value)}` }], details };

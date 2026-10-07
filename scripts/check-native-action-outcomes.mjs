@@ -151,8 +151,8 @@ try{
  summaryField=await call('search_ui',{stateId:summaryState.details.capture.stateId,text:'Field',role:'textbox'});
  summaryRef=summaryField.details.matches.find(m=>m.matchReason==='exact').ref;
  const backgroundSummary=await call('act_ui',{stateId:summaryState.details.capture.stateId,actions:[{action:'typeText',ref:summaryRef,text:'new'}],observationMode:'semantic'});
- assert.equal(backgroundSummary.details.execution.steps[0].backgroundFirst,true);
- assert.equal(backgroundSummary.details.execution.backgroundFirst,true,'Semantic background attempt stays background-first');
+ assert.equal(backgroundSummary.details.execution.steps[0].backgroundFirst,currentPlatformBackend.name!=='macos');
+ assert.equal(backgroundSummary.details.execution.backgroundFirst,currentPlatformBackend.name!=='macos','Native Mac physical typing starts in foreground');
  assert.equal(calls.length,2,'Unknown semantic effect must not be replayed');
  outcome='worked';calls=[];
  summaryState=await call('observe_ui',{root:summaryFound.details.windows[0].windowRef,mode:'visual'});
@@ -160,9 +160,25 @@ try{
  summaryRef=summaryField.details.matches.find(m=>m.matchReason==='exact').ref;
  const mixedSummary=await call('act_ui',{stateId:summaryState.details.capture.stateId,actions:[{action:'click',x:0,y:0},{action:'typeText',ref:summaryRef,text:'mixed'}],observationMode:'semantic'});
  assert.equal(mixedSummary.details.execution.steps.length,2);
- assert.deepEqual(mixedSummary.details.execution.steps.map(s=>s.backgroundFirst),[false,true]);
+ assert.deepEqual(mixedSummary.details.execution.steps.map(s=>s.backgroundFirst),[false,currentPlatformBackend.name!=='macos']);
  assert.equal(mixedSummary.details.execution.backgroundFirst,false,'Mixed summary reports its first step; later delivery stays in per-step traces');
  assert.equal(calls.length,2);
+ // Exercise the public Mac executor, not just a prepared-action flag.
+ currentPlatformBackend.name='macos';
+ for (const refusedOrUnknown of ['didnt','unknown']) {
+ for (const action of [{action:'typeText',text:'mac-native'},{action:'keypress',keys:['cmd','a']}]) {
+  outcome=refusedOrUnknown;calls=[];
+  const found=await call('find_roots',{text:root.title});
+  const state=await call('observe_ui',{root:found.details.windows[0].windowRef,mode:'semantic'});
+  const field=await call('search_ui',{stateId:state.details.capture.stateId,text:'Field',role:'textbox'});
+  const ref=field.details.matches.find(m=>m.matchReason==='exact').ref;
+  const result=await call('act_ui',{stateId:state.details.capture.stateId,actions:[{...action,ref}],observationMode:'semantic'});
+  assert.equal(calls.length,1,'Unknown foreground result must never cause another dispatch');
+  assert.equal(calls[0].policy,'foreground');
+  assert.equal(calls[0].params.delivery,'hid');
+  assert.equal(result.details.execution.backgroundFirst,false);
+ }
+ }
  console.log('Registered native action outcome integration passed (3 controlled outcomes; no native input)');
 }finally{
  await shutdownComputerUseSession();

@@ -138,3 +138,18 @@ assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'invoke',x:10,y:10}]})
 console.log('Native AXPress preflight, no-fallback and no-replay boundaries passed');
 
 }
+
+// Physical macOS input starts at the exact-window foreground gate. Native AX
+// setters and strict headless retain their existing delivery policy.
+for (const action of [{action:'typeText',ref:'@e1',text:'native'}, {action:'keypress',ref:'@e1',keys:['cmd','a']}]) {
+ const prepared=preflightActionSequence([action],false,{...env,platform:'macos'})[0];
+ assert.equal(prepared.needsForeground,true);
+ for (const platform of ['windows','linux']) {
+  assert.equal(preflightActionSequence([action],false,{...env,platform})[0].needsForeground,false);
+ }
+ assert.equal(preflightActionSequence([action],false,{...env,platform:'macos',headless:true})[0].needsForeground,false);
+ assert.throws(()=>preflightActionSequence([{...action,ref:'@missing'}],false,{...env,platform:'macos'}),/Stale/);
+ assert.throws(()=>preflightActionSequence([action],false,{...env,platform:'macos',node:()=>({...text,isEnabled:false})}),/disabled/);
+ assert.equal(canRetryInForeground(prepared,'unknown',false),false);
+}
+assert.equal(preflightActionSequence([{action:'setText',ref:'@e1',text:'native'}],false,{...env,platform:'macos'})[0].needsForeground,false);

@@ -4,7 +4,7 @@ import {parseLookResponse} from '../src/outline.ts';
 import {macosBackend} from '../src/platform/macos/backend.ts';
 import {macosHelper} from '../src/platform/macos/helper.ts';
 import {currentPlatformBackend as backend} from '../src/platform/index.ts';
-import {executeFind, executeObserve, executeAct, shutdownComputerUseSession} from '../src/bridge.ts';
+import {executeFind, executeObserve, executeAct, executeWaitFor, shutdownComputerUseSession} from '../src/bridge.ts';
 
 const raw = {lookId:'owned-look', window:{windowId:10}, outline:{ref:'window', role:'AXWindow', children:[{ref:'body',role:'AXTextArea',description:'Page 1 content',isEnabled:false,canSetValue:true,isTextInput:true}]}, focusContext:{status:'matched',scopeVerified:true,wireRef:'body',isEnabled:false,canSetValue:true,isSecure:false,value:'MUST NOT LEAK',title:'Body'}};
 const parsed = parseLookResponse(raw);
@@ -41,8 +41,8 @@ try {
 } finally {macosHelper.command=helperOriginal;}
 
 const root={kind:'window',rootRef:'native-root',windowRef:'native-root',windowId:10,pid:7,appName:'Fixture',title:'Owned fixture',zOrder:0,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isOnscreen:true,isFocused:true,isMinimized:false,isMain:true,isModal:false};
-let inputs=0;const observes=[];
-const overrides={ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:'Fixture',pid:7}],listRoots:async()=>[root],getFrontmost:async()=>({appName:'Fixture',pid:7,windowId:10,rootRef:'native-root'}),observe:async(request)=>{observes.push(request);return parseLookResponse({...raw,focusContext:request.focusContext?raw.focusContext:undefined});},act:async()=>{inputs++;throw Error('Unexpected input');}};
+let inputs=0, nativeWaits=0;const observes=[];
+const overrides={waitFor:async()=>{nativeWaits++;throw Error('Unexpected native wait');},ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:'Fixture',pid:7}],listRoots:async()=>[root],getFrontmost:async()=>({appName:'Fixture',pid:7,windowId:10,rootRef:'native-root'}),observe:async(request)=>{observes.push(request);return parseLookResponse({...raw,focusContext:request.focusContext?raw.focusContext:undefined});},act:async()=>{inputs++;throw Error('Unexpected input');}};
 const original=Object.fromEntries(Object.keys(overrides).map(key=>[key,backend[key]])); const originalName=backend.name;
 Object.assign(backend,overrides,{name:'macos'});
 const call=(fn,params)=>fn('focus-context-regression',params,undefined,undefined,{cwd:process.cwd(),hasUI:false});
@@ -52,6 +52,8 @@ try {
  assert.equal(observes.at(-1).focusContext,undefined);assert.equal(ordinary.details.focusContext,undefined);
  const diagnosis=await call(executeObserve,{root:ref,mode:'semantic',focusContext:true});
  assert.equal(observes.at(-1).focusContext,true);assert.equal(observes.at(-1).includeImage,false);
+ await assert.rejects(call(executeWaitFor,{stateId:diagnosis.details.capture.stateId,text:'Body',includeOutline:false}),/browser root/);
+ assert.equal(nativeWaits,0,'Compact browser mode must reject before native dispatch');
  const body=diagnosis.details.outline.root.children[0];
  assert.equal(diagnosis.details.focusContext.ref,body.ref);assert.equal(diagnosis.details.focusContext.isEnabled,false);
  await assert.rejects(call(executeAct,{stateId:diagnosis.details.capture.stateId,actions:[{action:'typeText',ref:body.ref,text:'BLOCKED'}]}),/disabled; input was not sent/);

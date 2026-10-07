@@ -1,5 +1,5 @@
 import { serializeFocusContext } from "./focus-context.ts";
-import { navigateWithPerformance, summarizeBrowserPerformance } from "./browser-performance.ts";
+import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { waitForBrowserStartup } from "./browser-startup.ts";
 import { randomUUID } from "node:crypto";
@@ -1875,12 +1875,33 @@ function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
 }
 
 /** Side effects: captures/updates current target, capture state, look, and parsed outline. */
-async function performObserve(params: ObserveParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | BrowserObservationDetails>> {
+interface BrowserMetricsDetails extends BrowserMetricsRead {
+	tool: "observe_ui";
+	kind: "browser_metrics";
+	root: string;
+	contextId: string;
+	observationTimings: { metricsReadMs: number };
+}
+
+async function performObserve(params: ObserveParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | BrowserObservationDetails | BrowserMetricsDetails>> {
 	if (params.focusContext !== undefined && typeof params.focusContext !== "boolean") throw new Error("focusContext must be a boolean.");
 	const requestedRoot = typeof params.root === "string" ? params.root : undefined;
 	if (requestedRoot && !/^@r\d+$/.test(requestedRoot)) throw new Error("observe_ui.root must be an exact @r ref issued by find_roots.");
 	const browserContextId = requestedRoot ? runtimeState.browserContextByRoot.get(requestedRoot) : undefined;
 	if (params.focusContext === true && (currentPlatformBackend.name !== "macos" || isBrowserContextId(browserContextId))) throw new Error("focusContext requires a macOS native root.");
+	if (params.mode === "metrics") {
+		if (!requestedRoot || !isBrowserContextId(browserContextId)) throw new Error("mode=metrics requires an exact browser_page @r root.");
+		const started = performance.now();
+		const read = await resourceScheduler.read(`cdp:${browserContextId.slice(BROWSER_CONTEXT_PREFIX.length)}`, async () =>
+			await readBrowserMetrics(browserContextId, cdpEvaluateForContext));
+		throwIfAborted(signal);
+		const details: BrowserMetricsDetails = { tool: "observe_ui", kind: "browser_metrics", root: requestedRoot,
+			contextId: browserContextId, ...read.value, observationTimings: { metricsReadMs: performance.now() - started } };
+		const summary = details.performanceSample
+			? `Read-only browser performance sample (retained top-frame buffers; no new actionable state): ${JSON.stringify(summarizeBrowserPerformance(details.performanceSample))}`
+			: `Read-only browser performance collection unavailable: ${details.performanceError?.message}`;
+		return { content: [{ type: "text", text: summary }], details };
+	}
 	if (params.mode === "pixels" && (currentPlatformBackend.name !== "windows" || !requestedRoot || isBrowserContextId(browserContextId))) {
 		throw new Error("mode=pixels requires an exact Windows native @r root; use visual for other roots.");
 	}

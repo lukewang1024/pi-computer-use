@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {BROWSER_PERFORMANCE_SAMPLE,navigateWithPerformance,summarizeBrowserPerformance} from '../src/browser-performance.ts';
+import {BROWSER_PERFORMANCE_SAMPLE,navigateWithPerformance,readBrowserMetrics,summarizeBrowserPerformance} from '../src/browser-performance.ts';
 let calls=[];
 const deps={navigate:async()=>{calls.push('navigate');return true;},evaluate:async()=>{calls.push('metrics');return {value:{navigation:{}}};},refresh:async()=>{calls.push('refresh');return {stateId:'new'};}};
 assert.deepEqual((await navigateWithPerformance('owned','https://example.com/',false,deps)).observation,{stateId:'new'});
@@ -40,4 +40,30 @@ assert.equal(summary.pageHealth,'not-assessed');
 assert.equal(summary.observation.entryCounts.longtask,64);
 assert(!Object.hasOwn(summary.observation.entryCounts,'event'),'unsupported empty buffer must not become a zero count');
 assert(!Object.hasOwn(summary.observation,'entries'),'model summary should not repeat full entry arrays');
+
+// A slow page must produce an incomplete sample before Runtime.evaluate's
+// 5-second deadline, not race the CDP deadline with a 5-second in-page wait.
+let clock=0;
+const slow={...context,document:{readyState:'interactive',visibilityState:'visible',title:'x'.repeat(2000),querySelector:()=>({textContent:'h'.repeat(2000)})},performance:{...context.performance,now:()=>clock},location:{...context.location,href:'https://example.com/'},setTimeout:fn=>{clock+=100;fn();return 1;}};
+const incomplete=await vm.runInNewContext(BROWSER_PERFORMANCE_SAMPLE,slow);
+assert.equal(incomplete.loadWait.complete,false);assert.equal(incomplete.loadWait.budgetMs,3000);
+assert(clock>=3000&&clock<5000,'Leave time for observer flush and CDP transport');
+assert.equal(incomplete.documentIdentity.consistent,true);
+assert.equal(incomplete.documentIdentity.title.length,512);assert.equal(incomplete.documentIdentity.heading.length,512);
+const fixedCalls=[];
+const read=await readBrowserMetrics('exact',async(id,expression)=>{fixedCalls.push({id,expression});return {value:incomplete};});
+assert.equal(read.readOnly,true);assert.equal(read.performanceSample.loadWait.complete,false);
+assert.deepEqual(fixedCalls,[{id:'exact',expression:BROWSER_PERFORMANCE_SAMPLE}]);
+const drift=await readBrowserMetrics('exact',async()=>({value:{...incomplete,documentIdentity:{consistent:false}}}));
+assert.equal(drift.performanceSample,undefined);assert.match(drift.performanceError.message,/identity/);
+const readFailure=await readBrowserMetrics('exact',async()=>{throw Error('x'.repeat(2000));});
+assert.equal(readFailure.readOnly,true);assert.equal(readFailure.performanceError.message.length,1024);
+assert.equal(readFailure.performanceError.completion,'unconfirmed');
+assert.equal((await readBrowserMetrics('missing',async()=>undefined)).performanceSample,undefined);
+
+let driftClock=0;
+const moved={...slow,location:{...slow.location},performance:{...slow.performance,now:()=>driftClock},setTimeout:fn=>{driftClock+=100;moved.location.href='https://example.com/other';fn();return 1;}};
+const actualDrift=await vm.runInNewContext(BROWSER_PERFORMANCE_SAMPLE,moved);
+assert.equal(actualDrift.documentIdentity.consistent,false,'The fixed production collector must detect navigation during its await');
+assert.equal((await readBrowserMetrics('exact',async()=>({value:actualDrift}))).performanceSample,undefined);
 console.log('Bounded browser performance and no-navigation-replay checks passed');

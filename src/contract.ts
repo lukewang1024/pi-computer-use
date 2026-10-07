@@ -103,7 +103,10 @@ export interface ReadTextParams extends StateTargetParams {
 	offset?: number;
 }
 
-export interface WaitForParams extends StateTargetParams, UiCondition {}
+export interface WaitForParams extends StateTargetParams, UiCondition {
+    /** Browser-only compact condition receipt; cached state remains queryable. */
+    includeOutline?: boolean;
+}
 
 export const AGENT_TOOL_NAMES = new Set([
 	"find_roots",

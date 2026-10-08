@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { windowsArchitecture, verifyWindowsPe } from "./windows-architecture.mjs";
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -145,13 +146,19 @@ function windowsBinaryPath(crateDir, target) {
 }
 
 async function buildWindowsHelper(prebuiltOutput) {
-	const target = getArg("--target");
+	const explicitTarget = getArg("--target");
+	const targetArch = explicitTarget === 'aarch64-pc-windows-msvc' ? 'arm64'
+        : explicitTarget === 'x86_64-pc-windows-msvc' ? 'x64' : undefined;
+    if (explicitTarget && !targetArch) throw new Error(`Unsupported Windows target: ${explicitTarget}`);
+    const arch = windowsArchitecture(getArg("--arch") || targetArch || process.arch, explicitTarget ? {} : process.env);
+    if (targetArch && arch !== targetArch) throw new Error('Windows --arch and --target disagree');
+	const target = explicitTarget || (arch === "arm64" ? "aarch64-pc-windows-msvc" : undefined);
 	if (process.platform !== "win32" && !target?.includes("windows")) {
 		throw new Error("Refusing to label a host binary as Windows. Build on Windows or pass an explicit Windows --target triple.");
 	}
 	const prebuiltDir = prebuiltOutput
 		? path.resolve(process.cwd(), prebuiltOutput, "..")
-		: path.join(rootDir, "prebuilt", "windows");
+		: path.join(rootDir, "prebuilt", "windows", ...(arch === "arm64" ? [arch] : []));
 	const manifestPath = path.join(windowsCrateDir, "Cargo.toml");
 
 	console.log("Building Windows helper with cargo...");
@@ -167,16 +174,7 @@ async function buildWindowsHelper(prebuiltOutput) {
 	await fs.mkdir(prebuiltDir, { recursive: true });
 
 	const cargoOutput = windowsBinaryPath(windowsCrateDir, target);
-	const handle = await fs.open(cargoOutput, "r");
-	try {
-		const signature = Buffer.alloc(2);
-		await handle.read(signature, 0, 2, 0);
-		if (signature.toString("ascii") !== "MZ") {
-			throw new Error(`Cargo output is not a Windows PE executable: ${cargoOutput}`);
-		}
-	} finally {
-		await handle.close();
-	}
+	verifyWindowsPe(await fs.readFile(cargoOutput), arch);
 	const prebuiltDest = path.join(prebuiltDir, "windows-bridge.exe");
 	await fs.copyFile(cargoOutput, prebuiltDest);
 	await fs.chmod(prebuiltDest, 0o755);

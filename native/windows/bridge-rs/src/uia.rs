@@ -861,12 +861,16 @@ mod native {
         automation_id: &str,
     ) -> Result<PressResult, String> {
         let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        crate::action_trace::phase("enabled_check_started");
         ensure_element_enabled(&element)?;
+        crate::action_trace::phase("pattern_lookup_started");
         if let Ok(pattern) = unsafe {
             element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
             unsafe {
+                crate::action_trace::phase("native_mutation_started");
                 pattern.Invoke().map_err(|e| format!("Invoke: {e}"))?;
+                crate::action_trace::phase("native_mutation_returned");
             }
             return Ok(PressResult::Invoked);
         }
@@ -874,7 +878,9 @@ mod native {
             element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
         } {
             unsafe {
+                crate::action_trace::phase("native_mutation_started");
                 pattern.Toggle().map_err(|e| format!("Toggle: {e}"))?;
+                crate::action_trace::phase("native_mutation_returned");
             }
             let state = unsafe {
                 pattern
@@ -890,7 +896,9 @@ mod native {
             )
         } {
             unsafe {
+                crate::action_trace::phase("native_mutation_started");
                 pattern.Select().map_err(|e| format!("Select: {e}"))?;
+                crate::action_trace::phase("native_mutation_returned");
             }
             let selected = unsafe {
                 pattern
@@ -906,7 +914,9 @@ mod native {
             )
         } {
             unsafe {
+                crate::action_trace::phase("native_mutation_started");
                 pattern.Expand().map_err(|e| format!("Expand: {e}"))?;
+                crate::action_trace::phase("native_mutation_returned");
             }
             return Ok(PressResult::Expanded);
         }
@@ -923,9 +933,11 @@ mod native {
             };
             if !default_action.trim().is_empty() {
                 unsafe {
+                    crate::action_trace::phase("native_mutation_started");
                     pattern
                         .DoDefaultAction()
                         .map_err(|e| format!("DoDefaultAction: {e}"))?;
+                    crate::action_trace::phase("native_mutation_returned");
                 }
                 return Ok(PressResult::LegacyDefaultAction);
             }
@@ -1096,6 +1108,7 @@ mod native {
     fn resolve_with_mode(
         hwnd: isize, runtime_id_target: &[i32], automation_id: &str, read_only: bool,
     ) -> Result<(ComGuard, IUIAutomation, IUIAutomationElement), String> {
+        crate::action_trace::phase("reference_resolution_started");
         let mut identity = ElementIdentityResolver::new(runtime_id_target, automation_id)?;
         let com = ComGuard::new()?;
         let started = Instant::now();
@@ -1217,6 +1230,7 @@ mod native {
             Ok(())
         }, || crate::uia_resolution::timeouts(
             started.elapsed().as_millis(), EXTRACTION_BUDGET_MS).map(|_| ()))?;
+        crate::action_trace::phase("reference_resolution_ready");
         Ok((com, uia, element))
     }
 

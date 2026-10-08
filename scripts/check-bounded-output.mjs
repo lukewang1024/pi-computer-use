@@ -21,6 +21,18 @@ assert.ok(lineBounded.content[0].text.split("\n").length <= 2_000, "model-facing
 const boundedError = boundToolError("evaluate_browser", new Error("x".repeat(100_000)));
 assert.ok(Buffer.byteLength(boundedError.message, "utf8") <= MODEL_TEXT_MAX_BYTES, "tool errors must obey the text ceiling");
 
+const originalError = Object.assign(new Error("x".repeat(60_000) + "\ntimed out after partial input"), { code: "helper_transport_unknown" });
+const diagnosticError = boundToolError("act_ui", originalError);
+assert.equal(diagnosticError.cause, originalError, "truncation must retain original diagnostic identity and full message");
+assert.equal(diagnosticError.code, originalError.code, "truncation must retain a bounded machine-readable code");
+assert.ok(Buffer.byteLength(diagnosticError.message) <= MODEL_TEXT_MAX_BYTES);
+assert.equal(Object.keys(diagnosticError).includes("cause"), false, "full cause must not leak through ordinary JSON serialization");
+assert.ok(!JSON.stringify(diagnosticError).includes("timed out after partial input"));
+const shortError = new Error("short");
+assert.equal(boundToolError("act_ui", shortError), shortError, "small errors must retain their original identity");
+const malformedCode = Object.assign(new Error("x".repeat(60_000)), { code: "x".repeat(90) });
+assert.equal(boundToolError("act_ui", malformedCode).code, undefined, "unbounded metadata must not defeat output limits");
+
 const node = (ref, title, role = "AXButton") => ({ ref, role, subrole: "", identifier: "", title, description: "", value: "", actions: ["AXPress"], canPress: true, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, focused: false, offscreen: false, pictureOnly: false, truncated: false, text: [], children: [] });
 const root = node("@e1", "root", "AXWindow");
 root.children = [node("@e2", "Save"), node("@e3", "Save changes"), node("@e4", "Autosave"), node("@e5", "Svae")];

@@ -84,18 +84,18 @@ pub fn screenshot(
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HGDIOBJ,
-    SRCCOPY,
+    BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+    GetDC, GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HDC, HGDIOBJ, SRCCOPY,
 };
 #[cfg(windows)]
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
+    GetClientRect, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
 };
 
 #[cfg(any(windows, test))]
@@ -171,6 +171,60 @@ fn dominant_color_counts_bgra(bits: &[u8]) -> (usize, usize) {
     }
 
     (buckets.values().copied().max().unwrap_or(0), pixel_count)
+}
+
+// Use the OS client rectangle rather than guessing a border width or lowering
+// the existing 97% threshold. Invalid/clipped regions cannot classify a capture.
+#[cfg(any(windows, test))]
+fn dominant_client_counts_bgra(
+    bits: &[u8],
+    width: usize,
+    height: usize,
+    region: (usize, usize, usize, usize),
+) -> Option<(usize, usize)> {
+    let (x, y, w, h) = region;
+    if w == 0
+        || h == 0
+        || x.checked_add(w)? > width
+        || y.checked_add(h)? > height
+        || width.checked_mul(height)?.checked_mul(4)? != bits.len()
+    {
+        return None;
+    }
+    let mut buckets = HashMap::new();
+    for row in y..y + h {
+        for pixel in bits[(row * width + x) * 4..(row * width + x + w) * 4].chunks_exact(4) {
+            *buckets
+                .entry((pixel[0] >> 3, pixel[1] >> 3, pixel[2] >> 3))
+                .or_insert(0usize) += 1;
+        }
+    }
+    Some((buckets.values().copied().max().unwrap_or(0), w * h))
+}
+
+#[cfg(windows)]
+unsafe fn client_capture_region(
+    hwnd: HWND,
+    window_x: i32,
+    window_y: i32,
+) -> Option<(usize, usize, usize, usize)> {
+    let mut rect = RECT::default();
+    if GetClientRect(hwnd, &mut rect).is_err() {
+        return None;
+    }
+    let mut origin = POINT {
+        x: rect.left,
+        y: rect.top,
+    };
+    if !ClientToScreen(hwnd, &mut origin).as_bool() {
+        return None;
+    }
+    Some((
+        usize::try_from(i64::from(origin.x) - i64::from(window_x)).ok()?,
+        usize::try_from(i64::from(origin.y) - i64::from(window_y)).ok()?,
+        usize::try_from(i64::from(rect.right) - i64::from(rect.left)).ok()?,
+        usize::try_from(i64::from(rect.bottom) - i64::from(rect.top)).ok()?,
+    ))
 }
 
 #[cfg(any(windows, test))]
@@ -426,7 +480,18 @@ unsafe fn gdi_capture_to_base64(
     // PrintWindow can succeed with uniform black, white, or gray GPU surfaces.
     // Fall back to compositor-visible pixels when it carries no useful detail.
     let (print_dominant, print_total) = dominant_color_counts_bgra(&bits);
-    let print_window_blank = print_total > 0 && print_dominant * 100 >= print_total * 97;
+    let print_whole_blank = print_total > 0 && print_dominant * 100 >= print_total * 97;
+    let print_client_region = client_capture_region(hwnd, window_x, window_y);
+    let print_client_counts = if print_whole_blank {
+        None
+    } else {
+        print_client_region.and_then(|region| {
+            dominant_client_counts_bgra(&bits, width as usize, height as usize, region)
+        })
+    };
+    let print_client_blank = print_client_counts
+        .is_some_and(|(dominant, total)| total > 0 && dominant * 100 >= total * 97);
+    let print_window_blank = print_whole_blank || print_client_blank;
     let print_dib_rows = dib_ok;
     let mut fallback_result = None;
     let mut fallback_gate = None;
@@ -561,6 +626,10 @@ unsafe fn gdi_capture_to_base64(
             "printWindowSucceeded": pw_ok.as_bool(),
             "printWindowDibRows": print_dib_rows,
             "printWindowBlank": print_window_blank,
+            "printWindowWholeBlank": print_whole_blank,
+            "printWindowClientBlank": print_client_blank,
+            "printWindowClientRegion": print_client_region,
+            "printWindowClientCounts": print_client_counts,
             "printWindowDominantPixels": print_dominant,
             "printWindowTotalPixels": print_total,
             "sourceWidth": width,
@@ -654,6 +723,47 @@ mod unit_tests {
             CaptureFrame { pid: 35, ..frame }
         ));
     }
+    #[test]
+    fn client_capture_detects_blank_surface_behind_nonclient_border() {
+        let (width, height) = (936usize, 608usize);
+        let mut pixels = [24, 80, 120, 0].repeat(width * height);
+        for y in 0..600 {
+            for x in 8..928 {
+                pixels[(y * width + x) * 4..(y * width + x) * 4 + 3].fill(240);
+            }
+        }
+        assert_eq!(dominant_color_counts_bgra(&pixels), (552000, 569088));
+        assert!(!is_effectively_blank_bgra(&pixels));
+        assert_eq!(
+            dominant_client_counts_bgra(&pixels, width, height, (8, 0, 920, 600)),
+            Some((552000, 552000))
+        );
+        // Real client content must remain distinguishable from a blank surface.
+        for y in 0..600 {
+            for x in (8..928).step_by(10) {
+                pixels[(y * width + x) * 4..(y * width + x) * 4 + 3].fill(24);
+            }
+        }
+        let (dominant, total) =
+            dominant_client_counts_bgra(&pixels, width, height, (8, 0, 920, 600)).unwrap();
+        assert!(dominant * 100 < total * 97);
+        for region in [
+            (0, 0, 0, 1),
+            (0, 0, 937, 608),
+            (0, 608, 1, 1),
+            (usize::MAX, 0, 1, 1),
+        ] {
+            assert_eq!(
+                dominant_client_counts_bgra(&pixels, width, height, region),
+                None
+            );
+        }
+        assert_eq!(
+            dominant_client_counts_bgra(&pixels[..10], width, height, (8, 0, 920, 600)),
+            None
+        );
+    }
+
     #[test]
     fn detects_uniform_failed_compositor_captures() {
         let black = [0, 0, 0, 255].repeat(10_000);

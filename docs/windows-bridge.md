@@ -33,6 +33,20 @@ Observed `@e` refs store UIA RuntimeId and AutomationId metadata. Ref-targeted a
 - `scroll`: `ScrollPattern` where exposed; wheel fallback is raw input and policy-gated.
 - `typeText`, `keypress`, `drag`, `moveMouse`, and coordinate targets remain raw input and report `unknown` unless verified.
 
+Action-time reference resolution uses a modern UIA client with finite provider
+connection/transaction timeouts (at most 2/3 seconds, reduced to the remaining
+8-second cooperative lookup budget). RuntimeId remains authoritative; an
+AutomationId-only fallback must still be unique. The original provider timeout
+settings are restored before the resolved element can reach an action. Lookup,
+restoration, or elapsed-budget failure rejects the action before dispatch.
+
+This is cooperative provider protection, not a hard process deadline: a broken
+COM provider can still exceed its requested timeout. Enabled-state and pattern
+reads after resolution, actual invocation and post-action observation remain
+separate possible stalls. An unknown dispatch result still requires
+reconciliation; never retry it as a stale reference. This change alone does not
+establish that a particular Word invocation timeout has been fixed.
+
 `readText` resolves the live element and reads TextPattern → ValuePattern → CurrentName. `waitFor` polls the live UIA subtree at about 150ms intervals.
 
 Root deltas are baselined at act time. Bounded WinEvent observations are combined with HWND snapshots (`deltaSource: "win-event+snapshot"`), with snapshot fallback when events are unavailable.

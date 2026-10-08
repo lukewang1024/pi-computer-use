@@ -426,6 +426,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     let mut image_error = None;
     let mut image_payload = None;
     let mut capture_stage_timings = None;
+    let mut capture_diagnostics = None;
     let mut elements = Vec::new();
     let mut image_w = fw;
     let mut image_h = fh;
@@ -443,6 +444,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
             Err(error) => return Err(error),
         };
         capture_stage_timings = shot.get("timings").cloned();
+        capture_diagnostics = shot.get("captureDiagnostics").cloned();
         if let Some(capture) = shot.get("capture") {
             (fx, fy, fw, fh) = capture_frame(capture, (fx, fy, fw, fh));
             image_w = number_at(capture, "width", fw).max(1.0);
@@ -605,6 +607,9 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     }
     if let Some(error) = image_error {
         response["imageError"] = json!(error);
+    }
+    if let Some(diagnostics) = capture_diagnostics {
+        response["captureDiagnostics"] = diagnostics;
     }
     if let Some(image) = image_payload {
         response["image"] = image;

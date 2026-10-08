@@ -2692,7 +2692,11 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		const page = (await listCdpPageContexts())[0];
 		if (!page) throw new Error("Managed browser launched without a CDP page context.");
 		if (downloadDirectory) {
-			if (!await cdpSetManagedDownloadDirectory(page.contextId, downloadDirectory)) {
+			if (!await cdpSetManagedDownloadDirectory(page.contextId, downloadDirectory, () => {
+				// Chromium removes this connection's override on disconnect. Stop
+				// the owned browser before later actions can use default downloads.
+				if (runtimeState.managedBrowser === managedBrowser) managedBrowser.kill("SIGTERM");
+			})) {
 				throw new Error("Managed browser download directory could not be configured.");
 			}
 			if (requestedUrl && !await cdpNavigateContext(page.contextId, requestedUrl)) {

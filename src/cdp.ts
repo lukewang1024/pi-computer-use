@@ -120,6 +120,15 @@ const CONSOLE_BUFFER_LIMIT = 20;
 let nextBrowserElementRef = 1;
 
 export class CdpTab {
+	private disconnected = false;
+	private disconnectHandler?: () => void;
+	setDisconnectHandler(handler: (() => void) | undefined): void { this.disconnectHandler = handler; }
+	private notifyDisconnected(): void {
+		this.disconnected = true;
+		const handler = this.disconnectHandler;
+		this.disconnectHandler = undefined;
+		handler?.();
+	}
 	async setManagedDownloadDirectory(downloadPath: string): Promise<void> {
 		await this.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath, eventsEnabled: false });
 	}
@@ -152,8 +161,8 @@ export class CdpTab {
 
 			const tab = new CdpTab(ws, targetId, title);
 			ws.onmessage = (event) => tab.handleMessage(String(event.data));
-			ws.onclose = () => tab.rejectAllPending(new Error("CDP connection closed."));
-			ws.onerror = () => tab.rejectAllPending(new Error("CDP connection error."));
+			ws.onclose = () => { tab.rejectAllPending(new Error("CDP connection closed.")); tab.notifyDisconnected(); };
+			ws.onerror = () => { tab.rejectAllPending(new Error("CDP connection error.")); tab.notifyDisconnected(); };
 			await tab.send("Runtime.enable");
 			await tab.send("Page.enable");
 			return tab;
@@ -168,10 +177,11 @@ export class CdpTab {
 	}
 
 	get isOpen(): boolean {
-		return this.ws.readyState === WebSocket.OPEN;
+		return !this.disconnected && this.ws.readyState === WebSocket.OPEN;
 	}
 
 	close(): void {
+		this.disconnected = true;
 		this.loadFired?.();
 		this.loadFired = undefined;
 		this.rejectAllPending(new Error("CDP connection closed."));
@@ -853,11 +863,17 @@ export class CdpTab {
 }
 
 const connectedTabs = new Map<string, CdpTab>();
+const managedDownloadTabs = new Map<string, CdpTab>();
 const connectingTabs = new Map<string, Promise<CdpTab>>();
 let lastConnectFailureAt = 0;
 
 /** Close session-owned CDP state without affecting the browser process. */
 export function disconnectCdp(): void {
+	for (const tab of managedDownloadTabs.values()) {
+		tab.setDisconnectHandler(undefined);
+		tab.close();
+	}
+	managedDownloadTabs.clear();
 	for (const tab of connectedTabs.values()) tab.close();
 	connectedTabs.clear();
 	connectingTabs.clear();
@@ -989,14 +1005,30 @@ export async function cdpNavigateContext(contextId: string, url: string): Promis
 	})) === true;
 }
 
-export async function cdpSetManagedDownloadDirectory(contextId: string, downloadPath: string): Promise<boolean> {
-	return (await withCdpContextTab(contextId, async tab => {
+export async function cdpSetManagedDownloadDirectory(contextId: string, downloadPath: string, onDisconnected: () => void): Promise<boolean> {
+	if (managedDownloadTabs.has(contextId)) throw new Error("Managed download policy already configured; do not replay setup.");
+	const page = await cdpPageForContext(contextId);
+	if (!page?.webSocketDebuggerUrl) return false;
+	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
+	tab.setDisconnectHandler(onDisconnected);
+	try {
 		await tab.setManagedDownloadDirectory(downloadPath);
+		if (!tab.isOpen) throw new Error("Managed download control disconnected during setup.");
+		managedDownloadTabs.set(contextId, tab);
 		return true;
-	})) === true;
+	} catch (error) {
+		tab.close();
+		throw error;
+	}
+}
+
+function assertManagedDownloadControl(contextId: string): void {
+	const tab = managedDownloadTabs.get(contextId);
+	if (tab && !tab.isOpen) throw new Error("Managed download control disconnected; do not replay browser input.");
 }
 
 export async function cdpEvaluateForContext(contextId: string, expression: string): Promise<CdpEvaluationResult | undefined> {
+	assertManagedDownloadControl(contextId);
 	const page = await cdpPageForContext(contextId);
 	if (!page?.webSocketDebuggerUrl) return undefined;
 	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
@@ -1082,6 +1114,7 @@ export async function cdpSnapshotForContext(contextId: string, options: { includ
 }
 
 async function withCdpContextTab<T>(contextId: string, run: (tab: CdpTab) => Promise<T>): Promise<T | undefined> {
+	assertManagedDownloadControl(contextId);
 	const page = await cdpPageForContext(contextId);
 	if (!page?.webSocketDebuggerUrl) return undefined;
 	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);

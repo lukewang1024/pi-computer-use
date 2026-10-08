@@ -13,6 +13,7 @@ currentPlatformBackend.listRoots = async () => [];
 currentPlatformBackend.getFrontmost = async () => {throw Error("Browser search must not query desktop foreground");};
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5l0AAAAASUVORK5CYII=';
 let port, present = true, badImage = false, axNodes=[], failPerformance=false, axResponseQueue=[], failAx=false;
+let driftPixelIdentity=false,pixelIdentityReads=0;
 const calls = [], sockets = new Set();
 function frame(value) {
   const data = Buffer.from(JSON.stringify(value));
@@ -46,6 +47,8 @@ server.on('upgrade', (req, socket) => {
         if(request.params.expression===BROWSER_PERFORMANCE_SAMPLE){
           if(failPerformance){socket.write(frame({id:request.id,error:{message:'metrics failed'}}));continue;}
           result={result:{value:{navigation:{timeOriginMs:1},observation:{supported:[],entries:{}},loadWait:{complete:true},documentIdentity:{consistent:true,url:"about:blank",timeOriginMs:1,title:"Owned page",heading:"Owned page"}}}};
+        }else if(request.params.expression==='({url:location.href,title:document.title,timeOrigin:performance.timeOrigin})') {
+          result={result:{value:{url:'about:blank',title:'Owned page',timeOrigin:driftPixelIdentity?++pixelIdentityReads:1}}};
         }else result={result:{value:request.params.expression==='window.devicePixelRatio'?2:'Visible page text'}};
       }
       if(request.method==='Page.navigate')result={frameId:'owned-frame'};
@@ -140,9 +143,6 @@ try {
   assert.equal(calls.some(c=>c.method==='Page.captureScreenshot'),false,'condition polling must not capture');
   const controller=new AbortController();controller.abort();
   await assert.rejects(()=>executeWaitFor('aborted',{stateId:waited.details.stateId,text:'Never present',timeoutMs:1000},controller.signal,undefined,ctx));
-  const beforePixels=calls.length;
-  await assert.rejects(()=>tool(executeObserve,{root,mode:'pixels'}),/exact Windows native/);
-  assert.equal(calls.length,beforePixels,'unsupported pixel mode must not issue a CDP request');
   for(const mode of ['visual','fused',undefined]) {
     const result=await tool(executeObserve,{root,...(mode?{mode}:{})});
     assert.equal(result.content.find(c=>c.type==='image')?.data,pixel);
@@ -299,6 +299,22 @@ try {
   const refusedInputStart=calls.length;
   await assert.rejects(()=>tool(executeAct,{stateId:projectionBase.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
   assert.equal(calls.slice(refusedInputStart).filter(c=>c.method.startsWith('Input.')).length,0,'stale input remains refused without dispatch');
+  const pixelStart=calls.length;
+  const pixels=await tool(executeObserve,{root,mode:'pixels'});
+  assert.equal(pixels.details.capture.stateId,pixels.details.stateId);
+  assert.equal(pixels.details.root.ref,root);
+  assert.equal(pixels.details.diagnostics.semanticCollection,'skipped');
+  assert.equal(pixels.details.diagnostics.targetCount,0);
+  assert.equal(pixels.details.outline.root.children.length,0);
+  assert.equal(pixels.content.filter(c=>c.type==='image').length,1);
+  assert.equal(calls.slice(pixelStart).filter(c=>c.method.startsWith('Accessibility.')).length,0);
+  assert.equal(calls.slice(pixelStart).filter(c=>c.method==='Runtime.evaluate'&&c.params.expression.includes('innerText')).length,0);
+  const noInput=calls.length;
+  await assert.rejects(()=>tool(executeAct,{stateId:pixels.details.stateId,actions:[{action:'press',ref:targetRef}]}),/ref|available|stale/i);
+  assert.equal(calls.slice(noInput).filter(c=>c.method.startsWith('Input.')).length,0);
+  driftPixelIdentity=true;pixelIdentityReads=0;
+  await assert.rejects(()=>tool(executeObserve,{root,mode:'pixels'}),/document changed/);
+  driftPixelIdentity=false;
   console.log('Browser observe executor integration checks passed');
 } finally {
   await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);

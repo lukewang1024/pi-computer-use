@@ -22,9 +22,10 @@ Run `npm run typecheck`, `npm run test:cdp-viewport`, and
 `npm run test:browser-observe`, plus existing schema,
 output, lifecycle and resource-concurrency checks. This branch is a candidate:
 real Chromium viewport captures, scaling, scrolling, and guard compatibility
-must pass through the managed desktop session before publication. The recovered
-baseline's full npm test also references absent readiness/unknown-delivery test
-scripts; do not call that complete suite passed.
+must pass through the managed desktop session before publication. An earlier recovered baseline lacked readiness/unknown-delivery scripts; that
+historical result did not establish a complete suite pass. The current pixel-only
+candidate passes the complete local npm suite, with platform-native skips
+reported explicitly; real managed pixel-only acceptance remains pending.
 
 The public executor integration check uses a protocol fixture and stubs only
 native readiness/enumeration. It verifies semantic capture avoidance, visual,
@@ -50,3 +51,25 @@ Controller transport, session startup and browser launch and are not p95 or
 cold-start measurements. The formal extension registry/host package integration
 and release regression gate remain pending; this source trial changed no
 stable selector or installed package.
+
+## Pixel-only browser candidate
+
+`observe_ui({root: exactBrowserRoot, mode: "pixels"})` captures the exact page
+without reading body text or collecting the accessibility tree. It returns a
+fresh screenshot state with an empty structural outline and no semantic action
+refs. Existing visual/fused observations retain their full semantic behavior.
+The current pixel state cannot borrow element refs from an earlier observation;
+observe semantic or fused again before using semantic controls.
+
+The SDK reads URL and document time origin before and after capture. Missing
+identity or changed URL/time origin fails the observation without falling back
+to another page or replaying input. Capture errors and viewport dimension checks
+remain intact. `diagnostics.semanticCollection` is `skipped`; `pixelCaptureMs`
+includes the two identity reads and screenshot, and `collectionMs` includes the
+whole collection phase. No latency, token reduction or real-site improvement is
+established by protocol fixtures alone.
+
+New checks cover unchanged screenshot bytes, missing/changed document identity,
+zero AX/body requests, exact root/capture/state linkage and refusal of old
+element refs with no input dispatch. A paired managed real-browser measurement
+with reviewed images is still required.

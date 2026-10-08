@@ -1936,19 +1936,20 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 			: `Read-only browser performance collection unavailable: ${details.performanceError?.message}`;
 		return { content: [{ type: "text", text: summary }], details };
 	}
-	if (params.mode === "pixels" && (currentPlatformBackend.name !== "windows" || !requestedRoot || isBrowserContextId(browserContextId))) {
-		throw new Error("mode=pixels requires an exact Windows native @r root; use visual for other roots.");
+	if (params.mode === "pixels" && (!requestedRoot || (currentPlatformBackend.name !== "windows" && !isBrowserContextId(browserContextId)))) {
+		throw new Error("mode=pixels requires an exact Windows native @r root or browser_page @r root.");
 	}
 	if (isBrowserContextId(browserContextId)) {
 		const targetId = browserContextId.slice(BROWSER_CONTEXT_PREFIX.length);
 		const resourceKey = `cdp:${targetId}`;
 		const scheduled = await resourceScheduler.read(resourceKey, async () =>
-			await cdpSnapshotForContext(browserContextId, { includeImage: params.mode !== "semantic" }));
+			await cdpSnapshotForContext(browserContextId, { includeImage: params.mode !== "semantic", includeOutline: params.mode !== "pixels" }));
 		const browser = scheduled.value;
 		const image = browser?.image;
 		if (!browser) throw new Error(`Browser context '${browserContextId}' is no longer available. Call find_roots again.`);
 		if (params.mode !== "semantic" && !image) throw new Error(`Browser viewport capture unavailable for '${browserContextId}'.`);
 		const result = browserObservationResult(browser, resourceKey, scheduled.epoch, "observe_ui");
+		if (params.mode === "pixels") result.content.unshift({ type: "text", text: "Pixel-only browser observation: body text and AX collection were skipped. No semantic action refs were observed; observe semantic or fused before searching or using element refs." });
 		if (image) {
 			result.content.push({ type: "image", mimeType: image.mimeType, data: image.data });
 			result.details.capture = { stateId: browser.snapshotId, width: image.width, height: image.height,

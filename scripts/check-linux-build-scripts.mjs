@@ -44,6 +44,7 @@ try {
 	]);
 	await Promise.all([
 		fs.copyFile(path.join(scriptsDir, "setup-helper.mjs"), path.join(fixtureScriptsDir, "setup-helper.mjs")),
+        fs.copyFile(path.join(scriptsDir, "windows-architecture.mjs"), path.join(fixtureScriptsDir, "windows-architecture.mjs")),
 		fs.copyFile(
 			path.join(rootDir, "src", "platform", "macos", "helper-path.mjs"),
 			path.join(fixtureHelperPathDir, "helper-path.mjs"),

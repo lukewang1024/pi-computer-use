@@ -174,7 +174,7 @@ fn dominant_color_counts_bgra(bits: &[u8]) -> (usize, usize) {
 }
 
 // Use the OS client rectangle rather than guessing a border width or lowering
-// the existing 97% threshold. Invalid/clipped regions cannot classify a capture.
+// the existing whole-image threshold. Invalid/clipped regions cannot classify a capture.
 #[cfg(any(windows, test))]
 fn dominant_client_counts_bgra(
     bits: &[u8],
@@ -200,6 +200,13 @@ fn dominant_client_counts_bgra(
         }
     }
     Some((buckets.values().copied().max().unwrap_or(0), w * h))
+}
+
+#[cfg(any(windows, test))]
+fn client_pixels_are_uniform((dominant, total): (usize, usize)) -> bool {
+    // A mostly empty client can still contain meaningful sparse text. Only a
+    // single quantized color bucket justifies this additional fallback trigger.
+    total > 0 && dominant == total
 }
 
 #[cfg(windows)]
@@ -489,8 +496,7 @@ unsafe fn gdi_capture_to_base64(
             dominant_client_counts_bgra(&bits, width as usize, height as usize, region)
         })
     };
-    let print_client_blank = print_client_counts
-        .is_some_and(|(dominant, total)| total > 0 && dominant * 100 >= total * 97);
+    let print_client_blank = print_client_counts.is_some_and(client_pixels_are_uniform);
     let print_window_blank = print_whole_blank || print_client_blank;
     let print_dib_rows = dib_ok;
     let mut fallback_result = None;
@@ -738,6 +744,14 @@ mod unit_tests {
             dominant_client_counts_bgra(&pixels, width, height, (8, 0, 920, 600)),
             Some((552000, 552000))
         );
+        assert!(client_pixels_are_uniform((552000, 552000)));
+        assert!(!client_pixels_are_uniform((0, 0)));
+        // Even one visible text pixel must not be erased by the client-only rule.
+        pixels[(8 * width + 20) * 4..(8 * width + 20) * 4 + 3].fill(24);
+        let sparse = dominant_client_counts_bgra(&pixels, width, height, (8, 0, 920, 600)).unwrap();
+        assert_eq!(sparse, (551999, 552000));
+        assert!(sparse.0 * 100 >= sparse.1 * 97);
+        assert!(!client_pixels_are_uniform(sparse));
         // Real client content must remain distinguishable from a blank surface.
         for y in 0..600 {
             for x in (8..928).step_by(10) {

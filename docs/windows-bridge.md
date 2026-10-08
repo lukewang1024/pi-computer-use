@@ -162,3 +162,18 @@ window or an owned popup is still an occluder. Failure reports the target HWND,
 PID, point and hit HWND/root/PID without sending button or wheel input. Drag
 paths are checked before their first button-down. These checks reduce the
 foreground-to-pointer race; they do not make OS input dispatch atomic.
+
+### Timeout phase diagnostics
+
+For native actions, the helper emits at most 32 request-correlated phase events.
+The client bounds line buffering, accepts only known stage names and finite
+monotonic integer timings, and retains only the current request's last 32 events.
+Transport-unknown responses carry this sanitized trail in `execution.transport.stages`.
+Records contain stage names and elapsed milliseconds, never action arguments,
+window titles or document text. Oversized, malformed and unmatched records are discarded.
+
+This trail can distinguish resolution, enabled/pattern checks, mutation calls
+and post-action observation when those stages are received. Missing, late or
+last-received stages do not establish whether input occurred or completed.
+Unknown delivery still stops subsequent actions and requires reconciliation;
+diagnostics never authorize retry or automatic recovery.

@@ -23,3 +23,5 @@ pub mod read_worker;
 
 #[cfg(any(windows, test))]
 mod uia_resolution;
+
+pub mod action_trace;

@@ -98,7 +98,7 @@ jobs:
       - name: Remove historical helpers before assembling this run's assets
         run: python3 -c 'import shutil; shutil.rmtree("prebuilt", ignore_errors=True)'
       - name: Test checked-package release verifier
-        run: python3 -m unittest discover -s tests -p 'test_workbench_candidate.py'
+        run: python3 -m unittest discover -s tests -p 'test_*candidate.py'
       - name: Build universal helper from selected source
         run: node scripts/build-native.mjs --arch universal --no-sign
       - name: Assemble candidate app and verify ad-hoc signature

@@ -53,8 +53,10 @@ class CandidateTests(unittest.TestCase):
 
     def test_checked_archive_preserved_and_provenance_compatible(self):
         before = (self.output / 'candidate.tgz').read_bytes()
-        proof = self.verify()
+        proof = v.verify(self.output, 'exact-sha', '123', self.root, publisher_run_id='456')
         self.assertEqual(proof['revision'], 'exact-sha')
+        self.assertEqual(proof['builderRunId'], '123')
+        self.assertEqual(proof['publisherRunId'], '456')
         self.assertEqual(set(proof['helpers']), set(v.HELPERS))
         self.assertEqual((self.output / 'candidate.tgz').read_bytes(), before)
         self.assertEqual((self.output / 'SHA256SUMS').read_text(), v.digest(before) + '  candidate.tgz\n')

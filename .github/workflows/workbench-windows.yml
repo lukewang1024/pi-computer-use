@@ -3,19 +3,39 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: workbench-package-${{ github.sha }}
   cancel-in-progress: false
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      builder-run-id: ${{ steps.select.outputs.builder-run-id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select successful merged-source CI package or rebuild
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/select-checked-candidate.py --repository "$GITHUB_REPOSITORY" --revision "$GITHUB_SHA" --output "$GITHUB_OUTPUT"
   candidate:
+    needs: resolve
+    if: needs.resolve.outputs.builder-run-id == ''
     uses: ./.github/workflows/candidate-package.yml
     permissions:
       contents: read
   publish:
-    needs: candidate
+    needs: [resolve, candidate]
+    if: always() && needs.resolve.result == 'success' && (needs.candidate.result == 'success' || needs.resolve.outputs.builder-run-id != '')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -25,8 +45,10 @@ jobs:
         with:
           name: checked-candidate-${{ github.sha }}
           path: dist
+          run-id: ${{ needs.resolve.outputs.builder-run-id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Verify checked package without rebuilding or repacking
-        run: python3 scripts/verify-workbench-candidate.py --directory dist --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID"
+        run: python3 scripts/verify-workbench-candidate.py --directory dist --revision "$GITHUB_SHA" --run-id "${{ needs.resolve.outputs.builder-run-id || github.run_id }}" --publisher-run-id "$GITHUB_RUN_ID"
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}

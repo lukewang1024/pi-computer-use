@@ -1029,6 +1029,33 @@ function serializeLocalBuildInput(buildInput) {
 	return `${JSON.stringify(buildInput, null, 2)}\n`;
 }
 
+// Read-only admission for explicit local builds. Never rebuild, sign, register,
+// or update a helper while a desktop session is checking freshness.
+export async function verifiedLocalMacHelperSha256(installPath, {
+	arch = normalizeArch(process.arch),
+	fileSystem = fs,
+	buildInputProvider = createLocalMacBuildInput,
+	readPinnedIdentity = readPinnedSigningIdentity,
+	verifySignature = (appPath) => run("codesign", ["--verify", "--strict", appPath]),
+	readInstalledIdentity = readInstalledSigningIdentity,
+} = {}) {
+	const expected = await buildInputProvider(arch);
+	const resources = path.join(installPath, "Contents", "Resources");
+	const [metadata, marker, pinned] = await Promise.all([
+		fileSystem.readFile(path.join(resources, "local-build-input.json"), "utf8"),
+		fileSystem.readFile(path.join(resources, "signing-identity.sha1"), "utf8"),
+		readPinnedIdentity(),
+	]);
+	if (!pinned || marker.trim() !== pinned || metadata !== serializeLocalBuildInput(expected)) {
+		throw new Error("Installed local macOS helper build inputs or pinned signing identity differ; deployment is required before input.");
+	}
+	await verifySignature(installPath);
+	if (await readInstalledIdentity(installPath) !== pinned) {
+		throw new Error("Installed local macOS helper signature differs from its pinned identity; physical input was not sent.");
+	}
+	return createHash("sha256").update(await fileSystem.readFile(path.join(installPath, "Contents", "MacOS", "bridge"))).digest("hex");
+}
+
 export async function installLocalHelperBinary(sourcePath, {
 	installPath = helperAppPath,
 	sourceHashPath = path.join(installPath, "Contents", "Resources", "source.sha256"),

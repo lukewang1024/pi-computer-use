@@ -4,7 +4,7 @@ import { access, mkdir, realpath } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { PlatformDiagnostics } from "../types.ts";
 import { resolveMacosHelperAppPath } from "./helper-path.mjs";
@@ -161,7 +161,13 @@ export class MacosHelperClient {
 	private expectedSha256?: Promise<string>;
 
 	private expectedHelperSha256(): Promise<string> {
-		return this.expectedSha256 ??= packagedHelperSha256(PACKAGE_ROOT);
+		return this.expectedSha256 ??= (async () => {
+			if (process.env.PI_COMPUTER_USE_LOCAL_BUILD === "1") {
+				const { verifiedLocalMacHelperSha256 } = await import(pathToFileURL(SETUP_HELPER_SCRIPT).href);
+				return await verifiedLocalMacHelperSha256(HELPER_APP_PATH) as string;
+			}
+			return await packagedHelperSha256(PACKAGE_ROOT);
+		})();
 	}
 
 	private nextRequestId(): string {

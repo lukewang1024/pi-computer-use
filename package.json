@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.2-workbench.71",
+	"version": "0.5.2-workbench.72",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -106,7 +106,7 @@
 		"test:scoped-outline": "tsx scripts/check-scoped-outline.mjs",
 		"test:text-input-source": "node scripts/check-text-input-source.mjs",
 		"test:macos-identity": "tsx scripts/check-macos-helper-identity.mjs && tsx scripts/check-macos-helper-owned-restart.mjs",
-		"test:browser-startup": "tsx scripts/check-browser-startup.mjs && tsx scripts/check-browser-downloads.mjs",
+		"test:browser-startup": "tsx scripts/check-browser-startup.mjs && tsx scripts/check-browser-downloads.mjs && tsx scripts/check-download-session.mjs",
 		"test:ocr-failure": "tsx scripts/check-ocr-failure-preserves-pixels.mjs",
 		"test:macos-helper-socket": "node scripts/check-macos-helper-socket.mjs",
 		"test:macos-outline": "node scripts/check-macos-outline-walk.mjs",

@@ -128,6 +128,12 @@ standalone browser behavior is unchanged. Downloaded files are retained for
 inspection; managed integrations should use their normal guarded filesystem
 operations to remove verified artifacts explicitly.
 
+The SDK retains the CDP connection that owns the download override for the
+managed browser's lifetime. Unexpected loss of that connection stops the
+owned browser and rejects subsequent input; it never reconnects and replays
+an action to recover a missing download. Session cleanup closes that owned
+connection explicitly.
+
 
 ### macOS OCR failure and pixel evidence
 

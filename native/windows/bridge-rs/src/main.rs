@@ -242,6 +242,8 @@ fn handle_request(request: &Request) -> Response {
         return Response::err(&request.id, ProtocolError::new(format!("Unsupported Windows helper protocol {}; expected {}. Restart Pi to use the installed helper.", request.protocol_version, PROTOCOL_VERSION), ErrorCode::InvalidRequest));
     }
 
+    let _trace = matches!(request.cmd.as_str(), "act" | "actBatch")
+        .then(|| windows_bridge::action_trace::begin(&request.id));
     let result = match request.cmd.as_str() {
         "diagnostics" => Ok(diagnostics()),
         "listRoots" | "listWindows" => handle_list_roots(&request.args),
@@ -916,6 +918,7 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
     };
 
     if let Some(before) = before {
+        windows_bridge::action_trace::phase("post_action_observation_started");
         let (after, source, events) = await_delta_snapshot(target_pid, &before, event_cursor)?;
         response = input::response_with_delta(
             response,
@@ -1087,6 +1090,7 @@ fn act_on_ref(
     {
         return coordinate_fallback(args, parsed, &element, record.pid);
     }
+    windows_bridge::action_trace::phase("target_action_started");
     match parsed.action.as_str() {
         "press" | "click" => match windows_bridge::uia::press(
             element.hwnd,

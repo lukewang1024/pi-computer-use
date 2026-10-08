@@ -23,6 +23,15 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  const r=JSON.parse(line);
  if(r.cmd==='exit')return process.exit(0);
  if(r.cmd==='silent')return;
+ if(r.cmd==='act' && r.args.phaseFixture){
+  const emit=(id,stage,elapsedMs)=>fs.writeSync(2,JSON.stringify({event:'cu_action_phase',requestId:id,stage,elapsedMs,secret:'not-retained'})+'\\n');
+  emit('different-request','request_started',0);
+  for(let i=0;i<40;i++)emit(r.id,'request_started',i);
+  emit(r.id,'native_mutation_started',40);
+  emit(r.id,'request_started',1);
+  return;
+ }
+
  if(r.cmd==='stderr-pressure'){const chunk=Buffer.alloc(65536,120);for(let i=0;i<64;i++)fs.writeSync(2,chunk);}
  const value={id:r.id,protocolVersion:r.cmd==='wrong-version'?99:r.protocolVersion,ok:true,result:r.args.value};
  const output=JSON.stringify(value)+'\\n';
@@ -40,6 +49,18 @@ client.ensureInstalled=async()=>{};
 try{
  assert.equal(await client.command('stderr-pressure',{value:'windows-drained'},{timeoutMs:3000}),'windows-drained');
  assert.equal(await client.command('echo',{value:'fragmented'}),'fragmented');
+ const unrelated=client.command('echo',{value:'isolated',delay:10});
+ await assert.rejects(()=>client.command('act',{phaseFixture:true},{timeoutMs:200}),error=>{
+  assert.equal(error.code,'helper_transport_unknown');
+  assert.equal(error.outcome,'unknown');
+  assert.equal(error.requestWriteAttempted,true);
+  assert.equal(error.stages.length,32);
+  assert.deepEqual(error.stages.at(-1),{stage:'native_mutation_started',elapsedMs:40});
+  assert(error.stages.every(row=>Object.keys(row).sort().join(',')==='elapsedMs,stage'));
+  return true;
+ });
+ assert.equal(await unrelated,'isolated');
+
  const slow=client.command('echo',{value:'slow',delay:30});
  const fast=client.command('echo',{value:'fast'});
  assert.deepEqual(await Promise.all([slow,fast]),['slow','fast']);

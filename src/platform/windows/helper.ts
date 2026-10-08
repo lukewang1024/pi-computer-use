@@ -1,3 +1,4 @@
+import { WindowsActionDiagnostics, type WindowsActionStage } from "./action-diagnostics.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -16,11 +17,12 @@ const WINDOWS_HELPER_OVERRIDE = process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;
 export const WINDOWS_HELPER_PATH = WINDOWS_HELPER_OVERRIDE || path.join(os.homedir(), ".pi", "agent", "helpers", "pi-computer-use", "windows-bridge.exe");
 const WINDOWS_PREBUILT_PATH = path.join(PACKAGE_ROOT, "prebuilt", "windows", "windows-bridge.exe");
 
-function transportUnknownError(message: string, command: string, requestId: string): Error {
-	return Object.assign(new Error(message), { code: "helper_transport_unknown", outcome: "unknown", command, requestId, requestWriteAttempted: true });
+function transportUnknownError(message: string, command: string, requestId: string, stages: WindowsActionStage[] = []): Error {
+	return Object.assign(new Error(message), { code: "helper_transport_unknown", outcome: "unknown", command, requestId, requestWriteAttempted: true, stages: stages.map(row => ({ ...row })) });
 }
 
 interface Pending<T> {
+	stages: WindowsActionStage[];
 	command: string;
 	resolve(value: T): void;
 	reject(error: Error): void;
@@ -86,7 +88,7 @@ export class WindowsHelperClient {
 		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);
 			pending.cleanup?.();
-			pending.reject(transportUnknownError(error.message, pending.command, id));
+			pending.reject(transportUnknownError(error.message, pending.command, id, pending.stages));
 		}
 		this.pending.clear();
 		this.buffer = "";
@@ -120,7 +122,17 @@ export class WindowsHelperClient {
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");
 		// Drain diagnostics continuously: an unread pipe can block helper replies.
-		child.stderr.resume();
+		const diagnostics = new WindowsActionDiagnostics();
+		child.stderr.on("data", (chunk: string) => {
+			if (this.child !== child) return;
+			diagnostics.push(chunk, (id, stage) => {
+				const pending = this.pending.get(id);
+				if (!pending || !["act", "actBatch"].includes(pending.command)) return;
+				if (pending.stages.length && stage.elapsedMs < pending.stages.at(-1)!.elapsedMs) return;
+				pending.stages.push(stage);
+				if (pending.stages.length > 32) pending.stages.shift();
+			});
+		});
 		child.stdin.setDefaultEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => { if (this.child === child) this.onStdout(chunk); });
 		const disconnected = (reason: string) => {
@@ -129,7 +141,7 @@ export class WindowsHelperClient {
 			this.buffer = "";
 			for (const [id, pending] of this.pending) {
 				clearTimeout(pending.timer); pending.cleanup?.();
-				pending.reject(transportUnknownError(`Windows helper ${reason}; dispatched command outcome is unknown.`, pending.command, id));
+				pending.reject(transportUnknownError(`Windows helper ${reason}; dispatched command outcome is unknown.`, pending.command, id, pending.stages));
 			}
 			this.pending.clear();
 		};
@@ -161,7 +173,7 @@ export class WindowsHelperClient {
 			clearTimeout(pending.timer);
 			pending.cleanup?.();
 			if (parsed.protocolVersion !== WINDOWS_HELPER_PROTOCOL_VERSION) {
-				pending.reject(transportUnknownError(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`, pending.command, parsed.id));
+				pending.reject(transportUnknownError(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`, pending.command, parsed.id, pending.stages));
 			} else if (parsed.ok === true) {
 				pending.resolve(parsed.result);
 			} else {
@@ -180,17 +192,18 @@ export class WindowsHelperClient {
 		const id = randomUUID();
 		const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
 		return await new Promise<T>((resolve, reject) => {
+			const stages: WindowsActionStage[] = [];
 			const cleanup = () => signal?.removeEventListener("abort", onAbort);
-			const onAbort = () => { this.pending.delete(id); clearTimeout(timer); cleanup(); reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id)); };
-			const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id)); }, timeoutMs);
-			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd });
+			const onAbort = () => { this.pending.delete(id); clearTimeout(timer); cleanup(); reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id, stages)); };
+			const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id, stages)); }, timeoutMs);
+			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd, stages });
 			signal?.addEventListener("abort", onAbort, { once: true });
 			child.stdin.write(`${JSON.stringify({ protocolVersion: WINDOWS_HELPER_PROTOCOL_VERSION, id, cmd, args })}\n`, (error) => {
 				if (!error) return;
 				this.pending.delete(id);
 				clearTimeout(timer);
 				cleanup();
-				reject(transportUnknownError(error.message, cmd, id));
+				reject(transportUnknownError(error.message, cmd, id, stages));
 			});
 		});
 	}

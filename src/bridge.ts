@@ -2,7 +2,7 @@ import { serializeFocusContext } from "./focus-context.ts";
 import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { waitForBrowserStartup } from "./browser-startup.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import net from "node:net";
@@ -190,6 +190,9 @@ interface TerminalDesktopActionDetails {
 interface ListWindowsDetails {
 	tool: "find_roots";
 	query: FindParams;
+	offset?: number;
+	nextOffset?: number;
+	rootSetDigest?: string;
 	totalMatches?: number;
 	returned?: number;
 	hasMore?: boolean;
@@ -1485,7 +1488,15 @@ async function windowDetailsForFind(query: FindParams, config: ReturnType<typeof
 
 async function performListWindows(params: FindParams, signal?: AbortSignal): Promise<AgentToolResult<ListWindowsDetails>> {
 	const rawParams = params ?? {};
+	const offset = rawParams.offset ?? 0;
+	if (!Number.isInteger(offset) || offset < 0 || offset > 10000) throw new Error("find_roots.offset must be an integer from 0 to 10000.");
+	if (rawParams.expectedRootSetDigest !== undefined && !/^[a-f0-9]{64}$/.test(rawParams.expectedRootSetDigest)) throw new Error("find_roots.expectedRootSetDigest must be a 64-character lowercase SHA256 digest.");
+	const subrole = trimOrUndefined(rawParams.subrole);
+	if (rawParams.subrole !== undefined && (!subrole || subrole.length > 256)) throw new Error("find_roots.subrole must contain 1 to 256 characters.");
 	const query: FindParams = {
+		subrole,
+		offset: rawParams.offset,
+		expectedRootSetDigest: rawParams.expectedRootSetDigest,
 		text: trimOrUndefined(rawParams.text),
 		app: trimOrUndefined(rawParams.app),
 		bundleId: trimOrUndefined(rawParams.bundleId),
@@ -1515,17 +1526,23 @@ async function performListWindows(params: FindParams, signal?: AbortSignal): Pro
 			url: page.url,
 		}));
 	const allRoots = [...desktopForest, ...browserForest];
-	const forest = allRoots.filter((root) => !query.kind || root.kind === query.kind);
+	const forest = allRoots.filter((root) => (!query.kind || root.kind === query.kind) && (!query.subrole || root.subrole === query.subrole));
 	const ranked = forest.map((root, order) => ({ root, order, match: query.text ? rankedTextMatch([root.app, root.windowTitle], query.text) : { reason: "filter" as const, score: 1 } }))
 		.filter((entry) => entry.match)
 		.sort((a, b) => b.match!.score - a.match!.score || Number(b.root.isFocused) - Number(a.root.isFocused) || a.root.zOrder - b.root.zOrder || a.order - b.order);
+	// Stable numeric ids take precedence over helper refs that may be renewed on enumeration.
+	const rootSetDigest = createHash("sha256").update(JSON.stringify(ranked.map(({ root }) => [root.pid, root.windowId ?? null, root.windowId ? null : root.nativeWindowRef ?? root.windowRef, root.kind, root.subrole ?? null, root.url ?? null]))).digest("hex");
+	if (query.expectedRootSetDigest && query.expectedRootSetDigest !== rootSetDigest) throw Object.assign(new Error("Window list changed; restart find_roots at offset 0 before combining pages."), { code: "root_set_changed" });
 	const totalMatches = ranked.length;
-	const windows = ranked.slice(0, 12).map((entry) => entry.root);
-	const details: ListWindowsDetails = { tool: "find_roots", query, windows, totalMatches, returned: windows.length, hasMore: totalMatches > windows.length, config };
+	const windows = ranked.slice(offset, offset + 12).map((entry) => entry.root);
+	const hasMore = offset + windows.length < totalMatches;
+	const nextOffset = hasMore ? offset + windows.length : undefined;
+	const details: ListWindowsDetails = { tool: "find_roots", query, offset, nextOffset, rootSetDigest, windows, totalMatches, returned: windows.length, hasMore, config };
 	const lines = windows.map(formatWindowLine);
 	const text = lines.length
-		? `Found ${totalMatches} matching root${totalMatches === 1 ? "" : "s"}; returned ${windows.length}${totalMatches > windows.length ? ". Refine the filters for additional roots" : ""}. Use @r refs with observe_ui({ root: "@rN" }).\n${lines.join("\n")}`
-		: query.text || query.app || query.bundleId || query.pid || query.kind
+		? `Found ${totalMatches} matching root${totalMatches === 1 ? "" : "s"}; returned ${windows.length}${offset ? ` at offset ${offset}` : ""}${hasMore ? `. Continue with offset ${nextOffset} or refine the filters; each call re-enumerates live roots` : ""}. Use @r refs with observe_ui({ root: "@rN" }).\n${lines.join("\n")}`
+		: totalMatches > 0 ? `Found ${totalMatches} matching roots; offset ${offset} is beyond the last root. Restart at offset 0.`
+		: query.text || query.app || query.bundleId || query.pid || query.kind || query.subrole
 			? "No roots matched the supplied filters."
 			: "No roots are currently visible to pi-computer-use.";
 	return { content: [{ type: "text", text }], details };

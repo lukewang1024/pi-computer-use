@@ -97,7 +97,16 @@ export function boundToolError(tool: string, error: unknown): Error {
 	const preview = boundedPrefix(message, MODEL_PREVIEW_BYTES, MODEL_TEXT_MAX_LINES - 4);
 	const returnedBytes = new TextEncoder().encode(preview).byteLength;
 	const storageNote = entry.complete ? "" : `; only the first ${entry.storedBytes} bytes were stored`;
-	return new Error(`${preview}\n\nerror truncated: returned ${returnedBytes} of ${entry.totalBytes} utf-8 bytes\nrefine: ${refinementFor(tool)}\ncontinue: read_text({ ref: "${entry.ref}", offset: ${returnedBytes} })${storageNote}`);
+	// Keep the original error available to trusted diagnostics. Its unabridged
+	// message must not be copied into the model-facing preview.
+	const bounded = new Error(`${preview}\n\nerror truncated: returned ${returnedBytes} of ${entry.totalBytes} utf-8 bytes\nrefine: ${refinementFor(tool)}\ncontinue: read_text({ ref: "${entry.ref}", offset: ${returnedBytes} })${storageNote}`, { cause: error });
+	if (error instanceof Error) {
+		const code = (error as Error & { code?: unknown }).code;
+		if (typeof code === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(code)) {
+			Object.defineProperty(bounded, "code", { value: code, enumerable: true });
+		}
+	}
+	return bounded;
 }
 
 export function readStoredOutput(ref: string, offsetValue: unknown): { text: string; offset: number; limit: number; totalBytes: number; hasMore: boolean; complete: boolean } | undefined {

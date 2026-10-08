@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { windowsArchitecture, verifyWindowsPe } from "./windows-architecture.mjs";
 
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, execFile as execFileCallback } from "node:child_process";
@@ -1296,8 +1297,8 @@ async function buildHelper(arch, outputPath) {
 	await fs.chmod(outputPath, 0o755);
 }
 
-function windowsBinaryPath() {
-	const releaseDir = path.join(windowsCrateDir, "target", "release");
+function windowsBinaryPath(target) {
+	const releaseDir = path.join(windowsCrateDir, "target", ...(target ? [target] : []), "release");
 	return {
 		exePath: path.join(releaseDir, "windows-bridge.exe"),
 		binPath: path.join(releaseDir, "windows-bridge"),
@@ -1305,8 +1306,10 @@ function windowsBinaryPath() {
 }
 
 async function setupWindowsHelper() {
-	const prebuiltPath = path.join(rootDir, "prebuilt", "windows", "windows-bridge.exe");
+	const arch = windowsArchitecture();
+	const prebuiltPath = path.join(rootDir, "prebuilt", "windows", ...(arch === "arm64" ? [arch] : []), "windows-bridge.exe");
 	if (await exists(prebuiltPath)) {
+		verifyWindowsPe(await fs.readFile(prebuiltPath), arch);
 		const { changed } = await copyIfChanged(prebuiltPath, windowsHelperDestPath);
 		console.log(changed
 			? `[pi-computer-use] installed Windows helper from prebuilt to ${windowsHelperDestPath}`
@@ -1316,9 +1319,11 @@ async function setupWindowsHelper() {
 
 	if (allowBuildFallback) {
 		console.log("[pi-computer-use] Windows prebuilt helper missing; attempting source build with cargo...");
-		await run("cargo", ["build", "--release", "--manifest-path", path.join(windowsCrateDir, "Cargo.toml")]);
-		const { exePath, binPath } = windowsBinaryPath();
+		const target = arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+		await run("cargo", ["build", "--release", "--target", target, "--manifest-path", path.join(windowsCrateDir, "Cargo.toml")]);
+		const { exePath, binPath } = windowsBinaryPath(target);
 		const cargoOutput = (await exists(exePath)) ? exePath : (await exists(binPath)) ? binPath : exePath;
+		verifyWindowsPe(await fs.readFile(cargoOutput), arch);
 		const { changed } = await copyIfChanged(cargoOutput, windowsHelperDestPath);
 		console.log(changed
 			? `[pi-computer-use] built and installed Windows helper at ${windowsHelperDestPath}`

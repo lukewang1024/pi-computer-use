@@ -221,6 +221,11 @@ windows share the same application and title. This filter is case sensitive
 and combines with `pid`, `app`, `kind` and text filters before pagination. Root
 references and foreground checks retain their existing requirements.
 
+Windows PrintWindow blank detection also checks the OS-reported client rectangle
+so non-client borders cannot hide a uniform GPU surface. The 97% criterion and
+exact foreground/owner/desktop/geometry screen-fallback guards are unchanged.
+Invalid or clipped client rectangles never classify a capture.
+
 Windows observations with an image expose `captureDiagnostics`: the actual
 `print-window` or `screen-bitblt` method, PrintWindow return value and original
 DIB row count, dominant-color and total pixel counts before resizing, original

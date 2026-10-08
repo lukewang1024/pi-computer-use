@@ -220,3 +220,10 @@ Use `subrole` for an exact platform subrole or Windows window class when many
 windows share the same application and title. This filter is case sensitive
 and combines with `pid`, `app`, `kind` and text filters before pagination. Root
 references and foreground checks retain their existing requirements.
+
+Windows observations with an image expose `captureDiagnostics`: the actual
+`print-window` or `screen-bitblt` method, PrintWindow return value and original
+DIB row count, dominant-color and total pixel counts before resizing, original
+image dimensions, and any screen-fallback foreground checks. A near-uniform
+image is capture evidence; it does not establish that the application rendered
+a white screen. These fields do not authorize input or change capture guards.

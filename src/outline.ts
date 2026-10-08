@@ -85,6 +85,7 @@ export interface LookResponse {
 	imageDiagnostics?: { code?: string; nativeCompletion: "completed" | "unconfirmed"; readOnly: true };
 	ocrDiagnostics?: { status: "succeeded" | "failed"; nativeCompletion: "completed" | "unconfirmed"; readOnly: true; errorKind?: string; operationNotStarted?: boolean; cancellationRequested?: boolean; errorDomain?: string; errorCode?: number; error?: string };
 	uiaDiagnostics?: Record<string, unknown>;
+	captureDiagnostics?: Record<string, unknown>;
 	outline: OutlineNode;
 	timings: Record<string, number>;
 	readText?: { requested?: "auto" | "always" | "never"; executed: boolean };
@@ -268,6 +269,7 @@ export function parseLookResponse(raw: unknown): LookResponse {
 		} : undefined,
 		uiaDiagnostics: isRecord(record.uiaDiagnostics) ? { ...record.uiaDiagnostics,
 			error: typeof record.uiaDiagnostics.error === "string" ? record.uiaDiagnostics.error.slice(0, 1024) : undefined } : undefined,
+		captureDiagnostics: isRecord(record.captureDiagnostics) ? record.captureDiagnostics : undefined,
 		outline: outline.root,
 		timings: isRecord(record.timings) ? Object.fromEntries(Object.entries(record.timings).map(([key, value]) => [key, toNumber(value)])) : {},
 		readText: readText ? { requested: requestedReadText, executed: toBoolean(readText.executed) } : undefined,

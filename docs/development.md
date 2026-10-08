@@ -123,6 +123,13 @@ in CI. If the identity differs, setup still refuses replacement. Same-content
 local setup does not re-sign. Ad-hoc changes continue to require the explicit
 `PI_COMPUTER_USE_ALLOW_ADHOC_UPDATE=1` development option.
 
+Keep `PI_COMPUTER_USE_LOCAL_BUILD=1` in the desktop host environment when
+using this explicit local build mode. Runtime freshness then verifies the exact
+source and toolchain fingerprint, the sealed app signature, and the pinned local
+signing identity before accepting the installed executable hash. Missing or
+changed inputs fail before desktop input; runtime checks never rebuild or sign.
+The running helper must still match that executable, protocol, and app path.
+
 Release setup:
 
 1. Run `./scripts/make-signing-cert.sh` once, or use a Developer ID Application certificate.

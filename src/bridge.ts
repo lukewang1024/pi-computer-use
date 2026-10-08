@@ -2246,28 +2246,34 @@ function clearDesktopOperationState(state: OperationState): void {
 	state.currentNote = undefined;
 }
 
+async function exactRootAvailability(target: ResolvedTarget): Promise<boolean | undefined> {
+	try {
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			const roots = await currentPlatformBackend.listRoots({ pid: target.pid });
+			if (roots.some((root) => exactPlatformRootMatchesTarget(root, target))) return true;
+			if (attempt < 2) await sleep(75);
+		}
+		return false;
+	} catch {
+		// A failed identity probe cannot prove that the root closed.
+		return undefined;
+	}
+}
+
 async function terminalDesktopActionResult(
 	target: ResolvedTarget,
 	baseStateId: string,
 	execution: ExecutionTrace,
 	error: unknown,
 	condition?: ReturnType<typeof validateCondition>,
+	confirmedRootAbsent = false,
 ): Promise<AgentToolResult<TerminalDesktopActionDetails>> {
-	let exactRootAvailable: boolean | undefined;
+	let exactRootAvailable: boolean | undefined = confirmedRootAbsent ? false : undefined;
 	const transportUnknown = execution.transport?.outcome === "unknown";
 	const partialInputUnknown = execution.inputDispatch?.outcome === "unknown";
 	const dispatchUnknown = transportUnknown || partialInputUnknown;
-	if (!dispatchUnknown) {
-		try {
-			for (let attempt = 0; attempt < 3; attempt += 1) {
-				const roots = await currentPlatformBackend.listRoots({ pid: target.pid });
-				exactRootAvailable = roots.some((root) => exactPlatformRootMatchesTarget(root, target));
-				if (exactRootAvailable) break;
-				if (attempt < 2) await sleep(75);
-			}
-		} catch {
-			// A failed identity probe cannot prove that the root closed.
-		}
+	if (!dispatchUnknown && !confirmedRootAbsent) {
+		exactRootAvailable = await exactRootAvailability(target);
 	}
 	const targetClosed = exactRootAvailable === false;
 	if (targetClosed && !(execution.rootDelta ?? []).some((delta) => delta.change === "closed" && delta.pid === target.pid && (delta.ref === target.windowRef || delta.ref === target.nativeWindowRef))) {
@@ -2366,6 +2372,16 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 				new Error(execution.error?.message ?? "Helper transport ended before a terminal native response."),
 				condition,
 			);
+		}
+		// A closed-root hint is not itself proof. Reconcile the exact native
+		// identity before trying to capture a hidden/retired window, which may
+		// otherwise spend seconds in PrintWindow and UIA before failing.
+		const sourceClosedHint = (execution.rootDelta ?? []).some((delta) =>
+			delta.change === "closed" && delta.pid === target.pid &&
+			(delta.ref === target.windowRef || delta.ref === target.nativeWindowRef));
+		if (sourceClosedHint && await exactRootAvailability(target) === false) {
+			return await terminalDesktopActionResult(target, baseView.stateId, execution,
+				new Error("The exact source root is absent after native action completion."), condition, true);
 		}
 		const executedActions = actions.slice(0, execution.actionCount ?? actions.length);
 		try {

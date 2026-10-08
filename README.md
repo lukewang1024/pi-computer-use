@@ -222,7 +222,9 @@ and combines with `pid`, `app`, `kind` and text filters before pagination. Root
 references and foreground checks retain their existing requirements.
 
 Windows PrintWindow blank detection also checks the OS-reported client rectangle
-so non-client borders cannot hide a uniform GPU surface. The 97% criterion and
+so non-client borders cannot hide a uniform GPU surface. This extra check requires
+a single client color bucket, preserving sparse visible text. The whole-image
+97% criterion and
 exact foreground/owner/desktop/geometry screen-fallback guards are unchanged.
 Invalid or clipped client rectangles never classify a capture.
 

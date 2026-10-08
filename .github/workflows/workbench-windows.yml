@@ -7,83 +7,29 @@ concurrency:
   group: workbench-package-${{ github.sha }}
   cancel-in-progress: false
 jobs:
-  checks:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm test && npm run test:windows-scripts
-  helpers:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-latest
-            platform: windows
-            arch: x64
-          - runner: windows-latest
-            platform: windows
-            arch: arm64
-          - runner: macos-14
-            platform: darwin
-            arch: universal
-          - runner: ubuntu-latest
-            platform: linux
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-pc-windows-msvc
-      - name: Remove checked-in historical prebuilt helpers
-        shell: python
-        run: |
-          import shutil
-          shutil.rmtree("prebuilt", ignore_errors=True)
-      - name: Test Windows implementation
-        if: matrix.platform == 'windows'
-        run: cargo test --locked --manifest-path native/windows/bridge-rs/Cargo.toml
-      - name: Build helper from this exact source
-        run: node scripts/build-native.mjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --no-sign
-      - uses: actions/upload-artifact@v7
-        with:
-          name: helper-${{ matrix.platform }}-${{ matrix.arch }}
-          path: prebuilt/
-          if-no-files-found: error
-  package:
-    needs: [helpers, checks]
+  candidate:
+    uses: ./.github/workflows/candidate-package.yml
+    permissions:
+      contents: read
+  publish:
+    needs: candidate
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
         with:
-          node-version: 24
-      - name: Remove historical prebuilt helpers before assembling exact CI outputs
-        run: python -c 'import shutil; shutil.rmtree("prebuilt", ignore_errors=True)'
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
-          pattern: helper-*
-          path: prebuilt/
-          merge-multiple: true
-      - name: Restore executable modes
-        run: chmod 755 prebuilt/macos/universal/bridge prebuilt/linux/*/linux-bridge
-      - name: Package final source and all helpers
-        run: python scripts/package-workbench-windows.py
+          name: checked-candidate-${{ github.sha }}
+          path: dist
+      - name: Verify checked package without rebuilding or repacking
+        run: python3 scripts/verify-workbench-candidate.py --directory dist --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID"
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(node -p 'require("./package.json").version')
-          gh release create "v$version" dist/*.tgz dist/SHA256SUMS dist/provenance.json --target "$GITHUB_SHA" --title "Workbench $version" --notes "Final source and native helpers for Windows, Linux, and macOS. Mac upgrades use LOCAL_BUILD and the existing local signing pin; no local private identity is distributed."
+          version=$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')
+          gh release create "v$version" dist/*.tgz dist/SHA256SUMS dist/provenance.json --target "$GITHUB_SHA" --title "Workbench $version" --notes "Final checked source and native helpers for Windows, Linux, and macOS. Mac upgrades use LOCAL_BUILD and the existing local signing pin; no local private identity is distributed."

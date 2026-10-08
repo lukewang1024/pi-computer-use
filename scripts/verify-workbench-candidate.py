@@ -28,7 +28,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def verify(directory, revision, run_id, root=ROOT):
+def verify(directory, revision, run_id, root=ROOT, publisher_run_id=None):
     receipt = json.loads((directory / 'candidate-build-receipt.json').read_text())
     if (receipt.get('sourceCommit') != revision or receipt.get('runId') != str(run_id)
             or receipt.get('published') is not False):
@@ -84,6 +84,9 @@ def verify(directory, revision, run_id, root=ROOT):
     provenance = dict(version=source_version, revision=revision, artifact=artifact.name,
                       sha256=archive_digest, helpers=helpers,
                       macInstallPolicy='LOCAL_BUILD with existing local identity pin')
+    provenance['builderRunId'] = str(run_id)
+    if publisher_run_id is not None:
+        provenance['publisherRunId'] = str(publisher_run_id)
     (directory / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     (directory / 'SHA256SUMS').write_text(archive_digest + '  ' + artifact.name + '\n')
     return provenance
@@ -94,11 +97,12 @@ def main():
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--run-id', required=True)
+    parser.add_argument('--publisher-run-id')
     args = parser.parse_args()
     actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     if actual != args.revision:
         raise RuntimeError('checkout revision mismatch')
-    print(json.dumps(verify(args.directory, args.revision, args.run_id)))
+    print(json.dumps(verify(args.directory, args.revision, args.run_id, publisher_run_id=args.publisher_run_id)))
 
 
 if __name__ == '__main__':

@@ -205,3 +205,18 @@ result and independently verify saved output. Do not automatically replay it.
 When a fresh native element declares `AXPress`, use `{"action":"invoke","ref":"@eN"}` to invoke that action once. This also supports text controls where ordinary `press` focuses the editor. Invoke keeps the exact observed window and reference, rejects unsupported targets before dispatch, and has no pointer or keyboard fallback. Its result remains `unknown`: inspect fresh state and independently verify the effect before proceeding or repeating an action. Browser targets and other platforms are unsupported.
 
 For native macOS controls declaring `AXPress` or `AXConfirm`, `isEnabled` reports the observed `AXEnabled` value when available. A missing value is unknown. Outline, `search_ui` and `inspect_ui` summaries mark disabled controls; declared actions describe capability and do not guarantee current availability. An observed disabled target rejects before native dispatch, and the helper independently rechecks availability immediately before an explicit native action.
+
+### Finding additional native roots
+
+`find_roots` returns at most 12 roots. When `hasMore` is true, repeat the same
+filters with the returned `nextOffset` as `offset` and `rootSetDigest` as
+`expectedRootSetDigest`. A changed ranked identity list rejects the page and
+requires restarting at offset 0. Each call re-enumerates live
+windows, so pages are not a frozen snapshot: verify fresh identities before
+actions, and restart at offset 0 when the window set changes. An offset beyond
+the current result returns an empty page with `hasMore: false`.
+
+Use `subrole` for an exact platform subrole or Windows window class when many
+windows share the same application and title. This filter is case sensitive
+and combines with `pid`, `app`, `kind` and text filters before pagination. Root
+references and foreground checks retain their existing requirements.

@@ -7,6 +7,12 @@ export interface ObserveTargetParams {
 }
 
 export interface FindParams {
+	/** Exact platform subrole (Windows window class or macOS AX subrole). */
+	subrole?: string;
+	/** Offset in a freshly enumerated ranked result; each page contains at most 12 roots. */
+	offset?: number;
+	/** Reject a page if the ranked root identities changed since the prior page. */
+	expectedRootSetDigest?: string;
 	text?: string;
 	app?: string;
 	bundleId?: string;

@@ -159,7 +159,7 @@ unsafe fn read_capture_frame(hwnd: HWND) -> Option<CaptureFrame> {
 }
 
 #[cfg(any(windows, test))]
-fn is_effectively_blank_bgra(bits: &[u8]) -> bool {
+fn dominant_color_counts_bgra(bits: &[u8]) -> (usize, usize) {
     let mut pixel_count = 0usize;
     let mut buckets: HashMap<(u8, u8, u8), usize> = HashMap::new();
 
@@ -170,12 +170,13 @@ fn is_effectively_blank_bgra(bits: &[u8]) -> bool {
         *buckets.entry(bucket).or_default() += 1;
     }
 
-    pixel_count > 0
-        && buckets
-            .values()
-            .copied()
-            .max()
-            .is_some_and(|count| count * 100 >= pixel_count * 97)
+    (buckets.values().copied().max().unwrap_or(0), pixel_count)
+}
+
+#[cfg(any(windows, test))]
+fn is_effectively_blank_bgra(bits: &[u8]) -> bool {
+    let (dominant, total) = dominant_color_counts_bgra(bits);
+    total > 0 && dominant * 100 >= total * 97
 }
 
 #[cfg(windows)]
@@ -273,7 +274,7 @@ fn screenshot_impl(
         captured =
             unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension, owner) };
     }
-    let (png_base64, output_width, output_height, captured_frame) = captured?;
+    let (png_base64, output_width, output_height, captured_frame, capture_diagnostics) = captured?;
     let image_capture_ms = image_started.elapsed().as_millis() as u64;
 
     let state_id = StateId::fresh("s");
@@ -292,6 +293,7 @@ fn screenshot_impl(
             "imageBase64": png_base64,
         },
         "warnings": warnings,
+        "captureDiagnostics": capture_diagnostics,
     });
 
     // 5. Optionally extract UIA accessibility elements.
@@ -336,7 +338,7 @@ unsafe fn gdi_capture_to_base64(
     height: i32,
     max_dimension: Option<u32>,
     owner: CaptureFrame,
-) -> Result<(String, u32, u32, CaptureFrame), ProtocolError> {
+) -> Result<(String, u32, u32, CaptureFrame, Value), ProtocolError> {
     let before = read_capture_frame(hwnd).ok_or_else(|| {
         ProtocolError::new(
             "Capture target identity unavailable",
@@ -423,7 +425,9 @@ unsafe fn gdi_capture_to_base64(
 
     // PrintWindow can succeed with uniform black, white, or gray GPU surfaces.
     // Fall back to compositor-visible pixels when it carries no useful detail.
-    let print_window_blank = is_effectively_blank_bgra(&bits);
+    let (print_dominant, print_total) = dominant_color_counts_bgra(&bits);
+    let print_window_blank = print_total > 0 && print_dominant * 100 >= print_total * 97;
+    let print_dib_rows = dib_ok;
     let mut fallback_result = None;
     let mut fallback_gate = None;
     if !pw_ok.as_bool() || dib_ok == 0 || print_window_blank {
@@ -551,6 +555,19 @@ unsafe fn gdi_capture_to_base64(
         output_width,
         output_height,
         before,
+        json!({
+            "version": 1,
+            "method": if fallback_result == Some(true) { "screen-bitblt" } else { "print-window" },
+            "printWindowSucceeded": pw_ok.as_bool(),
+            "printWindowDibRows": print_dib_rows,
+            "printWindowBlank": print_window_blank,
+            "printWindowDominantPixels": print_dominant,
+            "printWindowTotalPixels": print_total,
+            "sourceWidth": width,
+            "sourceHeight": height,
+            "screenFallbackValid": fallback_result,
+            "foregroundGate": fallback_gate,
+        }),
     ))
 }
 

@@ -95,6 +95,7 @@ interface ComputerUseDetails {
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
 	observationTimings?: Record<string, number>;
 	uiaDiagnostics?: Record<string, unknown>;
+	captureDiagnostics?: Record<string, unknown>;
 	ocrDiagnostics?: LookResponse["ocrDiagnostics"];
 	observation?: { status: "semantic_only"; readOnly: true; imageError: string; nativeCompletion: "completed" | "unconfirmed" } | { status: "pixels_only"; readOnly: true };
 	tool: string;
@@ -1157,6 +1158,7 @@ async function buildToolResult(
 		focusContext: serializeFocusContext(result.look.focusContext, result.outline),
 		observationTimings: result.look.timings,
 		uiaDiagnostics: result.look.uiaDiagnostics,
+		captureDiagnostics: result.look.captureDiagnostics,
 		ocrDiagnostics: result.look.ocrDiagnostics,
 		view: useDiff ? "diff" : "full",
 		baseStateId: transition ? base?.stateId : undefined,

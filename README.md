@@ -111,6 +111,23 @@ The architecture is centered on immutable, state-scoped observations. Desktop su
 
 MIT
 
+### Managed browser downloads
+
+A trusted integration can provision an existing absolute directory and set
+`PI_COMPUTER_USE_DOWNLOAD_ROOT` before launching its SDK host. Each
+`launch_browser` creates a private unique subdirectory there and returns its
+path as `details.managedDownloadDirectory`. The root's final component must
+be a directory rather than a symlink or junction. This setting is machine
+configuration, not a tool parameter or filesystem permission grant: the host
+must authorize the root through its existing filesystem policy.
+
+The owned browser starts on a blank page. Download configuration must succeed
+before navigation to the requested URL; failure closes that browser instead
+of falling back to the user's Downloads directory. Without this setting,
+standalone browser behavior is unchanged. Downloaded files are retained for
+inspection; managed integrations should use their normal guarded filesystem
+operations to remove verified artifacts explicitly.
+
 
 ### macOS OCR failure and pixel evidence
 

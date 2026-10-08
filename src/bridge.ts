@@ -1,3 +1,4 @@
+import { prepareManagedDownloadDirectory } from "./browser-downloads.ts";
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
 import { serializeFocusContext } from "./focus-context.ts";
 import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
@@ -11,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, preflightActionSequence, type ActionState, type PreparedAction } from "./actions.ts";
-import { validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpSetManagedDownloadDirectory, validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineAncestors, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineAncestors, type SerializedOutlineSearchMatch } from "./outline.ts";
@@ -232,6 +233,7 @@ interface ListWindowsDetails {
 }
 
 interface BrowserObservationDetails {
+	managedDownloadDirectory?: string;
 	diagnostics?: CdpPageSnapshot["diagnostics"];
 	capture?: { stateId: string; width: number; height: number; cssWidth: number; cssHeight: number; pixelScale: number; coordinateSpace: "browser-viewport-screenshot-pixels" };
 	tool: string;
@@ -2667,6 +2669,7 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 	if (requestedUrl && !/^https?:\/\//i.test(requestedUrl)) throw new Error("launch_browser.url must be an absolute HTTP(S) URL.");
 	const url = requestedUrl ?? "about:blank";
 	const profileDir = path.join(os.tmpdir(), `pi-${browser}-cdp-${port}`);
+	const downloadDirectory = await prepareManagedDownloadDirectory(process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT);
 	disconnectCdp();
 	runtimeState.managedBrowser?.kill("SIGTERM");
 	const args = [
@@ -2674,7 +2677,7 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		`--user-data-dir=${profileDir}`,
 		"--no-first-run",
 		"--no-default-browser-check",
-		url,
+		downloadDirectory ? "about:blank" : url,
 	];
 	if (runtimeState.previousCdpPort === undefined && runtimeState.managedBrowserCdpPort === undefined) {
 		runtimeState.previousCdpPort = process.env.PI_COMPUTER_USE_CDP_PORT;
@@ -2686,6 +2689,22 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 	process.env.PI_COMPUTER_USE_CDP_PORT = String(port);
 	try {
 		await waitForBrowserStartup(managedBrowser, (startupSignal) => waitForCdpPort(port, startupSignal), signal);
+		const page = (await listCdpPageContexts())[0];
+		if (!page) throw new Error("Managed browser launched without a CDP page context.");
+		if (downloadDirectory) {
+			if (!await cdpSetManagedDownloadDirectory(page.contextId, downloadDirectory)) {
+				throw new Error("Managed browser download directory could not be configured.");
+			}
+			if (requestedUrl && !await cdpNavigateContext(page.contextId, requestedUrl)) {
+				throw new Error("Managed browser context disappeared before navigation.");
+			}
+		}
+		const resourceKey = `cdp:${page.targetId}`;
+		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
+		if (!scheduled.value) throw new Error("Managed browser page could not be observed after launch.");
+		const observation = browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
+		if (downloadDirectory) observation.details.managedDownloadDirectory = downloadDirectory;
+		return observation;
 	} catch (error) {
 		if (runtimeState.managedBrowser === managedBrowser) {
 			runtimeState.managedBrowser = undefined;
@@ -2697,12 +2716,6 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		}
 		throw error;
 	}
-	const page = (await listCdpPageContexts())[0];
-	if (!page) throw new Error("Managed browser launched without a CDP page context.");
-	const resourceKey = `cdp:${page.targetId}`;
-	const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
-	if (!scheduled.value) throw new Error("Managed browser page could not be observed after launch.");
-	return browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
 }
 
 async function performNavigateBrowser(params: NavigateBrowserParams): Promise<AgentToolResult<BrowserObservationDetails>> {

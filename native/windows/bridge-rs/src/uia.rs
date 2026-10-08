@@ -1099,74 +1099,125 @@ mod native {
         let mut identity = ElementIdentityResolver::new(runtime_id_target, automation_id)?;
         let com = ComGuard::new()?;
         let started = Instant::now();
-        let uia: IUIAutomation = if read_only { read_only_client()? } else { unsafe {
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| format!("CoCreateInstance IUIAutomation: {e}"))?
-        } };
-        let read_budget_available = || {
-            if read_only && started.elapsed().as_millis() >= EXTRACTION_BUDGET_MS as u128 {
-                Err("UIA scoped read resolution budget exceeded".to_owned())
-            } else { Ok(()) }
+        // Resolution is read-only even when its caller will subsequently mutate.
+        // Capture the provider defaults so finite lookup timeouts cannot turn a
+        // later Invoke timeout into a misleading pre-dispatch stale-reference error.
+        let action_client = if read_only { None } else {
+            let modern: IUIAutomation2 = unsafe {
+                CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| format!("Create action resolution client: {e}"))?
+            };
+            let connection = unsafe { modern.ConnectionTimeout() }
+                .map_err(|e| format!("Read action connection timeout: {e}"))?;
+            let transaction = unsafe { modern.TransactionTimeout() }
+                .map_err(|e| format!("Read action transaction timeout: {e}"))?;
+            unsafe {
+                modern.SetConnectionTimeout(2_000)
+                    .map_err(|e| format!("Set action resolution connection timeout: {e}"))?;
+                modern.SetTransactionTimeout(3_000)
+                    .map_err(|e| format!("Set action resolution transaction timeout: {e}"))?;
+            }
+            Some((modern, connection, transaction))
         };
-        read_budget_available()?;
-        let root = unsafe {
-            uia.ElementFromHandle(HWND(hwnd as *mut _))
-                .map_err(|e| format!("ElementFromHandle: {e}"))?
+        let uia: IUIAutomation = match &action_client {
+            Some((modern, _, _)) => modern.cast()
+                .map_err(|e| format!("Action resolution base interface: {e}"))?,
+            None => read_only_client()?,
         };
-        if !runtime_id_target.is_empty() && identity.matches(runtime_id(&root).as_deref(), "") {
-            return Ok((com, uia, root));
-        }
-        // UIA RuntimeId is exposed as a SAFEARRAY and is not reliably accepted by
-        // CreatePropertyCondition across providers/windows-rs VARIANT conversion,
-        // so use AutomationId as the fast server-side lookup when available and
-        // keep RuntimeId as the authoritative equality check/fallback scan.
-        if !automation_id.is_empty() && !runtime_id_target.is_empty() {
-            let value = VARIANT::from(automation_id);
-            if let Ok(condition) =
-                unsafe { uia.CreatePropertyCondition(UIA_AutomationIdPropertyId, &value) }
-            {
-                if let Ok(element) = unsafe { root.FindFirst(TreeScope_Subtree, &condition) } {
-                    if identity.matches(runtime_id(&element).as_deref(), "") {
-                        return Ok((com, uia, element));
+        let read_budget_available = || -> Result<(), String> {
+            let (connection, transaction) = crate::uia_resolution::timeouts(
+                started.elapsed().as_millis(), EXTRACTION_BUDGET_MS)?;
+            if let Some((modern, _, _)) = &action_client {
+                unsafe {
+                    modern.SetConnectionTimeout(connection)
+                        .map_err(|e| format!("Update resolution connection timeout: {e}"))?;
+                    modern.SetTransactionTimeout(transaction)
+                        .map_err(|e| format!("Update resolution transaction timeout: {e}"))?;
+                }
+            }
+            Ok(())
+        };
+        let resolved = (|| -> Result<IUIAutomationElement, String> {
+            read_budget_available()?;
+            let root = unsafe {
+                uia.ElementFromHandle(HWND(hwnd as *mut _))
+                    .map_err(|e| format!("ElementFromHandle: {e}"))?
+            };
+            read_budget_available()?;
+            if !runtime_id_target.is_empty() && identity.matches(runtime_id(&root).as_deref(), "") {
+                return Ok(root);
+            }
+            // UIA RuntimeId is exposed as a SAFEARRAY and is not reliably accepted by
+            // CreatePropertyCondition across providers/windows-rs VARIANT conversion,
+            // so use AutomationId as the fast server-side lookup when available and
+            // keep RuntimeId as the authoritative equality check/fallback scan.
+            if !automation_id.is_empty() && !runtime_id_target.is_empty() {
+                read_budget_available()?;
+                let value = VARIANT::from(automation_id);
+                if let Ok(condition) =
+                    unsafe { uia.CreatePropertyCondition(UIA_AutomationIdPropertyId, &value) }
+                {
+                    read_budget_available()?;
+                    if let Ok(element) = unsafe { root.FindFirst(TreeScope_Subtree, &condition) } {
+                        read_budget_available()?;
+                        if identity.matches(runtime_id(&element).as_deref(), "") {
+                            return Ok(element);
+                        }
                     }
                 }
             }
-        }
 
-        read_budget_available()?;
-        let condition = unsafe {
-            uia.CreateTrueCondition()
-                .map_err(|e| format!("CreateTrueCondition: {e}"))?
-        };
-        let found = unsafe {
-            root.FindAll(TreeScope_Subtree, &condition)
-                .map_err(|e| format!("FindAll: {e}"))?
-        };
-        let count = unsafe {
-            found
-                .Length()
-                .map_err(|e| format!("ElementArray.Length: {e}"))?
-        };
-        for i in 0..count {
             read_budget_available()?;
-            let element = unsafe {
+            let condition = unsafe {
+                uia.CreateTrueCondition()
+                    .map_err(|e| format!("CreateTrueCondition: {e}"))?
+            };
+            read_budget_available()?;
+            let found = unsafe {
+                root.FindAll(TreeScope_Subtree, &condition)
+                    .map_err(|e| format!("FindAll: {e}"))?
+            };
+            read_budget_available()?;
+            let count = unsafe {
                 found
-                    .GetElement(i)
-                    .map_err(|e| format!("GetElement({i}): {e}"))?
+                    .Length()
+                    .map_err(|e| format!("ElementArray.Length: {e}"))?
             };
-            if !runtime_id_target.is_empty() {
-                if identity.matches(runtime_id(&element).as_deref(), "") {
-                    return Ok((com, uia, element));
+            for i in 0..count {
+                read_budget_available()?;
+                let element = unsafe {
+                    found
+                        .GetElement(i)
+                        .map_err(|e| format!("GetElement({i}): {e}"))?
+                };
+                read_budget_available()?;
+                if !runtime_id_target.is_empty() {
+                    if identity.matches(runtime_id(&element).as_deref(), "") {
+                        return Ok(element);
+                    }
+                    continue;
                 }
-                continue;
+                let candidate_id = unsafe {
+                    element.CurrentAutomationId()
+                        .map_err(|e| format!("CurrentAutomationId: {e}"))?.to_string()
+                };
+                identity.observe(None, &candidate_id, element);
             }
-            let candidate_id = unsafe {
-                element.CurrentAutomationId()
-                    .map_err(|e| format!("CurrentAutomationId: {e}"))?.to_string()
-            };
-            identity.observe(None, &candidate_id, element);
-        }
-        Ok((com, uia, identity.finish()?))
+            identity.finish()
+        })();
+        let element = crate::uia_resolution::finish(resolved, || {
+            if let Some((modern, connection, transaction)) = &action_client {
+                unsafe {
+                    modern.SetConnectionTimeout(*connection)
+                        .map_err(|e| format!("Restore action connection timeout; input was not sent: {e}"))?;
+                    modern.SetTransactionTimeout(*transaction)
+                        .map_err(|e| format!("Restore action transaction timeout; input was not sent: {e}"))?;
+                }
+            }
+            Ok(())
+        }, || crate::uia_resolution::timeouts(
+            started.elapsed().as_millis(), EXTRACTION_BUDGET_MS).map(|_| ()))?;
+        Ok((com, uia, element))
     }
 
     fn read_text_from_element(element: &IUIAutomationElement) -> String {

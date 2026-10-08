@@ -23,6 +23,10 @@ jobs:
             arch: x64
             runner: windows-latest
             binary: prebuilt/windows/windows-bridge.exe
+          - platform: windows
+            arch: arm64
+            runner: windows-latest
+            binary: prebuilt/windows/arm64/windows-bridge.exe
           - platform: linux
             arch: x64
             runner: ubuntu-latest
@@ -60,6 +64,10 @@ jobs:
           key: cargo-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-cache-key.outputs.hash }}-${{ hashFiles(format('native/{0}/bridge-rs/Cargo.lock', matrix.platform)) }}-${{ github.sha }}
           restore-keys: |
             cargo-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-cache-key.outputs.hash }}-${{ hashFiles(format('native/{0}/bridge-rs/Cargo.lock', matrix.platform)) }}-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - run: node scripts/check-windows-architecture.mjs
       - name: Test Windows helper
         if: matrix.platform == 'windows'
         run: cargo test --locked --manifest-path native/windows/bridge-rs/Cargo.toml
@@ -122,6 +130,10 @@ jobs:
           path: prebuilt/windows
       - uses: actions/download-artifact@v8
         with:
+          name: candidate-${{ github.sha }}-windows-arm64
+          path: prebuilt/windows/arm64
+      - uses: actions/download-artifact@v8
+        with:
           name: candidate-${{ github.sha }}-linux-x64
           path: prebuilt/linux/x64
       - uses: actions/download-artifact@v8
@@ -151,6 +163,7 @@ jobs:
           files = [package,
               'prebuilt/macos/universal/pi-computer-use.app/Contents/MacOS/bridge',
               'prebuilt/windows/windows-bridge.exe',
+              'prebuilt/windows/arm64/windows-bridge.exe',
               'prebuilt/linux/x64/linux-bridge', 'prebuilt/linux/arm64/linux-bridge']
           receipt = dict(sourceCommit=os.environ['CANDIDATE_SHA'],
               runId=os.environ['CANDIDATE_RUN_ID'],

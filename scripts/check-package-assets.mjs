@@ -18,6 +18,7 @@ assert.deepEqual(
 const requiredPrebuilt = [
 	"prebuilt/macos/universal/pi-computer-use.app/Contents/MacOS/bridge",
 	"prebuilt/windows/windows-bridge.exe",
+	"prebuilt/windows/arm64/windows-bridge.exe",
 	"prebuilt/linux/x64/linux-bridge",
 	"prebuilt/linux/arm64/linux-bridge",
 ];

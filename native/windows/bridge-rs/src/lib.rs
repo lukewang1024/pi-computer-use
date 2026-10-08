@@ -20,3 +20,6 @@ pub mod foreground;
 
 #[cfg(any(windows, test))]
 pub mod read_worker;
+
+#[cfg(any(windows, test))]
+mod uia_resolution;

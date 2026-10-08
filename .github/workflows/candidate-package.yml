@@ -42,6 +42,24 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Identify Rust toolchain for dependency cache
+        id: rust-cache-key
+        shell: bash
+        run: printf 'hash=%s\n' "$(rustc -Vv | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust dependencies and build intermediates
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        continue-on-error: true
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            native/${{ matrix.platform }}/bridge-rs/target
+          key: cargo-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-cache-key.outputs.hash }}-${{ hashFiles(format('native/{0}/bridge-rs/Cargo.lock', matrix.platform)) }}-${{ github.sha }}
+          restore-keys: |
+            cargo-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-cache-key.outputs.hash }}-${{ hashFiles(format('native/{0}/bridge-rs/Cargo.lock', matrix.platform)) }}-
       - name: Test Windows helper
         if: matrix.platform == 'windows'
         run: cargo test --locked --manifest-path native/windows/bridge-rs/Cargo.toml

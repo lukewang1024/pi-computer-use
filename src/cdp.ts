@@ -68,10 +68,11 @@ export interface CdpPageSnapshot {
 	outline: SerializedOutline;
 	diagnostics: {
 		cdp: "connected";
+		semanticCollection?: "skipped";
 		targetCount: number;
 		accessibilityCoverage?: CdpAccessibilityCoverage;
 		/** Monotonic wall times. Parallel collection phases overlap. */
-		timings?: Partial<Record<"discoveryMs" | "connectMs" | "textReadMs" | "accessibilityReadMs" | "imageCaptureMs" | "collectionMs" | "outlineBuildMs" | "snapshotMs" | "disconnectMs", number>>;
+		timings?: Partial<Record<"discoveryMs" | "connectMs" | "textReadMs" | "accessibilityReadMs" | "imageCaptureMs" | "pixelCaptureMs" | "collectionMs" | "outlineBuildMs" | "snapshotMs" | "disconnectMs", number>>;
 		browserResultTimings?: { restoreMs: number; diffMs: number; foldMs: number; resultBuildMs: number };
 	};
 }
@@ -1000,7 +1001,30 @@ export async function cdpCaptureForContext(contextId: string): Promise<CdpViewpo
 	return await withCdpContextTab(contextId, tab => tab.captureViewport());
 }
 
-export async function cdpSnapshotForContext(contextId: string, options: { includeImage?: boolean } = {}): Promise<CdpPageSnapshot | undefined> {
+/** Screenshot-only collection; document drift must never yield a usable state. */
+export async function captureCdpPixelSnapshot(tab: Pick<CdpTab, "evaluate" | "captureViewport">): Promise<{
+    image: CdpViewportImage; identity: { url: string; title: string; timeOrigin: number };
+}> {
+    const read = async () => {
+        const raw = await tab.evaluate("({url:location.href,title:document.title,timeOrigin:performance.timeOrigin})");
+        const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : undefined;
+        if (!value || typeof value.url !== "string" || !value.url || typeof value.title !== "string"
+            || typeof value.timeOrigin !== "number" || !Number.isFinite(value.timeOrigin) || value.timeOrigin <= 0) {
+            throw new Error("Browser pixel capture document identity unavailable");
+        }
+        return { url: value.url as string, title: value.title as string, timeOrigin: value.timeOrigin as number };
+    };
+    const before = await read();
+    const image = await tab.captureViewport();
+    const after = await read();
+    if (before.url !== after.url || before.timeOrigin !== after.timeOrigin) {
+        throw new Error("Browser document changed during pixel capture; observe again without replaying input");
+    }
+    return { image, identity: after };
+}
+
+export async function cdpSnapshotForContext(contextId: string, options: { includeImage?: boolean; includeOutline?: boolean } = {}): Promise<CdpPageSnapshot | undefined> {
+	if (options.includeOutline === false && options.includeImage !== true) throw new Error("Pixel-only browser snapshot requires an image");
 	const started = performance.now();
 	const timings: NonNullable<CdpPageSnapshot["diagnostics"]["timings"]> = {};
 	const measure = async <T>(key: keyof typeof timings, run: () => Promise<T>): Promise<T> => {
@@ -1014,10 +1038,12 @@ export async function cdpSnapshotForContext(contextId: string, options: { includ
 	const tab = await measure("connectMs", () => CdpTab.connect(page.webSocketDebuggerUrl!, page.id, page.title));
 	try {
 		const collectionStarted = performance.now();
+		const pixels = options.includeOutline === false
+			? await measure("pixelCaptureMs", () => captureCdpPixelSnapshot(tab)) : undefined;
 		const [textValue, nodes, image] = await Promise.all([
-			measure("textReadMs", () => tab.evaluate("document.body ? document.body.innerText : ''")).catch(() => ""),
-			measure("accessibilityReadMs", () => tab.accessibilityTree()).catch(() => { tab.accessibilityCoverage.failed = true; return []; }),
-			options.includeImage ? measure("imageCaptureMs", () => tab.captureViewport()) : Promise.resolve(undefined),
+			pixels ? Promise.resolve("") : measure("textReadMs", () => tab.evaluate("document.body ? document.body.innerText : ''")).catch(() => ""),
+			pixels ? Promise.resolve([]) : measure("accessibilityReadMs", () => tab.accessibilityTree()).catch(() => { tab.accessibilityCoverage.failed = true; return []; }),
+			pixels ? Promise.resolve(pixels.image) : options.includeImage ? measure("imageCaptureMs", () => tab.captureViewport()) : Promise.resolve(undefined),
 		]);
 		timings.collectionMs = performance.now() - collectionStarted;
 		const snapshotId = randomUUID();
@@ -1029,13 +1055,13 @@ export async function cdpSnapshotForContext(contextId: string, options: { includ
 			image,
 			snapshotId,
 			targetId: page.id,
-			title: page.title,
-			url: page.url ?? "",
+			title: pixels?.identity.title ?? page.title,
+			url: pixels?.identity.url ?? page.url ?? "",
 			capturedAt: Date.now(),
 			text: typeof textValue === "string" ? textValue : String(textValue ?? ""),
 			targets,
 			outline,
-			diagnostics: { cdp: "connected", targetCount: targets.length, accessibilityCoverage: { ...tab.accessibilityCoverage }, timings },
+			diagnostics: { cdp: "connected", targetCount: targets.length, accessibilityCoverage: pixels ? undefined : { ...tab.accessibilityCoverage }, semanticCollection: pixels ? "skipped" : undefined, timings },
 		};
 	} finally {
 		const disconnectStarted = performance.now();

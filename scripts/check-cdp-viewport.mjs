@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { CdpTab } from '../src/cdp.ts';
+import { CdpTab, captureCdpPixelSnapshot } from '../src/cdp.ts';
 
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5l0AAAAASUVORK5CYII=';
 
@@ -57,3 +57,28 @@ const huge = Buffer.from(pixel, 'base64');
 huge.writeUInt32BE(2000, 16);
 await assert.rejects(() => fakeTab({data: huge.toString('base64')}).tab.captureViewport(), /budget/);
 console.log('CDP viewport capture checks passed');
+
+// Pixel-only collection checks the exact document around capture without body or AX reads.
+const identity = {url:'https://fixture.invalid/article',title:'Fixture',timeOrigin:123};
+const image = {data:pixel,mimeType:'image/png',width:1,height:1,cssWidth:1,cssHeight:1,pixelScale:1};
+function pixelTab(before=identity,after=identity) {
+ const reads=[before,after],calls=[];
+ return {calls,tab:{evaluate:async expression=>{
+   assert.equal(expression,'({url:location.href,title:document.title,timeOrigin:performance.timeOrigin})');
+   calls.push('identity');return reads.shift();
+ },captureViewport:async()=>{calls.push('capture');return image;}}};
+}
+const stable=pixelTab();const captured=await captureCdpPixelSnapshot(stable.tab);
+assert.equal(captured.image,image);
+assert.deepEqual(stable.calls,['identity','capture','identity']);
+for (const changed of [{...identity,url:identity.url+'#other'},{...identity,timeOrigin:124}]) {
+ await assert.rejects(()=>captureCdpPixelSnapshot(pixelTab(identity,changed).tab),/document changed/);
+}
+for (const invalid of [null,{}, {...identity,timeOrigin:NaN},{...identity,timeOrigin:0},
+ {...identity,timeOrigin:true},{...identity,url:''}]) {
+ const fixture=pixelTab(invalid);
+ await assert.rejects(()=>captureCdpPixelSnapshot(fixture.tab),/identity unavailable/);
+ assert.deepEqual(fixture.calls,['identity'],'invalid identity must not request capture');
+}
+await assert.rejects(()=>captureCdpPixelSnapshot(pixelTab(identity,null).tab),/identity unavailable/);
+console.log('Pixel-only CDP collection identity/drift and no-body/AX checks passed');

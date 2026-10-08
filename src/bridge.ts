@@ -1,3 +1,4 @@
+import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
 import { serializeFocusContext } from "./focus-context.ts";
 import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -55,6 +56,7 @@ interface ExecutionTrace {
 		command: string;
 		requestId: string;
 		requestWriteAttempted: boolean;
+		stages?: WindowsActionStage[];
 	};
 	inputDispatch?: {
 		outcome: "unknown";
@@ -1304,6 +1306,7 @@ function transportUnknownTrace(error: unknown, policy: DeliveryPolicy): Executio
 		command?: unknown;
 		requestId?: unknown;
 		requestWriteAttempted?: unknown;
+		stages?: unknown;
 	};
 	if (details.code !== "helper_transport_unknown" || details.outcome !== "unknown" || typeof details.requestId !== "string") return undefined;
 	const command = typeof details.command === "string" ? details.command : "act";
@@ -1312,7 +1315,7 @@ function transportUnknownTrace(error: unknown, policy: DeliveryPolicy): Executio
 		outcome: "unknown",
 		deliveryPolicy: policy,
 		error: { code: "helper_transport_unknown", message: details.message, requestId: details.requestId, requestWriteAttempted },
-		transport: { outcome: "unknown", command, requestId: details.requestId, requestWriteAttempted },
+		transport: { outcome: "unknown", command, requestId: details.requestId, requestWriteAttempted, stages: sanitizeActionStages(details.stages) },
 	});
 }
 

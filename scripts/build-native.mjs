@@ -153,7 +153,7 @@ async function buildWindowsHelper(prebuiltOutput) {
     const arch = windowsArchitecture(getArg("--arch") || targetArch || process.arch, explicitTarget ? {} : process.env);
     if (targetArch && arch !== targetArch) throw new Error('Windows --arch and --target disagree');
 	const target = explicitTarget || (arch === "arm64" ? "aarch64-pc-windows-msvc" : undefined);
-	if (process.platform !== "win32" && !target?.includes("windows")) {
+	if (process.platform !== "win32" && (!target?.includes("windows") || (!explicitTarget && !getArg("--arch")))) {
 		throw new Error("Refusing to label a host binary as Windows. Build on Windows or pass an explicit Windows --target triple.");
 	}
 	const prebuiltDir = prebuiltOutput

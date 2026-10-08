@@ -87,7 +87,7 @@ const observeTool = defineTool({
 	description: "Capture the current/frontmost root or one exact @r root and return a bounded UI outline.",
 	promptSnippet: "Primary UI observation tool. Focus a background window with focus_window first; then follow with search_ui, expand_ui, inspect_ui, or act_ui.",
 	promptGuidelines: [
-		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection. Windows native mode=pixels captures only pixels without UIA or OCR; it requires an exact native @r root and returns no semantic element refs.",
+		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection. Mode=pixels requires an exact browser_page or Windows native @r root and returns no semantic element refs. Browser pixels skip body text and AX collection and reject document drift; Windows native pixels skip UIA and OCR.",
 		"Use mode=metrics with an exact browser_page @r root for a fixed, bounded read of top-frame performance and document identity. This skips UI-tree reconstruction and returns no new actionable state. Incomplete loading remains incomplete; retained observer entries are not final Core Web Vitals.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
 		"A visible native popup can have an empty outline. Inspect its image and exact owner relationship; query the owner root once without refocusing or replaying input.",

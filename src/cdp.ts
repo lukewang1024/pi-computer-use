@@ -120,6 +120,9 @@ const CONSOLE_BUFFER_LIMIT = 20;
 let nextBrowserElementRef = 1;
 
 export class CdpTab {
+	async setManagedDownloadDirectory(downloadPath: string): Promise<void> {
+		await this.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath, eventsEnabled: false });
+	}
 	private nextId = 1;
 	private readonly pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void; sessionId?: string }>();
 	private consoleBuffer: CdpConsoleEntry[] = [];
@@ -982,6 +985,13 @@ export async function cdpDragForContext(contextId: string, path: Array<{ x: numb
 export async function cdpNavigateContext(contextId: string, url: string): Promise<boolean> {
 	return (await withCdpContextTab(contextId, async (tab) => {
 		await tab.navigate(url);
+		return true;
+	})) === true;
+}
+
+export async function cdpSetManagedDownloadDirectory(contextId: string, downloadPath: string): Promise<boolean> {
+	return (await withCdpContextTab(contextId, async tab => {
+		await tab.setManagedDownloadDirectory(downloadPath);
 		return true;
 	})) === true;
 }

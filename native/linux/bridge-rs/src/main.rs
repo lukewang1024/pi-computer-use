@@ -577,68 +577,79 @@ fn physical_act(
         .get("button")
         .and_then(Value::as_str)
         .unwrap_or("left");
-    match action {
-        "press" | "click" => input.click(
-            x,
-            y,
-            button,
-            params
-                .get("clickCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(1),
-        )?,
-        "moveMouse" => input.move_pointer(x, y)?,
-        "scroll" => input.scroll(
-            x,
-            y,
-            params.get("scrollX").and_then(Value::as_f64).unwrap_or(0.0),
-            params.get("scrollY").and_then(Value::as_f64).unwrap_or(0.0),
-        )?,
-        "drag" => {
-            let path = params
-                .get("path")
-                .and_then(Value::as_array)
-                .ok_or_else(|| invalid("drag requires path"))?;
-            let points = path
-                .iter()
-                .map(|p| {
-                    image_point_to_screen(
-                        &geometry.frame,
-                        geometry.image_width,
-                        geometry.image_height,
-                        p.get("x")
-                            .and_then(Value::as_f64)
-                            .ok_or_else(|| invalid("drag point requires x"))?,
-                        p.get("y")
-                            .and_then(Value::as_f64)
-                            .ok_or_else(|| invalid("drag point requires y"))?,
-                    )
-                })
-                .collect::<Result<Vec<_>, ProtocolError>>()?;
-            input.drag(&points, button)?;
+    let dispatched = (|| -> Result<(), ProtocolError> {
+        match action {
+            "press" | "click" => input.click(
+                x,
+                y,
+                button,
+                params
+                    .get("clickCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1),
+            )?,
+            "moveMouse" => input.move_pointer(x, y)?,
+            "scroll" => input.scroll(
+                x,
+                y,
+                params.get("scrollX").and_then(Value::as_f64).unwrap_or(0.0),
+                params.get("scrollY").and_then(Value::as_f64).unwrap_or(0.0),
+            )?,
+            "drag" => {
+                let path = params
+                    .get("path")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| invalid("drag requires path"))?;
+                let points = path
+                    .iter()
+                    .map(|p| {
+                        image_point_to_screen(
+                            &geometry.frame,
+                            geometry.image_width,
+                            geometry.image_height,
+                            p.get("x")
+                                .and_then(Value::as_f64)
+                                .ok_or_else(|| invalid("drag point requires x"))?,
+                            p.get("y")
+                                .and_then(Value::as_f64)
+                                .ok_or_else(|| invalid("drag point requires y"))?,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, ProtocolError>>()?;
+                input.drag(&points, button)?;
+            }
+            "typeText" => {
+                input.type_text(params.get("text").and_then(Value::as_str).unwrap_or(""))?
+            }
+            "setText" => {
+                let events =
+                    input.prepare_text(params.get("text").and_then(Value::as_str).unwrap_or(""))?;
+                let select_all = input.prepare_keypress(&["control", "a"])?;
+                input.click(x, y, button, 1)?;
+                input.type_prepared(&select_all)?;
+                input.type_prepared(&events)?;
+            }
+            "keypress" => {
+                let keys = params
+                    .get("keys")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| invalid("keypress requires keys"))?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>();
+                input.keypress(&keys)?;
+            }
+            other => {
+                return Err(ProtocolError::new(
+                    format!("Unsupported Linux action '{other}'"),
+                    ErrorCode::UnsupportedCommand,
+                ))
+            }
         }
-        "typeText" => input.type_text(params.get("text").and_then(Value::as_str).unwrap_or(""))?,
-        "setText" => {
-            input.click(x, y, button, 1)?;
-            input.keypress(&["control", "a"])?;
-            input.type_text(params.get("text").and_then(Value::as_str).unwrap_or(""))?;
-        }
-        "keypress" => {
-            let keys = params
-                .get("keys")
-                .and_then(Value::as_array)
-                .ok_or_else(|| invalid("keypress requires keys"))?
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>();
-            input.keypress(&keys)?;
-        }
-        other => {
-            return Err(ProtocolError::new(
-                format!("Unsupported Linux action '{other}'"),
-                ErrorCode::UnsupportedCommand,
-            ))
-        }
+        Ok(())
+    })();
+    if let Err(error) = dispatched {
+        return input.failure_result(error);
     }
     Ok(
         json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","mechanism":"xtest","deltaSource":"snapshot","windowId":owning_window},"evidence":{"mechanism":"xtest","windowId":owning_window}}),
@@ -679,7 +690,15 @@ async fn act_batch(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Valu
             }
         }
     }
+    Ok(batch_response(steps, stopped_at))
+}
+
+fn batch_response(steps: Vec<Value>, stopped_at: Option<usize>) -> Value {
     let outcome = batch_outcome(&steps, stopped_at.is_some());
+    let partial = steps
+        .iter()
+        .find(|step| step["error"]["code"] == "foreground_interrupted_after_partial_hid")
+        .cloned();
     let mut response = json!({
         "outcome": outcome,
         "performed":{"transaction":true,"actionCount":steps.len(),"deltaSource":"snapshot"},
@@ -688,17 +707,22 @@ async fn act_batch(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Valu
     if let Some(index) = stopped_at {
         response["stoppedAt"] = json!(index);
     }
-    Ok(response)
+    if let Some(partial) = partial {
+        response["error"] = partial["error"].clone();
+        response["inputDispatch"] = partial["inputDispatch"].clone();
+        response["performed"]["delivery"] = json!("hid");
+    }
+    response
 }
 
 fn batch_outcome(steps: &[Value], stopped: bool) -> &'static str {
-    if stopped {
-        "didnt"
-    } else if steps
+    if steps
         .iter()
         .any(|step| step.get("outcome").and_then(Value::as_str) == Some("unknown"))
     {
         "unknown"
+    } else if stopped {
+        "didnt"
     } else {
         "worked"
     }
@@ -1059,6 +1083,32 @@ mod tests {
     }
 
     #[test]
+    fn batch_exposes_partial_input_recovery_at_top_level() {
+        let dispatch = json!({"eventsDispatched":2,"unreleasedKeys":[37],"unreleasedMouseButtons":[],"recoveryRequired":true,"retrySafe":false});
+        let result = batch_response(
+            vec![
+                json!({"outcome":"worked"}),
+                json!({"outcome":"unknown","error":{"code":"foreground_interrupted_after_partial_hid","message":"focus lost"},"inputDispatch":dispatch}),
+            ],
+            Some(1),
+        );
+        assert_eq!(result["outcome"], "unknown");
+        assert_eq!(result["stoppedAt"], 1);
+        assert_eq!(result["inputDispatch"], dispatch);
+        assert_eq!(
+            result["error"]["code"],
+            "foreground_interrupted_after_partial_hid"
+        );
+        assert_eq!(result["performed"]["delivery"], "hid");
+        assert_eq!(result["performed"]["actionCount"], 2);
+        let rejected = batch_response(
+            vec![json!({"outcome":"didnt","error":{"code":"stale_ref"}})],
+            Some(0),
+        );
+        assert_eq!(rejected["outcome"], "didnt");
+        assert!(rejected.get("inputDispatch").is_none());
+    }
+    #[test]
     fn batch_outcome_preserves_unknown_physical_results() {
         assert_eq!(
             batch_outcome(&[json!({"outcome":"worked"})], false),
@@ -1073,7 +1123,7 @@ mod tests {
         );
         assert_eq!(
             batch_outcome(&[json!({"outcome":"unknown"})], true),
-            "didnt"
+            "unknown"
         );
     }
 }

@@ -36,6 +36,8 @@ interface CdpAttachedFrame {
 	parentTargetId: string;
 }
 
+export interface CdpLocalFocusOwner { backendNodeId: number; frameId: string; }
+
 export interface CdpSnapshotTarget {
 	ref: string;
 	source: "browser_ax";
@@ -45,6 +47,7 @@ export interface CdpSnapshotTarget {
 	actions: string[];
 	backendNodeId?: number;
 	frameRoute?: CdpRemoteFrameRoute;
+	localFocusOwners?: CdpLocalFocusOwner[];
 }
 
 export interface CdpAccessibilityCoverage {
@@ -371,7 +374,7 @@ export class CdpTab {
 					const root = !node.parentId || !ids.has(String(node.parentId));
 					if (root) owner.childIds.push(prefix(node.nodeId));
 					return { ...node, nodeId: prefix(node.nodeId), parentId: root ? owner.nodeId : prefix(node.parentId),
-						childIds: (node.childIds ?? []).map(prefix), cuReadOnlyRemote: node.cuReadOnlyRemote === true || (readOnlyRemote && !frameRoute), cuRemoteFrameRoute: node.cuReadOnlyRemote === true ? undefined : (node.cuRemoteFrameRoute ?? frameRoute) };
+						childIds: (node.childIds ?? []).map(prefix), cuLocalFocusOwners: readOnlyRemote ? undefined : [...(owner.cuLocalFocusOwners ?? []), {backendNodeId:owner.backendDOMNodeId, frameId}], cuReadOnlyRemote: node.cuReadOnlyRemote === true || (readOnlyRemote && !frameRoute), cuRemoteFrameRoute: node.cuReadOnlyRemote === true ? undefined : (node.cuRemoteFrameRoute ?? frameRoute) };
 				});
 				nodes.push(...children);
 				const nestedOwners = children.filter((node: any) => /^iframe/i.test(axString(node.role)) && Number.isFinite(node.backendDOMNodeId));
@@ -650,8 +653,12 @@ export class CdpTab {
 	}
 
 	async typeIntoRemoteBackendNode(route: CdpRemoteFrameRoute, backendNodeId: number, text: string, replace: boolean): Promise<void> {
-		await this.withRemoteFrameDocument(route, async (sessionId, verify) => {
+		await this.withRemoteFrameDocument(route, async (sessionId, verify, _ownerSessionId, verifyOwnerFocus) => {
 			await verify();
+			if (!replace) {
+				await this.insertTextIntoBackendNode(backendNodeId, text, sessionId, verifyOwnerFocus);
+				return;
+			}
 			await this.withBackendNode(backendNodeId, "function(text,replace){if(!this.isConnected||this.disabled||this.readOnly||this.matches?.(':disabled')||this.getAttribute?.('aria-disabled')==='true'||this.getAttribute?.('aria-readonly')==='true')throw Error('Exact remote text target is not editable');if(!('value' in this)&&!this.isContentEditable)throw Error('Exact remote text target is not editable');this.scrollIntoView({block:'center',inline:'center'});this.focus();if(!this.isConnected||(this.getRootNode().activeElement||this.ownerDocument.activeElement)!==this)throw Error('Exact remote text target did not acquire focus');if('value' in this){const next=(replace?'':this.value)+text;let setter,found=false,proto=Object.getPrototypeOf(this);for(let depth=0;proto&&depth<32;depth++,proto=Object.getPrototypeOf(proto)){const descriptor=Object.getOwnPropertyDescriptor(proto,'value');if(descriptor){setter=descriptor.set;found=true;break;}}if(proto&&!found)throw Error('Text value prototype chain exceeded safety limit');if(setter)setter.call(this,next);else this.value=next;}else this.textContent=(replace?'':this.textContent||'')+text;this.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));this.dispatchEvent(new Event('change',{bubbles:true}));}", [text,replace], sessionId);
 		});
 	}
@@ -668,8 +675,35 @@ export class CdpTab {
 		});
 	}
 
-	async typeIntoBackendNode(backendNodeId: number, text: string, replace: boolean): Promise<void> {
+	async typeIntoBackendNode(backendNodeId: number, text: string, replace: boolean, localFocusOwners: CdpLocalFocusOwner[] = []): Promise<void> {
+		if (!replace) {
+			await this.insertTextIntoBackendNode(backendNodeId, text, undefined, async () => {
+				await this.verifyLocalFrameFocus(localFocusOwners);
+			});
+			return;
+		}
 		await this.withBackendNode(backendNodeId, "function(text, replace){ if(this.disabled || this.readOnly || this.matches?.(':disabled') || this.getAttribute?.('aria-disabled')==='true' || this.getAttribute?.('aria-readonly')==='true') throw Error('Exact text target is not editable'); this.scrollIntoView({block:'center', inline:'center'}); this.focus(); if ('value' in this) { const next=(replace?'':this.value)+text; let setter,found=false,proto=Object.getPrototypeOf(this);for(let depth=0;proto&&depth<32;depth++,proto=Object.getPrototypeOf(proto)){const descriptor=Object.getOwnPropertyDescriptor(proto,'value');if(descriptor){setter=descriptor.set;found=true;break;}}if(proto&&!found)throw Error('Text value prototype chain exceeded safety limit'); if(setter) setter.call(this,next); else this.value=next; } else this.textContent=(replace?'':this.textContent||'')+text; this.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:text})); this.dispatchEvent(new Event('change', {bubbles:true})); }", [text, replace]);
+	}
+
+	private async verifyLocalFrameFocus(owners: CdpLocalFocusOwner[]): Promise<void> {
+		if (!Array.isArray(owners) || owners.length > 12) throw Error("Local frame focus route is invalid");
+		const seen = new Set<number>();
+		for (const owner of owners) {
+			if (!Number.isInteger(owner.backendNodeId) || owner.backendNodeId <= 0 || !owner.frameId || seen.has(owner.backendNodeId)) throw Error("Local frame focus route is invalid");
+			seen.add(owner.backendNodeId);
+			const current = await this.send("DOM.describeNode", {backendNodeId:owner.backendNodeId});
+			if (current.node?.nodeName !== "IFRAME" || current.node.frameId !== owner.frameId) throw Error("Exact local frame owner changed; no text was sent");
+			await this.withBackendNode(owner.backendNodeId, "function(){if(!this.isConnected||(this.getRootNode().activeElement||this.ownerDocument.activeElement)!==this)throw Error('Exact local frame ancestor lost focus');}");
+		}
+	}
+
+	private async insertTextIntoBackendNode(backendNodeId: number, text: string, sessionId?: string, verifyOwnerFocus?: () => Promise<void>): Promise<void> {
+		const focusCheck = "function(focus){if(!this.isConnected||this.disabled||this.readOnly||this.matches?.(':disabled')||this.getAttribute?.('aria-disabled')==='true'||this.getAttribute?.('aria-readonly')==='true'||(!('value' in this)&&!this.isContentEditable))throw Error('Exact text target is not editable');if(focus){this.scrollIntoView({block:'center',inline:'center'});this.focus();}if(!this.isConnected||(this.getRootNode().activeElement||this.ownerDocument.activeElement)!==this)throw Error('Exact text target did not retain focus');}";
+		await this.withBackendNode(backendNodeId, focusCheck, [true], sessionId);
+		if (verifyOwnerFocus) await verifyOwnerFocus();
+		await this.withBackendNode(backendNodeId, focusCheck, [false], sessionId);
+		// A failed/unknown write is never repeated or replaced by a JS setter.
+		await this.send("Input.insertText", { text }, undefined, sessionId);
 	}
 
 	async scrollRemoteBackendNode(route: CdpRemoteFrameRoute, backendNodeId: number, deltaX: number, deltaY: number): Promise<void> {
@@ -964,10 +998,10 @@ export async function cdpPointerClickForContext(contextId: string, backendNodeId
 	})) === true;
 }
 
-export async function cdpTypeForContext(contextId: string, backendNodeId: number, text: string, replace: boolean, frameRoute?: CdpRemoteFrameRoute): Promise<boolean> {
+export async function cdpTypeForContext(contextId: string, backendNodeId: number, text: string, replace: boolean, frameRoute?: CdpRemoteFrameRoute, localFocusOwners?: CdpLocalFocusOwner[]): Promise<boolean> {
 	return (await withCdpContextTab(contextId, async (tab) => {
 		if (frameRoute) await tab.typeIntoRemoteBackendNode(frameRoute, backendNodeId, text, replace);
-		else await tab.typeIntoBackendNode(backendNodeId, text, replace);
+		else await tab.typeIntoBackendNode(backendNodeId, text, replace, localFocusOwners);
 		return true;
 	})) === true;
 }
@@ -1189,7 +1223,7 @@ export function cdpSnapshotOutline(snapshotId: string, nodes: unknown[]): { targ
 		const backendNodeId = Number.isFinite(raw?.backendDOMNodeId) ? Math.trunc(raw.backendDOMNodeId) : undefined;
 		const wireRef = `cdp:${nodeId}`;
 		if (actions.length > 0 && name && (!actions.includes("click") || backendNodeId)) {
-			targets.push({ ref: wireRef, source: "browser_ax", role, name, value: axString(raw?.value) || undefined, actions, backendNodeId, frameRoute: raw?.cuRemoteFrameRoute });
+			targets.push({ ref: wireRef, source: "browser_ax", role, name, value: axString(raw?.value) || undefined, actions, backendNodeId, frameRoute: raw?.cuRemoteFrameRoute, localFocusOwners: raw?.cuLocalFocusOwners });
 		}
 		const childIds: string[] = Array.isArray(raw?.childIds) ? raw.childIds.map(String) : [];
 		return {

@@ -10,7 +10,7 @@ use x11rb::protocol::xproto::{
     BUTTON_RELEASE_EVENT, CLIENT_MESSAGE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
     MOTION_NOTIFY_EVENT,
 };
-use x11rb::protocol::{composite, xtest};
+use x11rb::protocol::{composite, xkb, xtest};
 use x11rb::rust_connection::RustConnection;
 
 const MAX_CAPTURE_PIXELS: u64 = 64 * 1024 * 1024;
@@ -489,11 +489,55 @@ fn decode(
     Ok(out)
 }
 
+#[derive(Debug, Default)]
+struct HidDispatch {
+    events_attempted: u64,
+    keys: std::collections::BTreeSet<u8>,
+    buttons: std::collections::BTreeSet<u8>,
+}
+impl HidDispatch {
+    fn attempted(&mut self, event: u8, detail: u8) {
+        self.events_attempted += 1;
+        match event {
+            KEY_PRESS_EVENT => {
+                self.keys.insert(detail);
+            }
+            BUTTON_PRESS_EVENT => {
+                self.buttons.insert(detail);
+            }
+            _ => {}
+        }
+    }
+    fn confirmed(&mut self, event: u8, detail: u8) {
+        match event {
+            KEY_RELEASE_EVENT => {
+                self.keys.remove(&detail);
+            }
+            BUTTON_RELEASE_EVENT => {
+                self.buttons.remove(&detail);
+            }
+            _ => {}
+        }
+    }
+    fn failed(&self, error: ProtocolError, window: Window) -> Result<Value, ProtocolError> {
+        if self.events_attempted == 0 {
+            return Err(error);
+        }
+        Ok(json!({
+            "outcome":"unknown",
+            "performed":{"grounding":"coordinates","delivery":"hid","mechanism":"xtest","windowId":window},
+            "error":{"code":"foreground_interrupted_after_partial_hid","message":error.message,"causeCode":error.code.to_string()},
+            "inputDispatch":{"eventsDispatched":self.events_attempted,"eventCountKind":"write_attempts","unreleasedKeys":self.keys,"unreleasedMouseButtons":self.buttons,"recoveryRequired":true,"retrySafe":false}
+        }))
+    }
+}
+
 pub struct Input {
     conn: RustConnection,
     root: Window,
     target: Window,
     expected_pid: u64,
+    dispatch: std::cell::RefCell<HidDispatch>,
 }
 impl Input {
     pub fn connect(
@@ -520,7 +564,11 @@ impl Input {
             root,
             target,
             expected_pid,
+            dispatch: std::cell::RefCell::new(HidDispatch::default()),
         })
+    }
+    pub fn failure_result(&self, error: ProtocolError) -> Result<Value, ProtocolError> {
+        self.dispatch.borrow().failed(error, self.target)
     }
     pub fn move_pointer(&self, x: i32, y: i32) -> Result<(), ProtocolError> {
         self.preflight_point(x, y)?;
@@ -562,36 +610,53 @@ impl Input {
         }
         self.fake(BUTTON_RELEASE_EVENT, b, 0, 0)
     }
-    pub fn type_text(&self, text: &str) -> Result<(), ProtocolError> {
-        for ch in text.chars() {
-            let (sym, shift) = char_keysym(ch)
-                .ok_or_else(|| invalid(format!("Unsupported XTEST character {ch:?}")))?;
-            if shift {
-                self.key(0xffe1, KEY_PRESS_EVENT)?;
-            }
-            self.key(sym, KEY_PRESS_EVENT)?;
-            self.key(sym, KEY_RELEASE_EVENT)?;
-            if shift {
-                self.key(0xffe1, KEY_RELEASE_EVENT)?;
-            }
+    pub fn prepare_text(&self, text: &str) -> Result<Vec<(u8, u8)>, ProtocolError> {
+        let extension = xkb::use_extension(&self.conn, 1, 0)
+            .map_err(xerr)?
+            .reply()
+            .map_err(xerr)?;
+        if !extension.supported {
+            return Err(invalid("XKB keyboard state is unavailable"));
+        }
+        let state = xkb::get_state(&self.conn, xkb::ID::USE_CORE_KBD.into())
+            .map_err(xerr)?
+            .reply()
+            .map_err(xerr)?;
+        validate_text_keyboard_state(u8::from(state.group), u16::from(state.mods))?;
+        let setup = self.conn.setup();
+        let min = setup.min_keycode;
+        let count = setup.max_keycode - min + 1;
+        let mapping = self
+            .conn
+            .get_keyboard_mapping(min, count)
+            .map_err(xerr)?
+            .reply()
+            .map_err(xerr)?;
+        let width = usize::from(mapping.keysyms_per_keycode);
+        if width == 0 {
+            return Err(invalid("The X11 keyboard map has no keysyms"));
+        }
+        prepare_text_events(text, |sym| {
+            resolve_base_group_symbol(&mapping.keysyms, width, min, sym)
+        })
+    }
+
+    pub fn type_prepared(&self, events: &[(u8, u8)]) -> Result<(), ProtocolError> {
+        for &(event, code) in events {
+            self.fake(event, code, 0, 0)?;
         }
         Ok(())
     }
+    pub fn type_text(&self, text: &str) -> Result<(), ProtocolError> {
+        let events = self.prepare_text(text)?;
+        self.type_prepared(&events)
+    }
+    pub fn prepare_keypress(&self, names: &[&str]) -> Result<Vec<(u8, u8)>, ProtocolError> {
+        prepare_keypress_events(names, |sym| self.keycode(sym))
+    }
     pub fn keypress(&self, names: &[&str]) -> Result<(), ProtocolError> {
-        if names.is_empty() {
-            return Err(invalid("keypress requires keys"));
-        }
-        let syms = names
-            .iter()
-            .map(|n| named_keysym(n).ok_or_else(|| invalid(format!("Unsupported key '{n}'"))))
-            .collect::<Result<Vec<_>, _>>()?;
-        for &s in &syms {
-            self.key(s, KEY_PRESS_EVENT)?;
-        }
-        for &s in syms.iter().rev() {
-            self.key(s, KEY_RELEASE_EVENT)?;
-        }
-        Ok(())
+        let events = self.prepare_keypress(names)?;
+        self.type_prepared(&events)
     }
     fn preflight_point(&self, x: i32, y: i32) -> Result<(), ProtocolError> {
         validate_target(&self.conn, self.root, self.target, self.expected_pid)?;
@@ -615,12 +680,6 @@ impl Input {
             ));
         }
         Ok(())
-    }
-    fn key(&self, sym: u32, event: u8) -> Result<(), ProtocolError> {
-        let code = self
-            .keycode(sym)?
-            .ok_or_else(|| invalid(format!("No keycode for keysym 0x{sym:x}")))?;
-        self.fake(event, code, 0, 0)
     }
     fn keycode(&self, sym: u32) -> Result<Option<Keycode>, ProtocolError> {
         let setup = self.conn.setup();
@@ -649,6 +708,9 @@ impl Input {
                 ErrorCode::ForegroundRequired,
             ));
         }
+        // An error while writing or acknowledging the request cannot prove
+        // that no input reached the server. Count the attempt conservatively.
+        self.dispatch.borrow_mut().attempted(event, detail);
         xtest::fake_input(
             &self.conn,
             event,
@@ -662,7 +724,9 @@ impl Input {
         .map_err(xerr)?
         .check()
         .map_err(xerr)?;
-        self.conn.flush().map_err(xerr)
+        self.conn.flush().map_err(xerr)?;
+        self.dispatch.borrow_mut().confirmed(event, detail);
+        Ok(())
     }
 }
 
@@ -825,26 +889,101 @@ fn button_detail(b: &str) -> Result<u8, ProtocolError> {
         _ => Err(invalid(format!("Unsupported mouse button '{b}'"))),
     }
 }
-fn char_keysym(c: char) -> Option<(u32, bool)> {
-    if c == '\n' {
-        return Some((0xff0d, false));
+fn prepare_keypress_events(
+    names: &[&str],
+    mut keycode: impl FnMut(u32) -> Result<Option<u8>, ProtocolError>,
+) -> Result<Vec<(u8, u8)>, ProtocolError> {
+    if names.is_empty() {
+        return Err(invalid("keypress requires keys"));
     }
-    if c == '\t' {
-        return Some((0xff09, false));
+    let codes = names
+        .iter()
+        .map(|name| {
+            let sym =
+                named_keysym(name).ok_or_else(|| invalid(format!("Unsupported key '{name}'")))?;
+            keycode(sym)?.ok_or_else(|| invalid(format!("No keycode for keysym 0x{sym:x}")))
+        })
+        .collect::<Result<Vec<_>, ProtocolError>>()?;
+    Ok(codes
+        .iter()
+        .map(|&code| (KEY_PRESS_EVENT, code))
+        .chain(codes.iter().rev().map(|&code| (KEY_RELEASE_EVENT, code)))
+        .collect())
+}
+
+// Resolve the entire string before emitting any key event. Unsupported late
+// characters or missing keycodes must not leave an already typed prefix.
+fn prepare_text_events(
+    text: &str,
+    mut resolve: impl FnMut(u32) -> Option<(u8, bool)>,
+) -> Result<Vec<(u8, u8)>, ProtocolError> {
+    let mut events = Vec::new();
+    for ch in text.chars() {
+        let sym = char_keysym(ch)
+            .ok_or_else(|| invalid(format!("Unsupported XTEST character {ch:?}")))?;
+        let (code, shifted) = resolve(sym)
+            .ok_or_else(|| invalid(format!("No base-group keycode for keysym 0x{sym:x}")))?;
+        let shift = if shifted {
+            let (shift, modifier) = resolve(0xffe1).ok_or_else(|| invalid("No Shift keycode"))?;
+            if modifier {
+                return Err(invalid("Shift keycode requires a modifier"));
+            }
+            Some(shift)
+        } else {
+            None
+        };
+        if let Some(code) = shift {
+            events.push((KEY_PRESS_EVENT, code));
+        }
+        events.push((KEY_PRESS_EVENT, code));
+        events.push((KEY_RELEASE_EVENT, code));
+        if let Some(code) = shift {
+            events.push((KEY_RELEASE_EVENT, code));
+        }
     }
-    if c == ' ' || c.is_ascii_lowercase() || c.is_ascii_digit() {
-        return Some((c as u32, false));
+    Ok(events)
+}
+
+fn validate_text_keyboard_state(group: u8, modifiers: u16) -> Result<(), ProtocolError> {
+    if group != 0 || modifiers != 0 {
+        return Err(invalid(
+            "Text input requires keyboard group zero and no active modifiers",
+        ));
     }
-    if c.is_ascii_uppercase() {
-        return Some((c.to_ascii_lowercase() as u32, true));
+    Ok(())
+}
+
+fn resolve_base_group_symbol(
+    symbols: &[u32],
+    width: usize,
+    min: u8,
+    sym: u32,
+) -> Option<(u8, bool)> {
+    if width == 0 {
+        return None;
     }
-    let shifted = "~!@#$%^&*()_+{}|:\"<>?";
-    let base = "`1234567890-=[]\\;',./";
-    shifted
-        .chars()
-        .position(|v| v == c)
-        .and_then(|i| base.chars().nth(i))
-        .map(|v| (v as u32, true))
+    // Do not mistake a symbol in another group or AltGr level for a key
+    // available with no modifier. Prefer an unshifted binding when possible.
+    for column in 0..2 {
+        for (index, row) in symbols.chunks(width).enumerate() {
+            if row.get(column) == Some(&sym) {
+                return min
+                    .checked_add(u8::try_from(index).ok()?)
+                    .map(|code| (code, column == 1));
+            }
+        }
+    }
+    None
+}
+
+fn char_keysym(c: char) -> Option<u32> {
+    match c {
+        '\n' | '\r' => Some(0xff0d),
+        '\t' => Some(0xff09),
+        c if c.is_control() => None,
+        c if (c as u32) <= 0xff => Some(c as u32),
+        c => Some(0x01000000 | c as u32),
+    }
 }
 fn named_keysym(n: &str) -> Option<u32> {
     match n.to_ascii_lowercase().as_str() {
@@ -1206,12 +1345,189 @@ mod tests {
         assert_eq!(distance(Some(&a), &Rect { x: 6, ..a.clone() }), 5);
     }
     #[test]
+    fn rejected_input_before_first_write_keeps_normal_error() {
+        let error = ProtocolError::new("not focused", ErrorCode::ForegroundRequired);
+        assert_eq!(
+            HidDispatch::default().failed(error, 99).unwrap_err().code,
+            ErrorCode::ForegroundRequired
+        );
+    }
+    #[test]
+    fn partial_input_retains_uncertain_presses_and_releases() {
+        let mut dispatch = HidDispatch::default();
+        dispatch.attempted(KEY_PRESS_EVENT, 37);
+        dispatch.confirmed(KEY_PRESS_EVENT, 37);
+        dispatch.attempted(BUTTON_PRESS_EVENT, 1);
+        dispatch.attempted(KEY_RELEASE_EVENT, 37); // release acknowledgement lost
+        let result = dispatch
+            .failed(
+                ProtocolError::new("focus lost", ErrorCode::ForegroundRequired),
+                99,
+            )
+            .unwrap();
+        assert_eq!(result["outcome"], "unknown");
+        assert_eq!(
+            result["error"]["code"],
+            "foreground_interrupted_after_partial_hid"
+        );
+        assert_eq!(result["inputDispatch"]["eventsDispatched"], 3);
+        assert_eq!(result["inputDispatch"]["unreleasedKeys"], json!([37]));
+        assert_eq!(
+            result["inputDispatch"]["unreleasedMouseButtons"],
+            json!([1])
+        );
+        assert_eq!(result["inputDispatch"]["retrySafe"], false);
+        assert_eq!(result["inputDispatch"]["recoveryRequired"], true);
+        dispatch.confirmed(KEY_RELEASE_EVENT, 37);
+        dispatch.confirmed(BUTTON_RELEASE_EVENT, 1);
+        let result = dispatch
+            .failed(
+                ProtocolError::new("late error", ErrorCode::InternalError),
+                99,
+            )
+            .unwrap();
+        assert_eq!(result["inputDispatch"]["unreleasedKeys"], json!([]));
+        assert_eq!(result["inputDispatch"]["unreleasedMouseButtons"], json!([]));
+        assert_eq!(result["outcome"], "unknown");
+    }
+    #[test]
     fn key_protocol() {
         assert_eq!(named_keysym("Control"), Some(0xffe3));
         assert_eq!(named_keysym("F12"), Some(0xffc9));
-        assert_eq!(char_keysym('A'), Some(('a' as u32, true)));
-        assert_eq!(char_keysym('!'), Some(('1' as u32, true)));
-        assert_eq!(char_keysym('é'), None);
+        assert_eq!(char_keysym('A'), Some('A' as u32));
+        assert_eq!(char_keysym('!'), Some('!' as u32));
+        assert_eq!(char_keysym('é'), Some(0xe9));
+        assert_eq!(char_keysym('文'), Some(0x01006587));
+    }
+    #[test]
+    fn complete_key_chord_is_resolved_before_delivery() {
+        assert!(
+            prepare_keypress_events(&["control", "a"], |sym| Ok(if sym == 0xffe3 {
+                Some(37)
+            } else {
+                None
+            }))
+            .is_err()
+        );
+        assert!(prepare_keypress_events(&["control", "unknown"], |_| Ok(Some(37))).is_err());
+        assert_eq!(
+            prepare_keypress_events(&["control", "a"], |sym| Ok(Some(if sym == 0xffe3 {
+                37
+            } else {
+                38
+            })))
+            .unwrap(),
+            vec![
+                (KEY_PRESS_EVENT, 37),
+                (KEY_PRESS_EVENT, 38),
+                (KEY_RELEASE_EVENT, 38),
+                (KEY_RELEASE_EVENT, 37)
+            ]
+        );
+    }
+    #[test]
+    fn complete_text_is_resolved_before_delivery() {
+        assert!(prepare_text_events("abc\0", |_| Some((38, false))).is_err());
+        assert!(prepare_text_events("abc/", |sym| if sym == '/' as u32 {
+            None
+        } else {
+            Some((38, false))
+        })
+        .is_err());
+        assert!(prepare_text_events("A", |sym| if sym == 0xffe1 {
+            None
+        } else {
+            Some((38, true))
+        })
+        .is_err());
+        assert_eq!(
+            prepare_text_events("A/", |sym| match sym {
+                0xffe1 => Some((50, false)),
+                65 => Some((38, true)),
+                47 => Some((61, false)),
+                _ => None,
+            })
+            .unwrap(),
+            vec![
+                (KEY_PRESS_EVENT, 50),
+                (KEY_PRESS_EVENT, 38),
+                (KEY_RELEASE_EVENT, 38),
+                (KEY_RELEASE_EVENT, 50),
+                (KEY_PRESS_EVENT, 61),
+                (KEY_RELEASE_EVENT, 61)
+            ]
+        );
+    }
+    #[test]
+    fn text_keyboard_state_rejects_foreign_group_or_modifiers() {
+        assert!(validate_text_keyboard_state(0, 0).is_ok());
+        assert!(validate_text_keyboard_state(1, 0).is_err());
+        for mask in [1, 2, 4, 8, 16, 32, 64, 128] {
+            assert!(validate_text_keyboard_state(0, mask).is_err());
+        }
+    }
+    #[test]
+    fn text_mapping_uses_actual_shift_level_and_mapped_unicode() {
+        // A non-US keyboard where slash needs Shift and accented e does not.
+        let map = [
+            b':' as u32,
+            b'/' as u32,
+            0,
+            0,
+            0xe9,
+            0xc9,
+            0,
+            0,
+            0xffe1,
+            0,
+            0,
+            0,
+            b'a' as u32,
+            b'A' as u32,
+            0x01006587,
+            0,
+        ];
+        assert_eq!(
+            resolve_base_group_symbol(&map, 4, 8, b'/' as u32),
+            Some((8, true))
+        );
+        assert_eq!(
+            resolve_base_group_symbol(&map, 4, 8, 0xe9),
+            Some((9, false))
+        );
+        assert_eq!(resolve_base_group_symbol(&map, 4, 8, 0x01006587), None);
+        let events =
+            prepare_text_events("/é", |sym| resolve_base_group_symbol(&map, 4, 8, sym)).unwrap();
+        assert_eq!(
+            events,
+            vec![
+                (KEY_PRESS_EVENT, 10),
+                (KEY_PRESS_EVENT, 8),
+                (KEY_RELEASE_EVENT, 8),
+                (KEY_RELEASE_EVENT, 10),
+                (KEY_PRESS_EVENT, 9),
+                (KEY_RELEASE_EVENT, 9)
+            ]
+        );
+        assert!(
+            prepare_text_events("/é文", |sym| resolve_base_group_symbol(&map, 4, 8, sym)).is_err()
+        );
+        assert_eq!(
+            prepare_text_events("文", |sym| resolve_base_group_symbol(
+                &[0x01006587, 0],
+                2,
+                8,
+                sym
+            ))
+            .unwrap(),
+            vec![(KEY_PRESS_EVENT, 8), (KEY_RELEASE_EVENT, 8)]
+        );
+    }
+    #[test]
+    fn native_paths_accept_unshifted_ascii_punctuation() {
+        for c in "/tmp/a-b_c.1.txt:[]\\;,'`=".chars() {
+            assert!(char_keysym(c).is_some(), "path character {c:?}");
+        }
     }
     #[test]
     fn bounded_capture_dimensions_preserve_aspect_ratio() {

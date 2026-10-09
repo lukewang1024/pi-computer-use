@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {CdpTab} from '../src/cdp.ts';
+import {CdpTab,cdpSnapshotOutline} from '../src/cdp.ts';
 function tabWith(handler){const tab=Object.create(CdpTab.prototype);tab.accessibilityCoverage={};tab.send=(method,params={})=>handler(method,params);return tab;}
 const ax=(id,role,backend,children=[],parent)=>({nodeId:String(id),role:{value:role},backendDOMNodeId:backend,childIds:children.map(String),parentId:parent===undefined?undefined:String(parent)});
 const main=[ax(1,'RootWebArea',10,[2]),ax(2,'Iframe',20,[],1)];
@@ -18,6 +18,12 @@ assert.deepEqual(nodes.find(n=>n.nodeId==='2').childIds,['child:1']);
 assert.equal(nodes.find(n=>n.nodeId==='child:1').parentId,'2');
 assert.deepEqual(nodes.find(n=>n.nodeId==='child:3').childIds,['nested:1']);
 assert.equal(nodes.find(n=>n.nodeId==='nested:2').backendDOMNodeId,41);
+assert.deepEqual(nodes.find(n=>n.nodeId==='child:2').cuLocalFocusOwners,
+ [{backendNodeId:20,frameId:'child'}]);
+const nestedOwners=[{backendNodeId:20,frameId:'child'},{backendNodeId:32,frameId:'nested'}];
+assert.deepEqual(nodes.find(n=>n.nodeId==='nested:2').cuLocalFocusOwners,nestedOwners);
+const snapshot=cdpSnapshotOutline('focus-route-fixture',nodes.map(n=>n.nodeId==='nested:2'?{...n,name:{value:'Submit'}}:n));
+assert.deepEqual(snapshot.targets.find(t=>t.backendNodeId===41).localFocusOwners,nestedOwners);
 assert.equal(tab.accessibilityCoverage.framesObserved,2);
 assert.equal(main[1].childIds.length,0,'never mutate the raw AX response');
 assert.equal(calls.length,5);

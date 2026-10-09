@@ -1641,13 +1641,13 @@ function isBrowserContextId(contextId: string | undefined): contextId is string 
 	return Boolean(contextId?.startsWith(BROWSER_CONTEXT_PREFIX));
 }
 
-function browserSnapshotTarget(snapshotId: string | undefined, ref: string | undefined): { contextId: string; backendNodeId?: number; frameRoute?: CdpRemoteFrameRoute } | undefined {
+function browserSnapshotTarget(snapshotId: string | undefined, ref: string | undefined): { contextId: string; backendNodeId?: number; frameRoute?: CdpRemoteFrameRoute; localFocusOwners?: import("./cdp.ts").CdpLocalFocusOwner[] } | undefined {
 	if (!snapshotId || !ref) return undefined;
 	const record = savedStates.get(snapshotId);
 	const snapshot = record?.value.kind === "browser" ? record.value.snapshot : undefined;
 	const target = snapshot?.targets.find((candidate) => candidate.ref === ref);
 	if (!snapshot || !target) return undefined;
-	return { contextId: snapshot.contextId, backendNodeId: target.backendNodeId, frameRoute: target.frameRoute };
+	return { contextId: snapshot.contextId, backendNodeId: target.backendNodeId, frameRoute: target.frameRoute, localFocusOwners: target.localFocusOwners };
 }
 
 function browserContextForOperation(): string | undefined {
@@ -2523,7 +2523,7 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 					&& await cdpMouseForContext(contextId, action.x!, action.y!, "mouseReleased", action.button ?? "left", action.clickCount ?? 1);
 			} else if (action.action === "setText") worked = await cdpTypeForContext(contextId, target!.backendNodeId!, action.text ?? "", true, target!.frameRoute);
 			else if (action.action === "typeText") worked = target?.backendNodeId
-				? await cdpTypeForContext(contextId, target.backendNodeId, action.text ?? "", false, target.frameRoute)
+				? await cdpTypeForContext(contextId, target.backendNodeId, action.text ?? "", false, target.frameRoute, target.localFocusOwners)
 				: await cdpTypeFocusedForContext(contextId, action.text ?? "");
 			else if (action.action === "keypress") worked = await cdpKeypressForContext(contextId, action.keys ?? [], target!.backendNodeId!, target!.frameRoute);
 			else if (action.action === "scroll") worked = await cdpScrollForContext(contextId, toFiniteNumber(action.scrollX, 0), toFiniteNumber(action.scrollY, 0), target?.backendNodeId, target?.frameRoute);

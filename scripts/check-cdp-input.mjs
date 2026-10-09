@@ -68,6 +68,18 @@ class ControlledInput {
   dispatchEvent(event){if(event.type==='input'&&value!==tracked){applicationValue=value;tracked=value;}}
 }
 const input=new ControlledInput();
+const inputDocument={activeElement:null,hasFocus:()=>true};
+input.isConnected=true;input.ownerDocument=inputDocument;
+input.getRootNode=()=>inputDocument;
+input.focus=function(){this.focused=true;inputDocument.activeElement=this;};
+tab.send=async(method,params)=>{
+  assert.equal(method,'Input.insertText');
+  assert.equal(inputDocument.activeElement,input);
+  // Retain the framework tracker until the browser input event.
+  Object.getOwnPropertyDescriptor(ControlledInput.prototype,'value').set.call(input,value+params.text);
+  input.dispatchEvent(new Event('input'));return {};
+};
+
 // Framework value tracking lives on the instance. Direct assignment changes
 // both DOM and tracking, making a subsequent input event appear unchanged.
 Object.defineProperty(input,'value',{get:()=>value,set:next=>{value=next;tracked=next;}});
@@ -96,6 +108,66 @@ assert.equal(applicationValue,'inherited-中🙂','inherited native setter must 
 await tab.typeIntoBackendNode(99,'-append',false);
 assert.equal(applicationValue,'inherited-中🙂-append');
 console.log('CDP keyboard and controlled-input behavior checks passed');
+
+for (const mode of ['background-success','ancestor-focus-theft','owner-replaced','detached-leaf','write-unknown']) {
+  const probe=Object.create(CdpTab.prototype), sent=[];
+  const parent={activeElement:null}, child={activeElement:null,hasFocus:()=>false};
+  const owner={isConnected:true,ownerDocument:parent,getRootNode:()=>parent};
+  parent.activeElement=owner;
+  const leaf={isConnected:true,value:'',ownerDocument:child,getRootNode:()=>child,
+    scrollIntoView(){},focus(){child.activeElement=this;}};
+  probe.withBackendNode=async(id,declaration,args=[])=>{
+    if(id===84&&mode==='ancestor-focus-theft')parent.activeElement={};
+    if(id===73&&mode==='detached-leaf')leaf.isConnected=false;
+    new Function('return ('+declaration+')')().apply(id===84?owner:leaf,args);
+  };
+  probe.send=async(method,params)=>{
+    if(method==='DOM.describeNode')return {node:{nodeName:'IFRAME',frameId:mode==='owner-replaced'?'replacement':'owned-local-frame'}};
+    assert.equal(method,'Input.insertText');assert.equal(child.activeElement,leaf);
+    assert.equal(parent.activeElement,owner);sent.push(params);
+    if(mode==='write-unknown')throw Error('unknown text write');
+    return {};
+  };
+  const operation=()=>probe.typeIntoBackendNode(73,'中文🙂',false,[{backendNodeId:84,frameId:'owned-local-frame'}]);
+  if(mode==='background-success')await operation();else await assert.rejects(operation);
+  assert.equal(sent.length,['background-success','write-unknown'].includes(mode)?1:0);
+}
+
+// Execute the actual generated focus checks. No input may follow a focus
+// theft, detached/non-editable target, stale owner route or unknown write.
+for (const mode of ['success','focus-theft','detached','readonly','owner-stale','write-unknown']) {
+  const probe=Object.create(CdpTab.prototype), inputs=[], checks=[];
+  const doc={activeElement:null,hasFocus:()=>true};
+  const node={isConnected:true,value:'',ownerDocument:doc,getRootNode:()=>doc,
+    scrollIntoView(){},focus(){doc.activeElement=this;}};
+  let ownerChecks=0;
+  probe.withRemoteFrameDocument=async(route,action)=>{
+    assert.equal(route.frameId,'owned-frame');
+    return action('owned-session',async()=>{},undefined,async()=>{
+      ownerChecks++;
+      if(mode==='owner-stale')throw Error('owner route changed');
+    });
+  };
+  probe.withBackendNode=async(id,declaration,args,session)=>{
+    assert.equal(id,73);assert.equal(session,'owned-session');
+    checks.push(args[0]);
+    if(checks.length===2&&mode==='focus-theft')doc.activeElement={};
+    if(mode==='detached')node.isConnected=false;
+    if(mode==='readonly')node.readOnly=true;
+    new Function('return ('+declaration+')')().apply(node,args);
+  };
+  probe.send=async(method,params,timeout,session)=>{
+    assert.equal(method,'Input.insertText');assert.equal(session,'owned-session');
+    assert.equal(doc.activeElement,node);assert.equal(params.text,'中文🙂');
+    inputs.push(params);
+    if(mode==='write-unknown')throw Error('unknown write');
+    return {};
+  };
+  const operation=()=>probe.typeIntoRemoteBackendNode({frameId:'owned-frame'},73,'中文🙂',false);
+  if(mode==='success')await operation();else await assert.rejects(operation);
+  assert.equal(inputs.length,['success','write-unknown'].includes(mode)?1:0);
+  if(mode==='success'){assert.deepEqual(checks,[true,false]);assert.equal(ownerChecks,1);}
+}
 
 // Remote handles must be released after both successful and failed operations.
 for (const mode of ['success', 'page-error', 'transport-error', 'cleanup-error', 'unresolved']) {

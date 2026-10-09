@@ -50,7 +50,22 @@ pub struct RootSnapshot {
     pub x11_window: Option<u32>,
     pub is_focused: bool,
     pub is_minimized: bool,
+    pub x11_modal: Option<bool>,
     pub z_order: Option<usize>,
+}
+
+impl RootSnapshot {
+    pub fn is_modal(&self) -> bool {
+        self.x11_modal
+            .unwrap_or_else(|| self.role.to_lowercase().contains("dialog"))
+    }
+    pub fn modal_source(&self) -> &str {
+        if self.x11_modal.is_some() {
+            "ewmh"
+        } else {
+            "role-inferred"
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +258,7 @@ impl AtspiClient {
                     x11_window: None,
                     is_focused: false,
                     is_minimized: false,
+                    x11_modal: None,
                     z_order: None,
                 });
             }
@@ -391,8 +407,8 @@ pub fn root_json(reference: &str, root: &RootSnapshot, z_order: usize) -> Value 
         "isMain": root.is_focused || z_order == 0,
         "isMinimized": root.is_minimized,
         "isOnscreen": true,
-        "isModal": kind == "dialog",
-        "metadata": {"backend":if root.accessibility_available {"at-spi2"} else {"x11"},"accessibilityAvailable":root.accessibility_available,"busName":root.accessible.destination,"objectPath":root.accessible.path},
+        "isModal": root.is_modal(),
+        "metadata": {"backend":if root.accessibility_available {"at-spi2"} else {"x11"},"accessibilityAvailable":root.accessibility_available,"modalSource":root.modal_source(),"busName":root.accessible.destination,"objectPath":root.accessible.path},
         "isBrowser": false,
         "browserFamily": Value::Null
     })
@@ -729,6 +745,7 @@ mod tests {
             x11_window: Some(99),
             is_focused: true,
             is_minimized: false,
+            x11_modal: None,
             z_order: Some(0),
         };
         let value = root_json("@w1", &root, 0);

@@ -201,6 +201,7 @@ mod tests {
             x11_window: None,
             is_focused: false,
             is_minimized: false,
+            x11_modal: None,
             z_order: None,
         }
     }

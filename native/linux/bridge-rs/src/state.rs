@@ -197,6 +197,7 @@ mod tests {
             app_name: format!("app {n}"),
             role: "frame".into(),
             frame: None,
+            accessibility_available: true,
             x11_window: None,
             is_focused: false,
             is_minimized: false,

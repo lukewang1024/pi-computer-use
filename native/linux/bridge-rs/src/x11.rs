@@ -161,45 +161,159 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, ProtocolError> {
     Ok(out)
 }
 
+type AssociationScore = (u8, i64);
+
 pub fn enrich_roots(roots: &mut [RootSnapshot], windows: &[WindowInfo]) {
-    let mut used = Vec::new();
-    for root in roots {
-        let best = windows
-            .iter()
-            .filter(|w| w.pid != 0 && w.pid == root.pid && !used.contains(&w.id))
-            .min_by_key(|w| {
-                let title = if !root.name.is_empty()
-                    && (w.title.contains(&root.name) || root.name.contains(&w.title))
-                {
-                    0
-                } else {
-                    1_000_000
-                };
-                title + distance(root.frame.as_ref(), &w.frame)
-            });
-        if let Some(w) = best {
-            used.push(w.id);
-            root.x11_window = Some(w.id);
-            root.frame = Some(w.frame.clone());
-            root.is_focused = w.focused;
-            root.is_minimized = w.minimized;
-            root.z_order = Some(w.z_order);
-            if root.name.is_empty() {
-                root.name.clone_from(&w.title);
-            }
+    // Decide against original accessible bounds before mutating any root. A
+    // traversal-order greedy match can assign a browser panel to its picker.
+    let scores = roots
+        .iter()
+        .map(|root| {
+            windows
+                .iter()
+                .map(|window| association_score(root, window))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let root_choices = scores
+        .iter()
+        .map(|row| unique_association(row.iter().copied().enumerate()))
+        .collect::<Vec<_>>();
+    let window_choices = (0..windows.len())
+        .map(|column| {
+            unique_association(
+                scores
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| (index, row[column])),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (index, root) in roots.iter_mut().enumerate() {
+        let Some(column) = root_choices[index] else {
+            continue;
+        };
+        if window_choices[column] != Some(index) {
+            continue;
+        }
+        let window = &windows[column];
+        root.x11_window = Some(window.id);
+        root.frame = Some(window.frame.clone());
+        root.is_focused = window.focused;
+        root.is_minimized = window.minimized;
+        root.z_order = Some(window.z_order);
+        if root.name.is_empty() {
+            root.name.clone_from(&window.title);
         }
     }
 }
-fn distance(a: Option<&Rect>, b: &Rect) -> i64 {
-    a.map(|a| {
-        i64::from(
-            (a.x - b.x).abs()
-                + (a.y - b.y).abs()
-                + (a.width - b.width).abs()
-                + (a.height - b.height).abs(),
-        )
-    })
-    .unwrap_or(0)
+
+pub fn append_unmatched_windows(roots: &mut Vec<RootSnapshot>, windows: &[WindowInfo]) {
+    for window in windows {
+        if window.pid == 0
+            || window.frame.width <= 0
+            || window.frame.height <= 0
+            || roots.iter().any(|root| root.x11_window == Some(window.id))
+        {
+            continue;
+        }
+        // This root explicitly has no accessibility object. Never borrow the
+        // nodes of a different window merely because its process is the same.
+        let app_name = std::fs::read_link(format!("/proc/{}/exe", window.pid))
+            .ok()
+            .and_then(|p| {
+                p.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| format!("X11 process {}", window.pid));
+        roots.push(RootSnapshot {
+            accessible: crate::atspi::AccessibleRef {
+                destination: "x11-only".to_owned(),
+                path: format!("/x11/window/{}/pid/{}", window.id, window.pid),
+            },
+            accessibility_available: false,
+            pid: window.pid,
+            name: window.title.clone(),
+            app_name,
+            role: "window".to_owned(),
+            frame: Some(window.frame.clone()),
+            x11_window: Some(window.id),
+            is_focused: window.focused,
+            is_minimized: window.minimized,
+            z_order: Some(window.z_order),
+        });
+    }
+}
+
+fn association_score(root: &RootSnapshot, window: &WindowInfo) -> Option<AssociationScore> {
+    if root.pid == 0 || root.pid != window.pid {
+        return None;
+    }
+    let frame = root.frame.as_ref()?;
+    if frame.width <= 0 || frame.height <= 0 || window.frame.width <= 0 || window.frame.height <= 0
+    {
+        return None;
+    }
+    // Allow ordinary WM decorations, but never guess from PID or title alone.
+    // Widen before subtraction so untrusted i32 coordinates cannot overflow.
+    let differences = [
+        (frame.x, window.frame.x),
+        (frame.y, window.frame.y),
+        (frame.width, window.frame.width),
+        (frame.height, window.frame.height),
+    ]
+    .map(|(a, b)| (i64::from(a) - i64::from(b)).abs());
+    let distance = distance(Some(frame), &window.frame);
+    if differences.iter().any(|difference| *difference > 64) || distance > 128 {
+        return None;
+    }
+    let title_match = !root.name.trim().is_empty()
+        && !window.title.trim().is_empty()
+        && (window.title.contains(&root.name) || root.name.contains(&window.title));
+    Some((u8::from(!title_match), distance))
+}
+
+fn distance(frame: Option<&Rect>, window: &Rect) -> i64 {
+    frame
+        .map(|frame| {
+            [
+                (frame.x, window.x),
+                (frame.y, window.y),
+                (frame.width, window.width),
+                (frame.height, window.height),
+            ]
+            .iter()
+            .map(|(a, b)| (i64::from(*a) - i64::from(*b)).abs())
+            .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn unique_association(
+    scores: impl Iterator<Item = (usize, Option<AssociationScore>)>,
+) -> Option<usize> {
+    let mut best: Option<(usize, AssociationScore)> = None;
+    let mut ambiguous = false;
+    for (index, score) in scores {
+        let Some(score) = score else { continue };
+        match best {
+            None => {
+                best = Some((index, score));
+                ambiguous = false;
+            }
+            Some((_, previous)) if score < previous => {
+                best = Some((index, score));
+                ambiguous = false;
+            }
+            Some((_, previous)) if score == previous => ambiguous = true,
+            _ => {}
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        best.map(|(index, _)| index)
+    }
 }
 
 pub fn focus_window(window: Window, policy: PhysicalPolicy) -> Result<Value, ProtocolError> {
@@ -379,13 +493,18 @@ pub struct Input {
     conn: RustConnection,
     root: Window,
     target: Window,
+    expected_pid: u64,
 }
 impl Input {
-    pub fn connect(policy: PhysicalPolicy, target: Window) -> Result<Self, ProtocolError> {
+    pub fn connect(
+        policy: PhysicalPolicy,
+        target: Window,
+        expected_pid: u64,
+    ) -> Result<Self, ProtocolError> {
         policy.require_physical(SessionKind::detect())?;
         let (conn, screen) = connect()?;
         let root = conn.setup().roots[screen].root;
-        validate_target(&conn, root, target)?;
+        validate_target(&conn, root, target, expected_pid)?;
         prepare_focus(&conn, root, target, policy)?;
         xtest::get_version(&conn, 2, 2)
             .map_err(xerr)?
@@ -396,7 +515,12 @@ impl Input {
                     ErrorCode::CapabilityDeferred,
                 )
             })?;
-        Ok(Self { conn, root, target })
+        Ok(Self {
+            conn,
+            root,
+            target,
+            expected_pid,
+        })
     }
     pub fn move_pointer(&self, x: i32, y: i32) -> Result<(), ProtocolError> {
         self.preflight_point(x, y)?;
@@ -470,7 +594,7 @@ impl Input {
         Ok(())
     }
     fn preflight_point(&self, x: i32, y: i32) -> Result<(), ProtocolError> {
-        validate_target(&self.conn, self.root, self.target)?;
+        validate_target(&self.conn, self.root, self.target, self.expected_pid)?;
         if active_window(&self.conn, self.root)? != Some(self.target) {
             return Err(err(
                 "Refusing XTEST delivery because the owning window is no longer active",
@@ -518,7 +642,7 @@ impl Input {
         self.fake(BUTTON_RELEASE_EVENT, b, 0, 0)
     }
     fn fake(&self, event: u8, detail: u8, x: i32, y: i32) -> Result<(), ProtocolError> {
-        validate_target(&self.conn, self.root, self.target)?;
+        validate_target(&self.conn, self.root, self.target, self.expected_pid)?;
         if active_window(&self.conn, self.root)? != Some(self.target) {
             return Err(err(
                 "Refusing XTEST delivery because the owning window is no longer active",
@@ -586,7 +710,22 @@ fn prepare_focus(
         ErrorCode::ForegroundRequired,
     ))
 }
-fn validate_target(c: &RustConnection, root: Window, target: Window) -> Result<(), ProtocolError> {
+fn validate_process_identity(expected: u64, actual: u64) -> Result<(), ProtocolError> {
+    if expected == 0 || actual == 0 || expected != actual {
+        return Err(err(
+            "Owning X11 window process identity changed or is unavailable",
+            ErrorCode::StaleRef,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_target(
+    c: &RustConnection,
+    root: Window,
+    target: Window,
+    expected_pid: u64,
+) -> Result<(), ProtocolError> {
     if target == 0 || target == root {
         return Err(err(
             "XTEST requires a specific owning X11 window",
@@ -610,6 +749,12 @@ fn validate_target(c: &RustConnection, root: Window, target: Window) -> Result<(
         )
     })?;
     let atoms = Atoms::new(c)?;
+    let actual_pid = property32(c, target, atoms.pid, AtomEnum::CARDINAL.into())
+        .first()
+        .copied()
+        .unwrap_or(0) as u64;
+    validate_process_identity(expected_pid, actual_pid)?;
+
     if attributes.map_state != MapState::VIEWABLE
         || geometry.width == 0
         || geometry.height == 0
@@ -812,6 +957,189 @@ fn capture_err(e: impl std::fmt::Display) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn association_root(name: &str, frame: Option<Rect>) -> RootSnapshot {
+        RootSnapshot {
+            accessible: crate::atspi::AccessibleRef {
+                destination: ":1.1".into(),
+                path: name.into(),
+            },
+            pid: 42,
+            name: name.into(),
+            app_name: "Chrome".into(),
+            role: "frame".into(),
+            frame,
+            accessibility_available: true,
+            x11_window: None,
+            is_focused: false,
+            is_minimized: false,
+            z_order: None,
+        }
+    }
+    fn association_window(id: u32, title: &str, frame: Rect) -> WindowInfo {
+        WindowInfo {
+            id,
+            pid: 42,
+            title: title.into(),
+            frame,
+            focused: true,
+            minimized: false,
+            z_order: 0,
+        }
+    }
+    fn association_rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+    #[test]
+    fn association_rejects_unrelated_same_pid_picker() {
+        let frame = association_rect(10, 10, 1050, 980);
+        let mut roots = vec![association_root("Chrome", Some(frame.clone()))];
+        let windows = vec![association_window(
+            7,
+            "Open File",
+            association_rect(184, 49, 1231, 902),
+        )];
+        enrich_roots(&mut roots, &windows);
+        assert_eq!(roots[0].x11_window, None);
+        assert_eq!(roots[0].frame, Some(frame));
+    }
+    #[test]
+    fn association_rejects_ambiguous_accessibility_roots() {
+        let frame = association_rect(10, 10, 1050, 980);
+        let mut roots = vec![
+            association_root("Chrome", Some(frame.clone())),
+            association_root("Chrome", Some(frame.clone())),
+        ];
+        enrich_roots(&mut roots, &[association_window(7, "Chrome", frame)]);
+        assert!(roots.iter().all(|r| r.x11_window.is_none()));
+    }
+    #[test]
+    fn association_does_not_let_first_root_steal_stronger_match() {
+        let frame = association_rect(10, 10, 1050, 980);
+        let mut roots = vec![
+            association_root("Other", Some(association_rect(30, 20, 1050, 980))),
+            association_root("Chrome", Some(frame.clone())),
+        ];
+        enrich_roots(&mut roots, &[association_window(7, "Chrome", frame)]);
+        assert_eq!(roots[0].x11_window, None);
+        assert_eq!(roots[1].x11_window, Some(7));
+    }
+    #[test]
+    fn association_missing_geometry_never_guesses_by_pid() {
+        let mut roots = vec![association_root("Chrome", None)];
+        enrich_roots(
+            &mut roots,
+            &[association_window(
+                7,
+                "Chrome",
+                association_rect(10, 10, 1050, 980),
+            )],
+        );
+        assert_eq!(roots[0].x11_window, None);
+    }
+
+    #[test]
+    fn association_accepts_unique_window_with_decorations() {
+        let mut roots = vec![association_root(
+            "Document",
+            Some(association_rect(12, 42, 1000, 900)),
+        )];
+        let window =
+            association_window(7, "Document - Editor", association_rect(10, 10, 1004, 936));
+        enrich_roots(&mut roots, std::slice::from_ref(&window));
+        assert_eq!(roots[0].x11_window, Some(7));
+        assert_eq!(roots[0].frame, Some(window.frame));
+        assert!(roots[0].is_focused);
+    }
+    #[test]
+    fn association_duplicate_windows_are_ambiguous() {
+        let frame = association_rect(10, 10, 1000, 900);
+        let mut roots = vec![association_root("Document", Some(frame.clone()))];
+        enrich_roots(
+            &mut roots,
+            &[
+                association_window(7, "Document", frame.clone()),
+                association_window(8, "Document", frame),
+            ],
+        );
+        assert_eq!(roots[0].x11_window, None);
+    }
+    #[test]
+    fn association_extreme_coordinates_and_unknown_pid_are_rejected() {
+        let mut roots = vec![association_root(
+            "Document",
+            Some(association_rect(i32::MIN, 10, 1000, 900)),
+        )];
+        enrich_roots(
+            &mut roots,
+            &[association_window(
+                7,
+                "Document",
+                association_rect(i32::MAX, 10, 1000, 900),
+            )],
+        );
+        assert_eq!(roots[0].x11_window, None);
+        roots[0].pid = 0;
+        let mut window = association_window(7, "Document", roots[0].frame.clone().unwrap());
+        window.pid = 0;
+        enrich_roots(&mut roots, &[window]);
+        assert_eq!(roots[0].x11_window, None);
+    }
+
+    #[test]
+    fn unmatched_picker_has_explicit_image_only_root_without_borrowed_nodes() {
+        let mut roots = vec![association_root(
+            "Chrome",
+            Some(association_rect(10, 10, 1050, 980)),
+        )];
+        let windows = vec![association_window(
+            7,
+            "Open File",
+            association_rect(184, 49, 1231, 902),
+        )];
+        enrich_roots(&mut roots, &windows);
+        append_unmatched_windows(&mut roots, &windows);
+        assert_eq!(roots.len(), 2);
+        assert!(roots[0].accessibility_available);
+        assert_eq!(roots[0].x11_window, None);
+        assert!(!roots[1].accessibility_available);
+        assert_eq!(roots[1].x11_window, Some(7));
+        let outline = crate::atspi::outline_json(&roots[1], &[], 500);
+        assert_eq!(outline["pictureOnly"], true);
+        assert!(outline.get("ref").is_none());
+        assert!(outline["children"].as_array().unwrap().is_empty());
+        let public = crate::atspi::root_json("@w2", &roots[1], 1);
+        assert_eq!(public["metadata"]["backend"], "x11");
+        assert_eq!(public["metadata"]["accessibilityAvailable"], false);
+        append_unmatched_windows(&mut roots, &windows);
+        assert_eq!(roots.len(), 2);
+    }
+    #[test]
+    fn unmatched_unknown_process_window_never_gains_physical_root() {
+        let mut roots = Vec::new();
+        let mut window = association_window(7, "Unknown", association_rect(10, 10, 100, 100));
+        window.pid = 0;
+        append_unmatched_windows(&mut roots, &[window]);
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn physical_input_rejects_reused_xid_with_different_or_unknown_pid() {
+        assert!(validate_process_identity(42, 42).is_ok());
+        for (expected, actual) in [(42, 43), (42, 0), (0, 42), (0, 0)] {
+            assert_eq!(
+                validate_process_identity(expected, actual)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::StaleRef
+            );
+        }
+    }
+
     #[test]
     fn policy_guards() {
         assert_eq!(

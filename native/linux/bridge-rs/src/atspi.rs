@@ -46,6 +46,7 @@ pub struct RootSnapshot {
     pub app_name: String,
     pub role: String,
     pub frame: Option<Rect>,
+    pub accessibility_available: bool,
     pub x11_window: Option<u32>,
     pub is_focused: bool,
     pub is_minimized: bool,
@@ -238,6 +239,7 @@ impl AtspiClient {
                     },
                     app_name: app_name.clone(),
                     role,
+                    accessibility_available: true,
                     x11_window: None,
                     is_focused: false,
                     is_minimized: false,
@@ -254,6 +256,9 @@ impl AtspiClient {
         max_nodes: usize,
         max_depth: usize,
     ) -> Result<Vec<NodeSnapshot>, ProtocolError> {
+        if !root.accessibility_available {
+            return Ok(Vec::new());
+        }
         self.snapshot_from(&root.accessible, max_nodes, max_depth)
             .await
     }
@@ -387,7 +392,7 @@ pub fn root_json(reference: &str, root: &RootSnapshot, z_order: usize) -> Value 
         "isMinimized": root.is_minimized,
         "isOnscreen": true,
         "isModal": kind == "dialog",
-        "metadata": {"backend":"at-spi2","busName":root.accessible.destination,"objectPath":root.accessible.path},
+        "metadata": {"backend":if root.accessibility_available {"at-spi2"} else {"x11"},"accessibilityAvailable":root.accessibility_available,"busName":root.accessible.destination,"objectPath":root.accessible.path},
         "isBrowser": false,
         "browserFamily": Value::Null
     })
@@ -451,7 +456,7 @@ pub fn outline_json(root: &RootSnapshot, nodes: &[NodeSnapshot], max_nodes: usiz
     }
     roots.reverse();
     if roots.is_empty() {
-        json!({"role":"window","title":"","children":[],"truncated":false})
+        json!({"role":"window","title":root.name,"pictureOnly":!root.accessibility_available,"children":[],"truncated":false})
     } else {
         let mut root = roots.remove(0);
         if !roots.is_empty() {
@@ -641,6 +646,7 @@ mod tests {
                 width: 3,
                 height: 4,
             }),
+            accessibility_available: true,
             x11_window: Some(99),
             is_focused: true,
             is_minimized: false,

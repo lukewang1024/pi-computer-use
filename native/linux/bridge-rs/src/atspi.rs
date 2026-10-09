@@ -185,13 +185,8 @@ impl AtspiClient {
     }
 
     async fn application_pid(&self, accessible: &AccessibleRef) -> u64 {
-        let application_id = match self.proxy(accessible, "org.a11y.atspi.Application").await {
-            Ok(proxy) => proxy.get_property::<i32>("Id").await.unwrap_or(0),
-            Err(_) => 0,
-        };
-        if let Some(pid) = positive_application_pid(application_id) {
-            return pid;
-        }
+        // Application.Id is an arbitrary AT-SPI registry identifier, not an OS
+        // process ID. Only the bus connection credentials establish ownership.
         let Ok(bus) = Proxy::new(
             &self.connection,
             DBUS_DESTINATION,
@@ -209,7 +204,7 @@ impl AtspiClient {
             )
             .await
             .ok();
-        fallback_application_pid(application_id, connection_pid)
+        connection_process_id(connection_pid)
     }
 
     pub async fn list_roots(
@@ -524,14 +519,8 @@ fn relative_coordinate(value: i32, origin: i32) -> i32 {
     value.saturating_sub(origin)
 }
 
-fn positive_application_pid(application_id: i32) -> Option<u64> {
-    u64::try_from(application_id).ok().filter(|pid| *pid > 0)
-}
-
-fn fallback_application_pid(application_id: i32, connection_pid: Option<u32>) -> u64 {
-    positive_application_pid(application_id)
-        .or_else(|| connection_pid.filter(|pid| *pid > 0).map(u64::from))
-        .unwrap_or(0)
+fn connection_process_id(connection_pid: Option<u32>) -> u64 {
+    connection_pid.map(u64::from).unwrap_or(0)
 }
 
 fn unavailable(error: impl std::fmt::Display) -> ProtocolError {
@@ -550,6 +539,15 @@ fn atspi_error(error: impl std::fmt::Display) -> ProtocolError {
 
 #[cfg(test)]
 mod tests {
+    struct RegistryApplication;
+
+    #[zbus::interface(name = "org.a11y.atspi.Application")]
+    impl RegistryApplication {
+        #[zbus(property)]
+        fn id(&self) -> i32 {
+            42
+        }
+    }
     use super::*;
 
     #[test]
@@ -586,12 +584,36 @@ mod tests {
     }
 
     #[test]
-    fn application_pid_prefers_positive_atspi_id_then_bus_fallback() {
-        assert_eq!(fallback_application_pid(42, Some(99)), 42);
-        assert_eq!(fallback_application_pid(0, Some(99)), 99);
-        assert_eq!(fallback_application_pid(-1, Some(99)), 99);
-        assert_eq!(fallback_application_pid(0, Some(0)), 0);
-        assert_eq!(fallback_application_pid(0, None), 0);
+    fn process_identity_requires_bus_connection_credentials() {
+        assert_eq!(connection_process_id(Some(99)), 99);
+        assert_eq!(connection_process_id(Some(u32::MAX)), u64::from(u32::MAX));
+        assert_eq!(connection_process_id(Some(0)), 0);
+        assert_eq!(connection_process_id(None), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live session D-Bus"]
+    async fn registry_id_does_not_override_actual_bus_process_id() {
+        let connection = Connection::session().await.unwrap();
+        connection
+            .object_server()
+            .at("/cu_test_application", RegistryApplication)
+            .await
+            .unwrap();
+        let accessible = AccessibleRef {
+            destination: connection.unique_name().unwrap().to_string(),
+            path: "/cu_test_application".into(),
+        };
+        let client = AtspiClient { connection };
+        assert_eq!(
+            client.application_pid(&accessible).await,
+            u64::from(std::process::id())
+        );
+        let missing = AccessibleRef {
+            destination: "org.pi_computer_use.UnownedTestApplication".into(),
+            path: "/cu_test_application".into(),
+        };
+        assert_eq!(client.application_pid(&missing).await, 0);
     }
 
     #[tokio::test]

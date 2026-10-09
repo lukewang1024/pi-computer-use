@@ -215,6 +215,9 @@ export class LinuxHelperClient {
 			} else {
 				const error = new Error(parsed.error?.message ?? "Linux helper command failed.") as Error & { code?: string };
 				error.code = parsed.error?.code;
+				if (error.code === "semantic_dispatch_unknown") {
+					Object.assign(error, { outcome: "unknown", command: pending.command, requestId: parsed.id, retrySafe: false });
+				}
 				pending.reject(error);
 			}
 		}

@@ -359,10 +359,10 @@ async fn look(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pr
             "kind": "window",
             "framePoints": frame,
             "scaleFactor": scale_x,
-            "isModal": root.role.to_lowercase().contains("dialog"),
+            "isModal": root.is_modal(),
             "role": root.role,
             "subrole": "",
-            "metadata": {"backend":if root.accessibility_available {"at-spi2"} else {"x11"},"accessibilityAvailable":root.accessibility_available,"imageScaleX":scale_x,"imageScaleY":scale_y}
+            "metadata": {"backend":if root.accessibility_available {"at-spi2"} else {"x11"},"accessibilityAvailable":root.accessibility_available,"modalSource":root.modal_source(),"imageScaleX":scale_x,"imageScaleY":scale_y}
         },
         "outline": outline,
         "timings": {"captureMs":0,"describeMs":elapsed,"readTextMs":0,"totalMs":elapsed},
@@ -1058,6 +1058,7 @@ mod tests {
             x11_window: None,
             is_focused: false,
             is_minimized: false,
+            x11_modal: None,
             z_order: None,
         };
         let base_size = initial_image_size(&root, Some((1000, 500)));

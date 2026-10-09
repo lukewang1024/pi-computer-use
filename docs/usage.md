@@ -216,3 +216,25 @@ does not establish batch focus for targetless typing; use an explicit fresh
 editor ref, verify the resulting application state, and verify any saved edit
 independently. Application support for selection must be tested; API success
 alone does not establish that a Microsoft Word note can be edited accurately.
+
+### Browser text event semantics
+
+For browser-backed editable references, `setText` assigns a complete value and
+sends synthetic input/change notifications for controlled application fields.
+These events have `isTrusted=false`; this is not a keyboard-input acceptance test.
+`typeText` with an exact editable reference instead focuses and rechecks that
+referenced target, then uses CDP `Input.insertText` in the matching frame session.
+It inserts at the editor's current selection/caret, rather than assigning or
+appending the value through JavaScript. Verify the actual value and trusted input
+receipt in the application before submitting. Remote frame ancestry/document
+and focus checks remain mandatory. An unknown dispatch result is not replayed.
+Browser insertion does not prove physical keyboard events or IME composition.
+
+Browser text focus is checked within the addressed page/frame, rather than
+requiring `document.hasFocus()` to be true in a background browser. For observed
+same-process frames, each ancestor iframe must remain connected, own the same
+frame ID, and be its parent document's active element. The editable target must
+remain connected and active. Remote frame loader/ownership checks are retained.
+These checks precede the input command; they are not an atomic guarantee against
+arbitrary subsequent application focus changes. Application effect evidence is
+still required.

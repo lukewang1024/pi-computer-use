@@ -12,7 +12,8 @@ const invariants = ["state-scoped-observations","bounded-observation-history","m
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line); let result;
   if (request.cmd === "diagnostics") result = { protocolVersion: 4, architectureVersion: 1, invariants, pid: process.pid, accessibility: true };
-  else if (request.cmd === "listRoots") result = { roots: [{ kind: "window", rootRef: "root:1", pid: 42, appName: "google-chrome-stable", title: "Linux fixture", framePoints: { x: 10, y: 20, w: 800, h: 600 }, isFocused: true }] };
+  else if (request.cmd === "listRoots") result = { roots: [{ kind: "window", rootRef: "root:1", pid: 42, appName: "google-chrome-stable", title: "Linux fixture", framePoints: { x: 10, y: 20, w: 800, h: 600 }, isFocused: true }, { kind: "window", rootRef: "root:2", windowId: 99, pid: 42, appName: "google-chrome-stable", title: "Open", framePoints: { x: 30, y: 40, w: 700, h: 500 }, isFocused: false, metadata: { backend: "x11", accessibilityAvailable: false } }] };
+  else if (request.cmd === "look") result = { lookId: "look:pixel", window: { rootRef: "root:2", windowId: 99, kind: "window", framePoints: { x: 30, y: 40, w: 700, h: 500 }, metadata: { backend: "x11", accessibilityAvailable: false } }, outline: { role: "window", name: "Open", pictureOnly: true, actions: [], children: [] } };
   else if (request.cmd === "atspiReadText") result = { text: "fixture", offset: 0, limit: 7, totalChars: 7, hasMore: false };
   else if (request.cmd === "atspiWaitFor") result = { found: true };
   else if (request.cmd === "act") result = { outcome: "worked", performed: { delivery: "ax" } };
@@ -42,6 +43,18 @@ try {
 	assert.equal((await linux.listApps())[0]?.appName, "google-chrome-stable");
 	assert.equal((await linux.listRoots({ title: "fixture" }))[0]?.rootRef, "root:1");
 	assert.equal((await linux.getFrontmost()).pid, 42);
+	const pixelRoot = (await linux.listRoots({ title: "Open" }))[0];
+	assert.equal(pixelRoot.rootRef, "root:2");
+	assert.equal(pixelRoot.windowId, 99);
+	assert.deepEqual(pixelRoot.metadata, { backend: "x11", accessibilityAvailable: false });
+	const pixelLook = await linux.observe({ target: { rootRef: pixelRoot.rootRef }, includeImage: false });
+	assert.equal(pixelLook.window.windowId, pixelRoot.windowId);
+	assert.deepEqual(pixelLook.window.metadata, pixelRoot.metadata);
+	assert.equal(pixelLook.outline.pictureOnly, true);
+	assert.equal(pixelLook.outline.wireRef, undefined);
+	assert.deepEqual(pixelLook.outline.actions, []);
+	assert.deepEqual(pixelLook.outline.children, []);
+
 	assert.equal((await linux.readText({ lookId: "look:1", elementRef: "e:1", offset: 0, limit: 7 })).text, "fixture");
 	assert.equal((await linux.waitFor({ gone: false, timeoutMs: 100, text: "fixture" })).found, true);
 	assert.equal((await linux.act({ lookId: "look:1", target: { ref: "e:1" }, action: "press", params: {}, policy: "background" })).outcome, "worked");

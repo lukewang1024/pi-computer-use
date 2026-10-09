@@ -423,7 +423,7 @@ async fn act(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pro
         let node = lock(state)?.element(look_id, reference)?;
         match action {
             "press" | "click" => {
-                if let Ok(worked) = client.press(&node).await {
+                if let Some(worked) = semantic_attempt(client.press(&node).await)? {
                     return Ok(
                         json!({"outcome":if worked{"worked"}else{"didnt"},"performed":semantic_performed()}),
                     );
@@ -431,7 +431,7 @@ async fn act(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pro
             }
             "setText" | "typeText" => {
                 let text = params.get("text").and_then(Value::as_str).unwrap_or("");
-                if let Ok(worked) = client.set_text(&node, text).await {
+                if let Some(worked) = semantic_attempt(client.set_text(&node, text).await)? {
                     return Ok(
                         json!({"outcome":if worked{"worked"}else{"didnt"},"performed":semantic_performed(),"evidence":{"value":text}}),
                     );
@@ -826,6 +826,16 @@ async fn wait_for(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value
     Ok(json!({"found":false,"timedOut":true,"nodeCount":node_count}))
 }
 
+// Only an explicit capability refusal permits physical fallback. A transport
+// or service error may follow a delivered mutation; never silently replay it.
+fn semantic_attempt(result: Result<bool, ProtocolError>) -> Result<Option<bool>, ProtocolError> {
+    match result {
+        Ok(worked) => Ok(Some(worked)),
+        Err(error) if error.code == ErrorCode::CapabilityDeferred => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn semantic_performed() -> Value {
     json!({"grounding":"description","delivery":"ax","deltaSource":"snapshot"})
 }
@@ -912,6 +922,26 @@ mod tests {
             bounds: None,
             is_secure: false,
             depth: 0,
+        }
+    }
+
+    #[test]
+    fn semantic_errors_never_allow_physical_replay() {
+        assert_eq!(semantic_attempt(Ok(true)).unwrap(), Some(true));
+        assert_eq!(semantic_attempt(Ok(false)).unwrap(), Some(false));
+        assert_eq!(
+            semantic_attempt(Err(capability("No interface"))).unwrap(),
+            None
+        );
+        for code in [
+            ErrorCode::InternalError,
+            ErrorCode::SemanticDispatchUnknown,
+            ErrorCode::StaleRef,
+            ErrorCode::TargetNotFound,
+        ] {
+            let error = semantic_attempt(Err(ProtocolError::new("uncertain service result", code)))
+                .unwrap_err();
+            assert_eq!(error.code, code);
         }
     }
 

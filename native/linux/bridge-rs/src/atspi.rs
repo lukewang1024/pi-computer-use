@@ -342,7 +342,7 @@ impl AtspiClient {
         proxy
             .call("DoAction", &(action_index))
             .await
-            .map_err(atspi_error)
+            .map_err(semantic_dispatch_error)
     }
 
     pub async fn set_text(&self, node: &NodeSnapshot, text: &str) -> Result<bool, ProtocolError> {
@@ -356,7 +356,7 @@ impl AtspiClient {
         proxy
             .call("SetTextContents", &(text))
             .await
-            .map_err(atspi_error)
+            .map_err(semantic_dispatch_error)
     }
 }
 
@@ -542,8 +542,87 @@ fn atspi_error(error: impl std::fmt::Display) -> ProtocolError {
     )
 }
 
+// A service error does not prove that a mutating D-Bus request had no effect.
+fn semantic_dispatch_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::new(
+        format!("AT-SPI2 mutation outcome is unknown; it may already have taken effect. Do not replay input: {error}"),
+        ErrorCode::SemanticDispatchUnknown,
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mutation_errors_preserve_unknown_delivery() {
+        let error = super::semantic_dispatch_error("service disconnected after mutation");
+        assert_eq!(error.code, super::ErrorCode::SemanticDispatchUnknown);
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["code"], "semantic_dispatch_unknown");
+        assert!(error.message.contains("Do not replay"));
+        assert_eq!(
+            super::atspi_error("read failed").code,
+            super::ErrorCode::InternalError
+        );
+    }
+
+    struct MutatingFailure(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl MutatingFailure {
+        #[zbus(property)]
+        fn n_actions(&self) -> i32 {
+            1
+        }
+        fn do_action(&self, _index: i32) -> zbus::fdo::Result<bool> {
+            self.0.lock().unwrap().push("pressed".into());
+            Err(zbus::fdo::Error::Failed("failure after mutation".into()))
+        }
+    }
+
+    struct TextMutatingFailure(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[zbus::interface(name = "org.a11y.atspi.EditableText")]
+    impl TextMutatingFailure {
+        fn set_text_contents(&self, text: &str) -> zbus::fdo::Result<bool> {
+            self.0.lock().unwrap().push(text.into());
+            Err(zbus::fdo::Error::Failed(
+                "failure after text mutation".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "run under dbus-run-session; isolated D-Bus mutation fault test"]
+    async fn service_failure_after_mutation_preserves_unknown_and_never_replays() {
+        let mutations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = Connection::session().await.unwrap();
+        service
+            .object_server()
+            .at("/cu_mutation", MutatingFailure(mutations.clone()))
+            .await
+            .unwrap();
+        service
+            .object_server()
+            .at("/cu_mutation", TextMutatingFailure(mutations.clone()))
+            .await
+            .unwrap();
+        let client = AtspiClient {
+            connection: Connection::session().await.unwrap(),
+        };
+        let mut node = NodeSnapshot::minimal(AccessibleRef {
+            destination: service.unique_name().unwrap().to_string(),
+            path: "/cu_mutation".into(),
+        });
+        node.interfaces.insert(ACTION.into());
+        node.interfaces.insert(EDITABLE_TEXT.into());
+        let error = client.press(&node).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::SemanticDispatchUnknown);
+        assert_eq!(*mutations.lock().unwrap(), ["pressed"]);
+        let error = client.set_text(&node, "题注 Unicode").await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::SemanticDispatchUnknown);
+        assert_eq!(*mutations.lock().unwrap(), ["pressed", "题注 Unicode"]);
+    }
+
     struct RegistryApplication;
 
     #[zbus::interface(name = "org.a11y.atspi.Application")]

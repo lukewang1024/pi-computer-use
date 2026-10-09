@@ -21,6 +21,11 @@ const readline = require('node:readline');
 readline.createInterface({input: process.stdin}).on('line', line => {
  const r = JSON.parse(line);
  fs.appendFileSync(${JSON.stringify(audit)}, JSON.stringify({id:r.id,cmd:r.cmd})+'\\n');
+ if (r.cmd === 'semantic-mutate') {
+  // Record the side effect before returning a service failure.
+  fs.appendFileSync(${JSON.stringify(audit)}, JSON.stringify({mutation:r.id})+'\\n');
+  return process.stdout.write(JSON.stringify({id:r.id,protocolVersion:4,ok:false,error:{code:'semantic_dispatch_unknown',message:'Mutation applied before service failure'}})+'\\n');
+ }
  if (r.cmd === 'act') return;
  if (r.cmd === 'exit') return process.exit(0);
  const response = r.cmd === 'native-reject'
@@ -74,6 +79,15 @@ try {
  await assert.rejects(() => client.command('native-reject'), error => {
   assert.equal(error.code, 'stale_element'); assert.equal(error.outcome, undefined); return true;
  });
+ await assert.rejects(() => client.command('semantic-mutate'), error => {
+  assert.equal(error.code, 'semantic_dispatch_unknown');
+  assert.equal(error.outcome, 'unknown');
+  assert.equal(error.retrySafe, false);
+  assert.equal(error.command, 'semantic-mutate');
+  assert.equal(typeof error.requestId, 'string');
+  assert.equal(error.requestWriteAttempted, undefined, 'semantic error is not a helper transport loss');
+  return true;
+ });
  await assert.rejects(() => client.command('exit'), error => unknown(error, 'exit'));
  assert.equal(await client.command('echo', { value: 'fresh-process' }), 'fresh-process');
 
@@ -99,6 +113,29 @@ try {
  assert.equal((await receipts()).filter(r => r.cmd === 'act').length, previousActs + 1, 'unknown input must stop the batch');
  await assert.rejects(() => call(executeAct, {stateId:observation.details.capture.stateId,actions:actions.slice(0,1)}));
  assert.equal((await receipts()).filter(r => r.cmd === 'act').length, previousActs + 1, 'old observations must not authorize more input');
+ // A real terminal native error after mutation must also stop the public batch.
+ await shutdownComputerUseSession();
+ backend.act = () => client.command('semantic-mutate');
+ const semanticRoots = await call(executeFind, {text:'Owned fixture'});
+ const semanticObservation = await call(executeObserve, {root:semanticRoots.details.windows[0].windowRef,mode:'semantic'});
+ const semanticSearch = await call(executeSearchUi, {stateId:semanticObservation.details.capture.stateId,text:'Submit',role:'button'});
+ const semanticActions = [0,1].map(() => ({action:'press',ref:semanticSearch.details.matches[0].ref}));
+ const beforeMutations = (await receipts()).filter(r => r.mutation).length;
+ const semantic = await call(executeAct, {stateId:semanticObservation.details.capture.stateId,actions:semanticActions});
+ assert.equal(semantic.details.status, 'dispatch_outcome_unknown');
+ assert.equal(semantic.details.error.code, 'semantic_dispatch_unknown');
+ assert.equal(semantic.details.execution.semanticDispatch.mechanism, 'atspi');
+ assert.equal(semantic.details.execution.semanticDispatch.retrySafe, false);
+ assert.equal(semantic.details.execution.semanticDispatch.recoveryRequired, true);
+ assert.equal(semantic.details.execution.transport, undefined);
+ assert.equal(semantic.details.execution.inputDispatch, undefined);
+ assert.equal(semantic.details.execution.dispatchCompletion, 'unknown');
+ assert.equal(semantic.details.execution.actionCount, undefined);
+ assert.equal(semantic.details.stateId, undefined);
+ assert(semantic.content.some(c => c.type === 'text' && c.text.includes('Do not retry')));
+ assert.equal((await receipts()).filter(r => r.mutation).length, beforeMutations + 1);
+ await assert.rejects(() => call(executeAct, {stateId:semanticObservation.details.capture.stateId,actions:semanticActions}));
+ assert.equal((await receipts()).filter(r => r.mutation).length, beforeMutations + 1, 'uncertain mutation cannot be replayed with old state');
  Object.assign(backend, original); original = undefined;
  await shutdownComputerUseSession();
 
@@ -107,7 +144,7 @@ try {
  await waitForReceipt(beforeDispose + 1); client.dispose();
  unknown(await disposed, 'act');
  const all = await receipts();
- assert.equal(new Set(all.map(r => r.id)).size, all.length, 'no request ID may be replayed');
+ assert.equal(new Set(all.filter(r => r.id).map(r => r.id)).size, all.filter(r => r.id).length, 'no request ID may be replayed');
  console.log('Linux real subprocess unknown-delivery and public no-replay checks passed (no desktop input)');
 } finally {
  if (original) Object.assign(backend, original);

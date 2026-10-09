@@ -207,6 +207,7 @@ async fn list_roots(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Val
         .await?;
     if let Ok(windows) = x11::list_windows() {
         x11::enrich_roots(&mut roots, &windows);
+        x11::append_unmatched_windows(&mut roots, &windows);
     }
     let stored = lock(state)?.replace_roots(roots);
     let windows = stored
@@ -361,7 +362,7 @@ async fn look(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pr
             "isModal": root.role.to_lowercase().contains("dialog"),
             "role": root.role,
             "subrole": "",
-            "metadata": {"backend":"at-spi2","imageScaleX":scale_x,"imageScaleY":scale_y}
+            "metadata": {"backend":if root.accessibility_available {"at-spi2"} else {"x11"},"accessibilityAvailable":root.accessibility_available,"imageScaleX":scale_x,"imageScaleY":scale_y}
         },
         "outline": outline,
         "timings": {"captureMs":0,"describeMs":elapsed,"readTextMs":0,"totalMs":elapsed},
@@ -460,6 +461,7 @@ async fn act(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pro
             &params,
             policy,
             owning_window,
+            record.root.pid,
             (bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
             ActionGeometry {
                 frame,
@@ -493,6 +495,7 @@ async fn act(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pro
         &params,
         policy,
         owning_window,
+        record.root.pid,
         (screen_x, screen_y),
         ActionGeometry {
             frame,
@@ -564,11 +567,12 @@ fn physical_act(
     params: &Value,
     policy: PhysicalPolicy,
     owning_window: u32,
+    expected_pid: u64,
     point: (i32, i32),
     geometry: ActionGeometry,
 ) -> Result<Value, ProtocolError> {
     let (x, y) = point;
-    let input = x11::Input::connect(policy, owning_window)?;
+    let input = x11::Input::connect(policy, owning_window, expected_pid)?;
     let button = params
         .get("button")
         .and_then(Value::as_str)
@@ -996,6 +1000,7 @@ mod tests {
                 width: 2000,
                 height: 1000,
             }),
+            accessibility_available: true,
             x11_window: None,
             is_focused: false,
             is_minimized: false,

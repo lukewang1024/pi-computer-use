@@ -7,6 +7,7 @@
 // keeps the AX/CGEvent path, so with the env var unset this module is inert.
 
 import { randomUUID } from "node:crypto";
+import { CdpNavigationFailure } from "./navigation-failure.ts";
 import { parseLookResponse, serializeOutline, type SerializedOutline } from "./outline.ts";
 
 export interface CdpConsoleEntry {
@@ -128,6 +129,9 @@ export class CdpTab {
 	setDisconnectHandler(handler: (() => void) | undefined): void { this.disconnectHandler = handler; }
 	private notifyDisconnected(): void {
 		this.disconnected = true;
+		// Wake a navigation load wait immediately. Its post-wait check refuses
+		// to report a disconnect as successful loading.
+		this.loadFired?.();
 		const handler = this.disconnectHandler;
 		this.disconnectHandler = undefined;
 		handler?.();
@@ -404,6 +408,11 @@ export class CdpTab {
 			if (result.errorText) throw new Error(`Browser navigation failed: ${String(result.errorText).slice(0, 500)}`);
 			// An acknowledgement and a completed load are separate events.
 			await Promise.race([loaded, new Promise<void>((resolve) => { timer = setTimeout(resolve, NAVIGATE_LOAD_TIMEOUT_MS); })]);
+			if (this.disconnected) throw new Error("CDP connection closed during navigation; completion is unknown.");
+		} catch (error) {
+			// This catch is inside the pure CDP command, after common setup.
+			// It cannot classify setup, snapshot, or unrelated tool failures.
+			throw new CdpNavigationFailure(error);
 		} finally {
 			if (timer) clearTimeout(timer);
 			this.loadFired = undefined;

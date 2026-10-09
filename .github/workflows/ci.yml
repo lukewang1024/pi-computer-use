@@ -71,6 +71,7 @@ jobs:
         working-directory: native/linux/bridge-rs
         run: |
           cargo test --locked -j1
+          dbus-run-session -- cargo test --locked -j1 registry_id_does_not_override_actual_bus_process_id -- --ignored
           cargo clippy --locked --all-targets -- -D warnings
           cargo fmt --all -- --check
 

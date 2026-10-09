@@ -95,6 +95,7 @@ pub struct WindowInfo {
     pub frame: Rect,
     pub focused: bool,
     pub minimized: bool,
+    pub modal: Option<bool>,
     pub z_order: usize,
 }
 pub struct Capture {
@@ -133,7 +134,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, ProtocolError> {
             .translate_coordinates(id, root, 0, 0)
             .ok()
             .and_then(|c| c.reply().ok());
-        let states = property32(&conn, id, a.state, AtomEnum::ATOM.into());
+        let states = state_property(&conn, id, a.state);
         out.push(WindowInfo {
             id,
             pid: property32(&conn, id, a.pid, AtomEnum::CARDINAL.into())
@@ -154,7 +155,10 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, ProtocolError> {
                 height: i32::from(g.height),
             },
             focused: active == Some(id),
-            minimized: states.contains(&a.hidden),
+            minimized: states
+                .as_ref()
+                .is_some_and(|values| values.contains(&a.hidden)),
+            modal: states.as_ref().map(|values| values.contains(&a.modal)),
             z_order,
         });
     }
@@ -201,6 +205,7 @@ pub fn enrich_roots(roots: &mut [RootSnapshot], windows: &[WindowInfo]) {
         root.frame = Some(window.frame.clone());
         root.is_focused = window.focused;
         root.is_minimized = window.minimized;
+        root.x11_modal = window.modal;
         root.z_order = Some(window.z_order);
         if root.name.is_empty() {
             root.name.clone_from(&window.title);
@@ -240,6 +245,7 @@ pub fn append_unmatched_windows(roots: &mut Vec<RootSnapshot>, windows: &[Window
             x11_window: Some(window.id),
             is_focused: window.focused,
             is_minimized: window.minimized,
+            x11_modal: window.modal,
             z_order: Some(window.z_order),
         });
     }
@@ -1023,6 +1029,7 @@ struct Atoms {
     name: Atom,
     state: Atom,
     hidden: Atom,
+    modal: Atom,
     utf8: Atom,
 }
 impl Atoms {
@@ -1035,6 +1042,7 @@ impl Atoms {
             name: intern(c, "_NET_WM_NAME")?,
             state: intern(c, "_NET_WM_STATE")?,
             hidden: intern(c, "_NET_WM_STATE_HIDDEN")?,
+            modal: intern(c, "_NET_WM_STATE_MODAL")?,
             utf8: intern(c, "UTF8_STRING")?,
         })
     }
@@ -1053,6 +1061,30 @@ fn intern(c: &RustConnection, n: &str) -> Result<Atom, ProtocolError> {
         .reply()
         .map(|r| r.atom)
         .map_err(xerr)
+}
+// Missing state means unset; malformed properties and failed reads stay unknown.
+fn state_property(c: &RustConnection, w: Window, state: Atom) -> Option<Vec<u32>> {
+    let reply = c
+        .get_property(false, w, state, AtomEnum::ANY, 0, 4096)
+        .ok()?
+        .reply()
+        .ok()?;
+    decode_state_property(&reply)
+}
+fn decode_state_property(reply: &x11rb::protocol::xproto::GetPropertyReply) -> Option<Vec<u32>> {
+    if reply.type_ == u32::from(AtomEnum::NONE) {
+        return (reply.format == 0 && reply.bytes_after == 0 && reply.value.is_empty())
+            .then(Vec::new);
+    }
+    if reply.type_ != u32::from(AtomEnum::ATOM)
+        || reply.format != 32
+        || reply.bytes_after != 0
+        || reply.value.len() != usize::try_from(reply.value_len).ok()?.checked_mul(4)?
+    {
+        return None;
+    }
+    let values = reply.value32()?.collect();
+    Some(values)
 }
 fn property32(c: &RustConnection, w: Window, p: Atom, t: Atom) -> Vec<u32> {
     c.get_property(false, w, p, t, 0, u32::MAX)
@@ -1111,6 +1143,7 @@ mod tests {
             x11_window: None,
             is_focused: false,
             is_minimized: false,
+            x11_modal: None,
             z_order: None,
         }
     }
@@ -1122,6 +1155,7 @@ mod tests {
             frame,
             focused: true,
             minimized: false,
+            modal: None,
             z_order: 0,
         }
     }
@@ -1132,6 +1166,92 @@ mod tests {
             width,
             height,
         }
+    }
+    #[test]
+    fn state_property_rejects_malformed_and_truncated_wire_replies() {
+        use x11rb::protocol::xproto::GetPropertyReply;
+        let valid = GetPropertyReply {
+            format: 32,
+            sequence: 0,
+            length: 2,
+            type_: u32::from(AtomEnum::ATOM),
+            bytes_after: 0,
+            value_len: 2,
+            value: [7_u32.to_ne_bytes(), 11_u32.to_ne_bytes()].concat(),
+        };
+        assert_eq!(decode_state_property(&valid), Some(vec![7, 11]));
+        let mut reply = valid.clone();
+        reply.type_ = u32::from(AtomEnum::CARDINAL);
+        assert_eq!(decode_state_property(&reply), None);
+        reply = valid.clone();
+        reply.format = 8;
+        assert_eq!(decode_state_property(&reply), None);
+        reply = valid.clone();
+        reply.bytes_after = 4;
+        assert_eq!(decode_state_property(&reply), None);
+        reply = valid.clone();
+        reply.value.pop();
+        assert_eq!(decode_state_property(&reply), None);
+        reply = valid.clone();
+        reply.value_len = 10;
+        assert_eq!(decode_state_property(&reply), None);
+        reply = valid.clone();
+        reply.type_ = u32::from(AtomEnum::NONE);
+        assert_eq!(decode_state_property(&reply), None);
+        reply.format = 0;
+        reply.value.clear();
+        reply.value_len = 0;
+        reply.length = 0;
+        assert_eq!(decode_state_property(&reply), Some(vec![]));
+    }
+    #[test]
+    fn modal_state_enriches_exact_window_and_preserves_nonmodal_dialog() {
+        let frame = association_rect(10, 10, 800, 600);
+        for modal in [true, false] {
+            let mut roots = vec![association_root("Picker", Some(frame.clone()))];
+            roots[0].role = "dialog".into();
+            let mut window = association_window(9, "Picker", frame.clone());
+            window.modal = Some(modal);
+            enrich_roots(&mut roots, &[window]);
+            assert_eq!(roots[0].x11_window, Some(9));
+            assert_eq!(roots[0].is_modal(), modal);
+            let json = crate::atspi::root_json("@r1", &roots[0], 0);
+            assert_eq!(json["isModal"], modal);
+            assert_eq!(json["metadata"]["modalSource"], "ewmh");
+        }
+    }
+    #[test]
+    fn x11_only_modal_state_does_not_borrow_other_process_accessibility() {
+        let frame = association_rect(184, 49, 1231, 902);
+        let mut window = association_window(9, "Open File", frame);
+        window.pid = 999;
+        window.modal = Some(true);
+        let mut roots = vec![association_root(
+            "Browser",
+            Some(association_rect(10, 10, 1050, 980)),
+        )];
+        enrich_roots(&mut roots, &[window.clone()]);
+        append_unmatched_windows(&mut roots, &[window]);
+        assert_eq!(roots[0].x11_window, None);
+        assert_eq!(roots[0].x11_modal, None);
+        assert_eq!(roots[1].pid, 999);
+        assert!(!roots[1].accessibility_available);
+        assert_eq!(roots[1].role, "window");
+        assert!(roots[1].is_modal());
+        assert_eq!(
+            crate::atspi::root_json("@r2", &roots[1], 1)["isModal"],
+            true
+        );
+    }
+    #[test]
+    fn unavailable_modal_property_remains_explicit_role_inference() {
+        let mut root = association_root("Picker", None);
+        root.role = "dialog".into();
+        assert_eq!(root.x11_modal, None);
+        assert!(root.is_modal());
+        assert_eq!(root.modal_source(), "role-inferred");
+        root.role = "window".into();
+        assert!(!root.is_modal());
     }
     #[test]
     fn association_rejects_unrelated_same_pid_picker() {

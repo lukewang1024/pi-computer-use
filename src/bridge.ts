@@ -52,6 +52,13 @@ interface ExecutionTrace {
 	stealthCompatible?: boolean;
 	delivery?: ActionDelivery;
 	deliveryPolicy?: DeliveryPolicy;
+	semanticDispatch?: {
+		outcome: "unknown";
+		mechanism: "atspi";
+		recoveryRequired: true;
+		requestId: string;
+		retrySafe: false;
+	};
 	transport?: {
 		outcome: "unknown";
 		command: string;
@@ -1300,7 +1307,7 @@ function partialHidDispatchFromAct(result: HelperActResult): ExecutionTrace["inp
 	};
 }
 
-function transportUnknownTrace(error: unknown, policy: DeliveryPolicy): ExecutionTrace | undefined {
+function dispatchUnknownTrace(error: unknown, policy: DeliveryPolicy): ExecutionTrace | undefined {
 	if (!(error instanceof Error)) return undefined;
 	const details = error as Error & {
 		code?: unknown;
@@ -1310,6 +1317,14 @@ function transportUnknownTrace(error: unknown, policy: DeliveryPolicy): Executio
 		requestWriteAttempted?: unknown;
 		stages?: unknown;
 	};
+	if (details.code === "semantic_dispatch_unknown" && details.outcome === "unknown" && typeof details.requestId === "string") {
+		return executionTrace("act", currentRuntimeMode(), {
+			outcome: "unknown", deliveryPolicy: policy,
+			dispatchCompletion: "unknown", effectVerification: "unverified",
+			error: { code: "semantic_dispatch_unknown", message: details.message },
+			semanticDispatch: { outcome: "unknown", mechanism: "atspi", recoveryRequired: true, requestId: details.requestId, retrySafe: false },
+		});
+	}
 	if (details.code !== "helper_transport_unknown" || details.outcome !== "unknown" || typeof details.requestId !== "string") return undefined;
 	const command = typeof details.command === "string" ? details.command : "act";
 	const requestWriteAttempted = details.requestWriteAttempted === true;
@@ -1342,7 +1357,7 @@ async function helperAct(
 			trace.backgroundFirst = false;
 			return trace;
 		} catch (error) {
-			const trace = transportUnknownTrace(error, "foreground");
+			const trace = dispatchUnknownTrace(error, "foreground");
 			if (!trace) throw error;
 			trace.backgroundFirst = false;
 			return trace;
@@ -1356,7 +1371,7 @@ async function helperAct(
 			try {
 				foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
 			} catch (error) {
-				const transport = transportUnknownTrace(error, "foreground");
+				const transport = dispatchUnknownTrace(error, "foreground");
 				if (!transport) throw error;
 				transport.backgroundFirst = true;
 				transport.escalatedToForeground = true;
@@ -1375,7 +1390,7 @@ async function helperAct(
 		trace.backgroundFirst = true;
 		return trace;
 	} catch (error) {
-		const transport = transportUnknownTrace(error, "background");
+		const transport = dispatchUnknownTrace(error, "background");
 		if (transport) {
 			transport.backgroundFirst = true;
 			return transport;
@@ -1386,7 +1401,7 @@ async function helperAct(
 		try {
 			foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
 		} catch (retryError) {
-			const transport = transportUnknownTrace(retryError, "foreground");
+			const transport = dispatchUnknownTrace(retryError, "foreground");
 			if (!transport) throw retryError;
 			transport.backgroundFirst = true;
 			transport.escalatedToForeground = true;
@@ -2210,7 +2225,7 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 		try {
 			result = await currentPlatformBackend.actBatch(requests, { signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, textLength * 25 + 6_000) });
 		} catch (error) {
-			const transport = transportUnknownTrace(error, "ax_only");
+			const transport = dispatchUnknownTrace(error, "ax_only");
 			if (!transport) throw error;
 			return transport;
 		}
@@ -2239,14 +2254,15 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	const fallback = steps.find((step) => step.escalatedToForeground);
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
-		dispatchCompletion: steps.some(step => step.transport || step.inputDispatch) ? "unknown" : "returned",
+		dispatchCompletion: steps.some(step => step.transport || step.inputDispatch || step.semanticDispatch) ? "unknown" : "returned",
 		effectVerification: outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified",
 		steps,
-		actionCount: steps.some((step) => step.transport || step.inputDispatch) ? undefined : steps.length,
+		actionCount: steps.some((step) => step.transport || step.inputDispatch || step.semanticDispatch) ? undefined : steps.length,
 		stoppedAt: steps.findIndex((step) => step.outcome !== "worked") >= 0 ? steps.findIndex((step) => step.outcome !== "worked") : undefined,
 		rootDelta: steps.flatMap((step) => step.rootDelta ?? []),
 		transport: steps.find((step) => step.transport)?.transport,
 		inputDispatch: steps.find((step) => step.inputDispatch)?.inputDispatch,
+		semanticDispatch: steps.find((step) => step.semanticDispatch)?.semanticDispatch,
 		error: steps.find((step) => step.error)?.error,
 		backgroundFirst: steps[0]?.backgroundFirst,
 		escalatedToForeground: Boolean(fallback),
@@ -2296,7 +2312,8 @@ async function terminalDesktopActionResult(
 	let exactRootAvailable: boolean | undefined = confirmedRootAbsent ? false : undefined;
 	const transportUnknown = execution.transport?.outcome === "unknown";
 	const partialInputUnknown = execution.inputDispatch?.outcome === "unknown";
-	const dispatchUnknown = transportUnknown || partialInputUnknown;
+	const semanticUnknown = execution.semanticDispatch?.outcome === "unknown";
+	const dispatchUnknown = transportUnknown || partialInputUnknown || semanticUnknown;
 	if (!dispatchUnknown && !confirmedRootAbsent) {
 		exactRootAvailable = await exactRootAvailability(target);
 	}
@@ -2333,7 +2350,7 @@ async function terminalDesktopActionResult(
 		}
 	}
 	const status = dispatchUnknown ? "dispatch_outcome_unknown" : targetClosed ? "target_closed" : "post_action_observation_failed";
-	const code = transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? "foreground_interrupted_after_partial_hid" : targetClosed ? "target_closed" : "post_action_observation_failed";
+	const code = semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? "foreground_interrupted_after_partial_hid" : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
 	clearDesktopOperationState(operationState());
 	const details: TerminalDesktopActionDetails = {
@@ -2354,7 +2371,9 @@ async function terminalDesktopActionResult(
 	};
 	const unreleasedKeys = execution.inputDispatch?.unreleasedKeys ?? [];
 	const unreleasedButtons = execution.inputDispatch?.unreleasedMouseButtons ?? [];
-	const result = transportUnknown
+	const result = semanticUnknown
+		? `The AT-SPI semantic action may already have taken effect, but its outcome could not be confirmed. Do not retry this action. Request ${execution.semanticDispatch?.requestId} returned an uncertain mutation error; no physical fallback was sent.`
+		: transportUnknown
 		? `The native outcome of the act_ui request is unknown. Request ${execution.transport?.requestId} ${execution.transport?.requestWriteAttempted ? "had a helper-socket write attempted, but daemon receipt and input delivery are unknown" : "was not written to the helper socket"}. Do not retry this action. Explicit desktop recovery is required before continuing.`
 		: partialInputUnknown
 		? `Foreground verification failed after ${execution.inputDispatch?.eventsDispatched} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
@@ -2389,7 +2408,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const headless = getComputerUseConfig().headless;
 	return await withWindowWriteLock(target, async () => {
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
-		if (execution.transport?.outcome === "unknown" || execution.inputDispatch?.outcome === "unknown") {
+		if (execution.transport?.outcome === "unknown" || execution.inputDispatch?.outcome === "unknown" || execution.semanticDispatch?.outcome === "unknown") {
 			return await terminalDesktopActionResult(
 				target,
 				baseView.stateId,

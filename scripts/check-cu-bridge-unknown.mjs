@@ -24,5 +24,33 @@ try{
  assert(result.content.some(c=>c.type==='text'&&c.text.includes('Do not retry')));
  await assert.rejects(()=>call(executeAct,{stateId:observation.details.capture.stateId,actions:[{action:'press',ref:search.details.matches[0].ref}]}));
  assert.equal(dispatches,1,'old observation must not authorize another input');
+ // Exercise the Linux native partial-HID result through the public executor.
+ // This is a returned native result, not a thrown transport exception.
+ await shutdownComputerUseSession();
+ let observations = 0;
+ const observe = backend.observe;
+ backend.observe = async (...args) => { observations++; return observe(...args); };
+ dispatches = 0;
+ backend.act = async () => {
+  dispatches++;
+  return {outcome:'unknown',performed:{delivery:'hid',mechanism:'xtest'},
+   error:{code:'foreground_interrupted_after_partial_hid',message:'Focus changed after write attempt',causeCode:'foreground_required'},
+   inputDispatch:{eventsDispatched:3,eventCountKind:'write_attempts',unreleasedKeys:[37],unreleasedMouseButtons:[1],recoveryRequired:true,retrySafe:false}};
+ };
+ const freshRoots = await call(executeFind,{text:'Owned fixture'});
+ const fresh = await call(executeObserve,{root:freshRoots.details.windows[0].windowRef,mode:'semantic'});
+ const freshSearch = await call(executeSearchUi,{stateId:fresh.details.capture.stateId,text:'Submit',role:'button'});
+ const observedBeforeDispatch = observations;
+ const partial = await call(executeAct,{stateId:fresh.details.capture.stateId,actions:[{action:'press',ref:freshSearch.details.matches[0].ref},{action:'press',ref:freshSearch.details.matches[0].ref}]});
+ assert.equal(dispatches,1,'partial native input stops later actions');
+ assert.equal(observations,observedBeforeDispatch,'unknown partial input does not perform a successor observation');
+ assert.equal(partial.details.status,'dispatch_outcome_unknown');
+ assert.equal(partial.details.execution.inputDispatch.recoveryRequired,true);
+ assert.equal(partial.details.execution.inputDispatch.retrySafe,false);
+ assert.deepEqual(partial.details.execution.inputDispatch.unreleasedKeys,[37]);
+ assert.deepEqual(partial.details.execution.inputDispatch.unreleasedMouseButtons,[1]);
+ assert.equal(partial.details.stateId,undefined);
+ await assert.rejects(()=>call(executeAct,{stateId:fresh.details.capture.stateId,actions:[{action:'press',ref:freshSearch.details.matches[0].ref}]}));
+ assert.equal(dispatches,1,'partial input invalidates the old observation and is never replayed');
  console.log('CU public executor unknown-delivery regression passed (new coverage; injected native backend)');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

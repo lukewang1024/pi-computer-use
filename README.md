@@ -140,8 +140,10 @@ connection explicitly.
 
 Each launch allocates a fresh temporary browser profile. Replacement and
 session shutdown wait up to three seconds for the exact owned child to exit,
-then remove that profile. Historical profiles and external browsers are never
-adopted or swept. Download artifacts in the configured download root remain
+then remove that profile. Transient `ENOTEMPTY`/`EBUSY` removal failures
+receive at most three further attempts, with the original directory identity checked again before each.
+This retries filesystem cleanup only, never input or process termination.
+Historical profiles and external browsers are never adopted or swept. Download artifacts in the configured download root remain
 available for inspection.
 `launch_browser` returns this child's PID and profile path in
 `details.managedBrowser` for integrations to verify cleanup independently.

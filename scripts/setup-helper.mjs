@@ -915,7 +915,7 @@ export async function installPrebuiltHelperApp(sourceAppPath, {
 	}, lockOptions);
 }
 
-function helperInfoPlist(version) {
+export function helperInfoPlist(version) {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -1029,6 +1029,39 @@ function serializeLocalBuildInput(buildInput) {
 	return `${JSON.stringify(buildInput, null, 2)}\n`;
 }
 
+// SDK JavaScript releases need not replace a sealed, identical native component.
+// Keep its original package provenance and signed bundle metadata intact.
+export function localMacBuildInputsCompatible(installed, expected) {
+	try {
+		const nativeInputs = (seal) => {
+			if (seal.format !== "pi-computer-use-local-helper-build-seal-v1" ||
+				seal.inputs.format !== "pi-computer-use-local-helper-build-input-v1" ||
+				seal.fingerprint !== createHash("sha256").update(JSON.stringify(seal.inputs)).digest("hex")) return;
+			const inputs = structuredClone(seal.inputs);
+			const { version, infoPlistSha256 } = inputs.package;
+			if (typeof version !== "string" || !version ||
+				infoPlistSha256 !== createHash("sha256").update(helperInfoPlist(version)).digest("hex")) return;
+			delete inputs.package.version;
+			delete inputs.package.infoPlistSha256;
+			return JSON.stringify(inputs);
+		};
+		const current = nativeInputs(expected);
+		return current !== undefined && nativeInputs(installed) === current;
+	} catch {
+		return false;
+	}
+}
+
+function compatibleLocalBuildMetadata(metadata, expected, infoPlist) {
+	try {
+		const installed = JSON.parse(metadata);
+		return localMacBuildInputsCompatible(installed, expected) &&
+			infoPlist === helperInfoPlist(installed.inputs.package.version);
+	} catch {
+		return false;
+	}
+}
+
 // Read-only admission for explicit local builds. Never rebuild, sign, register,
 // or update a helper while a desktop session is checking freshness.
 export async function verifiedLocalMacHelperSha256(installPath, {
@@ -1041,12 +1074,13 @@ export async function verifiedLocalMacHelperSha256(installPath, {
 } = {}) {
 	const expected = await buildInputProvider(arch);
 	const resources = path.join(installPath, "Contents", "Resources");
-	const [metadata, marker, pinned] = await Promise.all([
+	const [metadata, infoPlist, marker, pinned] = await Promise.all([
 		fileSystem.readFile(path.join(resources, "local-build-input.json"), "utf8"),
+		fileSystem.readFile(path.join(installPath, "Contents", "Info.plist"), "utf8"),
 		fileSystem.readFile(path.join(resources, "signing-identity.sha1"), "utf8"),
 		readPinnedIdentity(),
 	]);
-	if (!pinned || marker.trim() !== pinned || metadata !== serializeLocalBuildInput(expected)) {
+	if (!pinned || marker.trim() !== pinned || !compatibleLocalBuildMetadata(metadata, expected, infoPlist)) {
 		throw new Error("Installed local macOS helper build inputs or pinned signing identity differ; deployment is required before input.");
 	}
 	await verifySignature(installPath);
@@ -1234,7 +1268,6 @@ export async function installLocalMacBuild({
 
 		const version = await getVersion();
 		const buildInput = await buildInputProvider(arch, { ...buildInputOptions, getVersion: async () => version });
-		const expectedInfo = helperInfoPlist(version);
 		const installedExists = await pathExists(fileSystem, installPath);
 		const pinnedIdentity = await readPinnedIdentity();
 		if (pinnedIdentity && !(await checkIdentityAvailable(pinnedIdentity))) {
@@ -1258,10 +1291,9 @@ export async function installLocalMacBuild({
 				fileSystem.readFile(buildInputPath, "utf8").catch(() => undefined),
 			])
 			: [];
-		const expectedBuildInput = serializeLocalBuildInput(buildInput);
 		if (
 			installedExists && pinnedIdentity && signingIdentity === pinnedIdentity &&
-			installedInfo === expectedInfo && installedBuildInput === expectedBuildInput
+			compatibleLocalBuildMetadata(installedBuildInput, buildInput, installedInfo)
 		) {
 			await verifySignature(installPath);
 			const [installedRequirement, installedIdentity, identityMarker] = await Promise.all([

@@ -55,6 +55,14 @@ const macKeyNames = new Set([
 	"left", "arrowleft", "arrow_left", "right", "arrowright", "arrow_right", "down", "arrowdown", "arrow_down", "up", "arrowup", "arrow_up",
 ]);
 
+// The native mapper covers printable ASCII, including implied Shift for
+// symbols such as '?' and '+'. Other graphemes cannot be a chord's base.
+const macMappedCharacters = new Set(Array.from({ length: 95 }, (_, index) => String.fromCharCode(32 + index)));
+
+function isMappedMacChordKey(key: string): boolean {
+	return macKeyNames.has(key) || macMappedCharacters.has(key);
+}
+
 const windowsKeyNames = new Set([
 	"enter", "return", "escape", "esc", "tab", "backspace", "delete", "space", "left", "arrowleft", "right", "arrowright",
 	"up", "arrowup", "down", "arrowdown", "home", "end", "pageup", "pagedown", "ctrl", "control", "shift", "alt", "option", "cmd", "win", "meta",
@@ -109,7 +117,7 @@ function normalizeMacChordToken(token: string): string[] | undefined {
 	const modifiers = parts.slice(0, -1).map((part) => canonicalModifier("macos", part));
 	if (modifiers.some((modifier) => !modifier)) return undefined;
 	const base = parts.at(-1)!;
-	if (!isBaseKey("macos", base) || canonicalModifier("macos", base)) {
+	if (!isMappedMacChordKey(base) || canonicalModifier("macos", base)) {
 		throw new Error(`Unsupported key '${base}' in macOS key chord.`);
 	}
 	return [...modifiers as string[], base];
@@ -135,7 +143,7 @@ export function normalizeKeypressKeys(platform: PlatformName, value: unknown): s
 		const modifiers = tokens.slice(0, -1).map((key) => canonicalModifier("macos", key));
 		if (modifiers.every(Boolean)) {
 			const base = tokens.at(-1)!;
-			if (!isBaseKey("macos", base) || canonicalModifier("macos", base)) {
+			if (!isMappedMacChordKey(base) || canonicalModifier("macos", base)) {
 				throw new Error(`Unsupported macOS key '${base}' after modifier.`);
 			}
 			return [...modifiers as string[], base];

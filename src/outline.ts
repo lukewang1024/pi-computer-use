@@ -127,12 +127,19 @@ export interface OutlineDiff {
 	reason?: "root_replaced" | "change_budget_exceeded" | "identity_confidence_low" | "structure_changed" | "availability_unknown";
 }
 
-export type SerializedOutlineNode = Omit<OutlineNode, "parent" | "children"> & { children: SerializedOutlineNode[] };
+export type SerializedOutlineNode = Omit<OutlineNode, "parent" | "children"> & {
+	children: SerializedOutlineNode[];
+	/** Returned descendants were folded; this is separate from a native read frontier. */
+	disclosure?: { childCount: number; omittedNodeCount: number };
+};
 
 export interface SerializedOutline {
 	lookId: string;
 	refHighWaterMark?: number;
 	root: SerializedOutlineNode;
+	view?: "folded";
+	returnedNodeCount?: number;
+	observedNodeCount?: number;
 }
 
 const DEFAULT_BUDGET = { maxDepth: 2, maxNodes: 150 };
@@ -542,6 +549,27 @@ export function serializeOutline(outline: Outline): SerializedOutline {
 	return { lookId: outline.lookId, refHighWaterMark: outline.refHighWaterMark, root: serializeOutlineNode(outline.root) };
 }
 
+/** Project the same refs as the rendered outline without pruning cached state. */
+export function serializeFoldedOutline(outline: Outline): SerializedOutline {
+	const visible = new Set(foldToBudget(outline).renderedRefs);
+	let returnedNodeCount = 0;
+	const project = (node: OutlineNode): { node?: SerializedOutlineNode; observed: number; returned: number } => {
+		const descendants = node.children.map(project);
+		const observed = 1 + descendants.reduce((sum, child) => sum + child.observed, 0);
+		if (!visible.has(node.ref)) return { observed, returned: 0 };
+		const children = descendants.flatMap(child => child.node ? [child.node] : []);
+		const returned = 1 + descendants.reduce((sum, child) => sum + child.returned, 0);
+		const serialized = serializeOutlineNodeShallow(node);
+		serialized.children = children;
+		if (observed > returned) serialized.disclosure = { childCount: node.children.length, omittedNodeCount: observed - returned };
+		returnedNodeCount++;
+		return { node: serialized, observed, returned };
+	};
+	const projected = project(outline.root);
+	return { lookId: outline.lookId, refHighWaterMark: outline.refHighWaterMark, root: projected.node!,
+		view: "folded", returnedNodeCount, observedNodeCount: projected.observed };
+}
+
 export function serializeOutlineNode(node: OutlineNode): SerializedOutlineNode {
 	const { parent: _parent, children, ...rest } = node;
 	return { ...rest, children: children.map(serializeOutlineNode) };
@@ -588,6 +616,7 @@ export function serializeOutlineSubtree(node: OutlineNode, maxDepth = 3, maxNode
 }
 
 export function restoreOutline(serialized: SerializedOutline): Outline {
+	if (serialized.view === "folded") throw new Error("A folded response is not a complete observation; use search_ui or expand_ui with its current stateId.");
 	const nodes: OutlineNode[] = [];
 	const refToWireRef = new Map<string, string>();
 	const wireRefToRef = new Map<string, string>();

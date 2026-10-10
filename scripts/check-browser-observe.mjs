@@ -333,6 +333,30 @@ try {
   driftPixelIdentity=true;pixelIdentityReads=0;
   await assert.rejects(()=>tool(executeObserve,{root,mode:'pixels'}),/document changed/);
   driftPixelIdentity=false;
+  {
+    const priorNodes=axNodes;
+    axNodes=[{nodeId:'action-fold-root',role:{value:'RootWebArea'},childIds:Array.from({length:300},(_,i)=>'action-fold-'+i)},
+      ...Array.from({length:300},(_,i)=>({nodeId:'action-fold-'+i,role:{value:'button'},name:{value:'Fold control '+i},backendDOMNodeId:3000+i}))];
+    const compact=await tool(executeObserve,{root,mode:'semantic'});
+    const readCount=calls.length;
+    await assert.rejects(()=>tool(executeAct,{stateId:compact.details.stateId,outlineView:'invalid',actions:[{action:'click',x:1,y:1}]}),/outlineView must be/);
+    assert.equal(calls.length,readCount,'Invalid action projection must reject before dispatch');
+    const action=await tool(executeAct,{stateId:compact.details.stateId,outlineView:'folded',actions:[{action:'click',x:1,y:1}]});
+    assert.equal(action.details.outline.view,'folded');
+    assert(action.details.outline.returnedNodeCount <= 150);
+    assert(action.details.outline.observedNodeCount > 300);
+    assert.notEqual(action.details.stateId,compact.details.stateId);
+    assert.equal(calls.slice(readCount).filter(c=>c.method==='Input.dispatchMouseEvent').length,2,'Projection must dispatch one click only');
+    assert.equal(calls.slice(readCount).filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'Projection must reuse the original successor');
+    const afterAction=calls.length;
+    const actionHidden=await tool(executeSearchUi,{stateId:action.details.stateId,text:'Fold control 299'});
+    assert.equal(actionHidden.details.matches[0].label,'Fold control 299');
+    const actionRefs=new Set();const visitAction=n=>{actionRefs.add(n.ref);n.children.forEach(visitAction);};visitAction(action.details.outline.root);
+    assert(!actionRefs.has(actionHidden.details.matches[0].ref),'Omitted action successor nodes remain queryable');
+    await assert.rejects(()=>tool(executeAct,{stateId:compact.details.stateId,outlineView:'folded',actions:[{action:'click',x:1,y:1}]}),/stale/i);
+    assert.equal(calls.length,afterAction,'Queries and stale-action refusal must not dispatch or collect again');
+    axNodes=priorNodes;
+  }
   console.log('Browser observe executor integration checks passed');
 } finally {
   await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);

@@ -4441,7 +4441,7 @@ final class Bridge {
 		}
 		let modifiers = parts.dropLast().compactMap(canonicalMacModifier)
 		guard modifiers.count == parts.count - 1 else { return nil }
-		guard let base = parts.last, isSupportedMacBaseKey(base) else {
+		guard let base = parts.last, nativeKeyStroke(base) != nil else {
 			throw BridgeFailure(message: "Unsupported key '\(parts.last ?? "")' in macOS key chord", code: "invalid_args")
 		}
 		return (modifiers + [base]).joined(separator: "+")
@@ -4451,7 +4451,7 @@ final class Bridge {
 		guard !keys.isEmpty else {
 			throw BridgeFailure(message: "keypress requires keys", code: "invalid_args")
 		}
-		let tokens = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+		let tokens = keys.map { $0 == " " ? $0 : $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
 		guard tokens.allSatisfy({ !$0.isEmpty }) else {
 			throw BridgeFailure(message: "keypress keys must not contain an empty key", code: "invalid_args")
 		}
@@ -4459,7 +4459,7 @@ final class Bridge {
 		if tokens.count >= 2 {
 			let modifiers = tokens.dropLast().compactMap(canonicalMacModifier)
 			if modifiers.count == tokens.count - 1 {
-				guard let base = tokens.last, isSupportedMacBaseKey(base) else {
+				guard let base = tokens.last, nativeKeyStroke(base) != nil else {
 					throw BridgeFailure(message: "Unsupported macOS key after modifier", code: "invalid_args")
 				}
 				return modifiers + [base]
@@ -4476,7 +4476,7 @@ final class Bridge {
 	}
 
 	private func keyCode(_ key: String) -> CGKeyCode? {
-		let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+		let normalized = key == " " ? key : key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 		let table: [String: CGKeyCode] = [
 			"a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11,
 			"q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21,
@@ -4509,6 +4509,18 @@ final class Bridge {
 		return (flags, keys.last ?? "")
 	}
 
+	private func nativeKeyStroke(_ key: String) -> (code: CGKeyCode, flags: CGEventFlags)? {
+		let normalized = key == " " ? key : key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+		let shifted: [String: String] = [
+			"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
+			"&": "7", "*": "8", "(": "9", ")": "0", "_": "-", "+": "=",
+			"{": "[", "}": "]", "|": "\\", ":": ";", "\"": "'",
+			"<": ",", ">": ".", "?": "/", "~": "`",
+		]
+		if let base = shifted[normalized], let code = keyCode(base) { return (code, [.maskShift]) }
+		return keyCode(normalized).map { ($0, CGEventFlags()) }
+	}
+
 	private func postKeyPress(keys: [String], pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
@@ -4533,13 +4545,18 @@ final class Bridge {
 	private func postKey(_ key: String, flags: CGEventFlags, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
-		guard let code = keyCode(key) else {
+		guard let stroke = nativeKeyStroke(key) else {
+			guard flags.isEmpty else {
+				throw BridgeFailure(message: "Modified key has no native key mapping; no text or key event was sent", code: "invalid_args")
+			}
 			if key.count == 1 {
 				try postUnicodeText(key, pid: pid, target: target, delivery: delivery)
 				return
 			}
 			throw BridgeFailure(message: "Unsupported key '\(key)'", code: "invalid_args")
 		}
+		let code = stroke.code
+		let flags = flags.union(stroke.flags)
 		if delivery == "hid" {
 			guard let sequence = foregroundKeyChordEvents(code: Int(code), modifiers: activeModifierKeyCodes(flags)) else {
 				throw BridgeFailure(message: "Invalid physical key chord; no key event was sent", code: "invalid_args")
@@ -4726,13 +4743,62 @@ final class Bridge {
 		}
 	}
 
+	#if PI_CU_TEST_NATIVE_KEYS
+	// Test-only entry: exercises the real private parser and mapping.
+	// No run loop, capture, permission probe or event posting is invoked.
+	func nativeKeyPreflightTests() throws {
+		let unmapped = ["🙂", "汉", "é", "e\u{0301}", "\u{0000}"]
+		for key in unmapped {
+			let normalized = try normalizedMacKeypressKeys([key])
+			precondition(normalized == [key])
+			for modifier in ["cmd", "ctrl", "shift", "alt"] {
+				for keys in [[modifier, key], [modifier + "+" + key], ["a", modifier + "+" + key]] {
+					do {
+						_ = try normalizedMacKeypressKeys(keys)
+						preconditionFailure("Unmapped modified key was accepted")
+					} catch let failure as BridgeFailure {
+						precondition(failure.code == "invalid_args")
+					}
+				}
+			}
+		}
+		for key in ["a", "1", ".", "'", "`", "[", "]", "\\", "-", "=", "+", "~", "left", "f12", "forward_delete", "space", " "] {
+			precondition(keyCode(key) != nil)
+			let normalized = try normalizedMacKeypressKeys(["cmd", key])
+			precondition(normalized == ["cmd", key])
+		}
+		let arrayChord = try normalizedMacKeypressKeys(["Command", "O"])
+		let tokenChord = try normalizedMacKeypressKeys(["cmd+shift+p"])
+		precondition(arrayChord == ["cmd", "o"])
+		precondition(tokenChord == ["cmd+shift+p"])
+		precondition(keyCode(" ") == 49)
+		for value in 32...126 {
+			let key = String(UnicodeScalar(value)!)
+			precondition(nativeKeyStroke(key) != nil)
+			let normalized = try normalizedMacKeypressKeys(["cmd", key])
+			precondition(normalized == ["cmd", key.lowercased()])
+		}
+		for (key, code) in ["?": 44, "+": 24, "!": 18, "_": 27, "{": 33, "|": 42, "\"": 39, "~": 50] {
+			guard let stroke = nativeKeyStroke(key) else { preconditionFailure("Missing shifted mapping") }
+			precondition(Int(stroke.code) == code && stroke.flags == .maskShift)
+			let chord = keyChord(["cmd", key])!
+			precondition(chord.flags.union(stroke.flags) == [.maskCommand, .maskShift])
+		}
+		print("native key argument preflight tests passed")
+	}
+	#endif
 }
 
 @main
 struct PiComputerUseHelper {
 	static func main() {
+		#if PI_CU_TEST_NATIVE_KEYS
+		do { try Bridge().nativeKeyPreflightTests() }
+		catch { fatalError("Native key preflight test failed: \(error)") }
+		#else
 		_ = NSApplication.shared
 		NSApp.setActivationPolicy(CommandLine.arguments.contains("serve") ? .accessory : .prohibited)
 		Bridge().run()
+		#endif
 	}
 }

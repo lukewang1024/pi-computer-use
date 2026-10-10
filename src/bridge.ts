@@ -2,7 +2,7 @@ import { prepareManagedDownloadDirectory } from "./browser-downloads.ts";
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
 import { serializeFocusContext } from "./focus-context.ts";
 import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
-import { spawn, type ChildProcess } from "node:child_process";
+import { ManagedBrowser } from "./managed-browser.ts";
 import { waitForBrowserStartup } from "./browser-startup.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -242,6 +242,7 @@ interface ListWindowsDetails {
 
 interface BrowserObservationDetails {
 	managedDownloadDirectory?: string;
+	managedBrowser?: { pid?: number; profileDirectory: string };
 	diagnostics?: CdpPageSnapshot["diagnostics"];
 	capture?: { stateId: string; width: number; height: number; cssWidth: number; cssHeight: number; pixelScale: number; coordinateSpace: "browser-viewport-screenshot-pixels" };
 	tool: string;
@@ -351,7 +352,7 @@ interface RuntimeState {
 	browserRootByContext: Map<string, string>;
 	browserContextByRoot: Map<string, string>;
 	nextRootRefIndex: number;
-	managedBrowser?: ChildProcess;
+	managedBrowser?: ManagedBrowser;
 	managedBrowserCdpPort?: string;
 	previousCdpPort?: string;
 	permissionStatus?: PermissionStatus;
@@ -403,23 +404,27 @@ function persistOperation(state: OperationState): void {
 }
 
 /** Release handles and state owned by the current Pi session. */
-export async function shutdownComputerUseSession(): Promise<void> {
-	await resourceScheduler.close();
-	resourceScheduler = new ResourceScheduler();
-	disconnectCdp();
-
-	const managedBrowser = runtimeState.managedBrowser;
-	runtimeState.managedBrowser = undefined;
-	if (managedBrowser) {
-		managedBrowser.kill("SIGTERM");
-		managedBrowser.unref();
-	}
+function restoreManagedBrowserPort(): void {
 	if (runtimeState.managedBrowserCdpPort && process.env.PI_COMPUTER_USE_CDP_PORT === runtimeState.managedBrowserCdpPort) {
 		if (runtimeState.previousCdpPort === undefined) delete process.env.PI_COMPUTER_USE_CDP_PORT;
 		else process.env.PI_COMPUTER_USE_CDP_PORT = runtimeState.previousCdpPort;
 	}
 	runtimeState.managedBrowserCdpPort = undefined;
 	runtimeState.previousCdpPort = undefined;
+}
+
+export async function shutdownComputerUseSession(): Promise<void> {
+	await resourceScheduler.close();
+	resourceScheduler = new ResourceScheduler();
+	disconnectCdp();
+
+	const managedBrowser = runtimeState.managedBrowser;
+	let browserCleanupError: unknown;
+	try {
+		await managedBrowser?.close();
+		runtimeState.managedBrowser = undefined;
+	} catch (error) { browserCleanupError = error; }
+	if (!browserCleanupError) restoreManagedBrowserPort();
 
 	savedStates.clear();
 	clearStoredOutputs();
@@ -432,6 +437,7 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	runtimeState.helperDiagnostics = undefined;
 	runtimeState.lastPermissionCheckAt = 0;
 	await currentPlatformBackend.shutdown?.();
+	if (browserCleanupError) throw browserCleanupError;
 }
 
 function currentRuntimeMode(): ExecutionVariant {
@@ -2690,34 +2696,31 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 	const requestedUrl = trimOrUndefined(params.url);
 	if (requestedUrl && !/^https?:\/\//i.test(requestedUrl)) throw new Error("launch_browser.url must be an absolute HTTP(S) URL.");
 	const url = requestedUrl ?? "about:blank";
-	const profileDir = path.join(os.tmpdir(), `pi-${browser}-cdp-${port}`);
 	const downloadDirectory = await prepareManagedDownloadDirectory(process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT);
 	disconnectCdp();
-	runtimeState.managedBrowser?.kill("SIGTERM");
+	await runtimeState.managedBrowser?.close();
+	runtimeState.managedBrowser = undefined;
+	restoreManagedBrowserPort();
 	const args = [
 		`--remote-debugging-port=${port}`,
-		`--user-data-dir=${profileDir}`,
 		"--no-first-run",
 		"--no-default-browser-check",
 		downloadDirectory ? "about:blank" : url,
 	];
-	if (runtimeState.previousCdpPort === undefined && runtimeState.managedBrowserCdpPort === undefined) {
-		runtimeState.previousCdpPort = process.env.PI_COMPUTER_USE_CDP_PORT;
-	}
-	const managedBrowser = spawn(executable, args, { stdio: "ignore", detached: false });
-	managedBrowser.unref();
+	const managedBrowser = await ManagedBrowser.launch(executable, browser, args, signal);
+	runtimeState.previousCdpPort = process.env.PI_COMPUTER_USE_CDP_PORT;
 	runtimeState.managedBrowser = managedBrowser;
 	runtimeState.managedBrowserCdpPort = String(port);
 	process.env.PI_COMPUTER_USE_CDP_PORT = String(port);
 	try {
-		await waitForBrowserStartup(managedBrowser, (startupSignal) => waitForCdpPort(port, startupSignal), signal);
+		await waitForBrowserStartup(managedBrowser.child, (startupSignal) => waitForCdpPort(port, startupSignal), signal);
 		const page = (await listCdpPageContexts())[0];
 		if (!page) throw new Error("Managed browser launched without a CDP page context.");
 		if (downloadDirectory) {
 			if (!await cdpSetManagedDownloadDirectory(page.contextId, downloadDirectory, () => {
 				// Chromium removes this connection's override on disconnect. Stop
 				// the owned browser before later actions can use default downloads.
-				if (runtimeState.managedBrowser === managedBrowser) managedBrowser.kill("SIGTERM");
+				if (runtimeState.managedBrowser === managedBrowser) managedBrowser.requestStop();
 			})) {
 				throw new Error("Managed browser download directory could not be configured.");
 			}
@@ -2729,16 +2732,17 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
 		if (!scheduled.value) throw new Error("Managed browser page could not be observed after launch.");
 		const observation = browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
+		observation.details.managedBrowser = { pid: managedBrowser.child.pid, profileDirectory: managedBrowser.profileDir };
 		if (downloadDirectory) observation.details.managedDownloadDirectory = downloadDirectory;
 		return observation;
 	} catch (error) {
 		if (runtimeState.managedBrowser === managedBrowser) {
+			try { await managedBrowser.close(); }
+			catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Managed browser launch failed and shutdown is unverified; ownership retained; do not relaunch.");
+			}
 			runtimeState.managedBrowser = undefined;
-			managedBrowser.kill("SIGTERM");
-			if (runtimeState.previousCdpPort === undefined) delete process.env.PI_COMPUTER_USE_CDP_PORT;
-			else process.env.PI_COMPUTER_USE_CDP_PORT = runtimeState.previousCdpPort;
-			runtimeState.managedBrowserCdpPort = undefined;
-			runtimeState.previousCdpPort = undefined;
+			restoreManagedBrowserPort();
 		}
 		throw error;
 	}

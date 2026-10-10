@@ -153,6 +153,24 @@ try {
     const text=await tool(executeReadText,{stateId:result.details.stateId,ref:result.details.outline.root.ref});
     assert(text.content.some(c=>c.type==='text'&&c.text.includes('Visible page text')),'successor state must remain readable');
   }
+  {
+    const priorNodes=axNodes;
+    axNodes=[{nodeId:'fold-root',role:{value:'RootWebArea'},name:{value:'Owned page'},childIds:['fold-panel']},
+      {nodeId:'fold-panel',role:{value:'group'},childIds:['fold-menu']},
+      {nodeId:'fold-menu',role:{value:'group'},name:{value:'Many controls'},childIds:Array.from({length:300},(_,i)=>'fold-'+i)},
+      ...Array.from({length:300},(_,i)=>({nodeId:'fold-'+i,role:{value:'button'},name:{value:'Fold control '+i},backendDOMNodeId:3000+i}))];
+    const compact=await tool(executeObserve,{root,mode:'semantic',outlineView:'folded'});
+    assert.equal(compact.details.outline.view,'folded');
+    assert(compact.details.outline.returnedNodeCount <= 150);
+    assert(compact.details.outline.observedNodeCount > 300);
+    const readCount=calls.length;
+    const hidden=await tool(executeSearchUi,{stateId:compact.details.stateId,text:'Fold control 299'});
+    assert.equal(hidden.details.matches[0].label,'Fold control 299','Exact hidden control must rank first ahead of fuzzy alternatives');
+    const returnedRefs=new Set();const visit=n=>{returnedRefs.add(n.ref);n.children.forEach(visit);};visit(compact.details.outline.root);
+    assert(!returnedRefs.has(hidden.details.matches[0].ref),'Test must search an actually omitted browser ref');
+    assert.equal(calls.length,readCount,'Browser folded search must use cached state');
+    axNodes=priorNodes;
+  }
   const beforeEvaluation=calls.length;
   const measuredEvaluation=await tool(executeEvaluateBrowser,{stateId:waited.details.stateId,expression:'1'});
   assert(Number.isFinite(measuredEvaluation.details.diagnostics.evaluationMs));

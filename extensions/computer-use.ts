@@ -90,12 +90,14 @@ const observeTool = defineTool({
 		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection. Mode=pixels requires an exact browser_page or Windows native @r root and returns no semantic element refs. Browser pixels skip body text and AX collection and reject document drift; Windows native pixels skip UIA and OCR.",
 		"Use mode=metrics with an exact browser_page @r root for a fixed, bounded read of top-frame performance and document identity. This skips UI-tree reconstruction and returns no new actionable state. Incomplete loading remains incomplete; retained observer entries are not final Core Web Vitals.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
+		"Use outlineView=folded to reduce structured response size. Disclosure counts mark omitted descendants, not absent controls; search_ui and expand_ui use the complete retained observation. Defaults full for structured inspection workflows.",
 		"A visible native popup can have an empty outline. Inspect its image and exact owner relationship; query the owner root once without refocusing or replaying input.",
 	],
 	parameters: Type.Object({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
 		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused"), Type.Literal("pixels"), Type.Literal("metrics")], { description: "Observation mode, default fused; metrics requires an exact browser_page root" })),
 		focusContext: Type.Optional(Type.Boolean({ description: "macOS native roots only: bounded read-only diagnosis of the application's actual focused element. Defaults false; does not authorize input or create refs for unobserved elements." })),
+		outlineView: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("folded")], { description: "Structured outline response only, default full. Folded retains cached state and marks omitted descendants; unavailable with pixels or metrics." })),
 	}),
 	execute: executeObserve,
 });

@@ -136,6 +136,22 @@ owned browser and rejects subsequent input; it never reconnects and replays
 an action to recover a missing download. Session cleanup closes that owned
 connection explicitly.
 
+### Managed browser cleanup
+
+Each launch allocates a fresh temporary browser profile. Replacement and
+session shutdown wait up to three seconds for the exact owned child to exit,
+then remove that profile. Historical profiles and external browsers are never
+adopted or swept. Download artifacts in the configured download root remain
+available for inspection.
+`launch_browser` returns this child's PID and profile path in
+`details.managedBrowser` for integrations to verify cleanup independently.
+
+If exit cannot be verified, cleanup reports failure and retains the child,
+profile and CDP port. A replacement launch is refused. Later cleanup can
+reconcile an observed exit without sending another termination signal; it
+does not restart a browser or replay input. Profile identity changes also
+prevent deletion, and profile symlinks are not followed to external files.
+
 
 ### macOS OCR failure and pixel evidence
 

@@ -149,6 +149,10 @@ private struct ForegroundGateFailure: Error {
 	let details: [String: Any]
 }
 
+private struct ModifierInputDispatchFailure: Error {
+	let details: [String: Any]
+}
+
 private struct RootAXEvent {
 	let sequence: UInt64
 	let timestamp: TimeInterval
@@ -698,6 +702,8 @@ final class Bridge {
 				return try act(request)
 			} catch let failure as ForegroundGateFailure {
 				return foregroundRejectedActResult(details: failure.details)
+			} catch let failure as ModifierInputDispatchFailure {
+				return modifierRejectedActResult(details: failure.details)
 			} catch let failure as TextInputSourceDispatchFailure {
 				return textInputSourceRejectedActResult(failure.inputDispatch)
 			}
@@ -2686,6 +2692,10 @@ final class Bridge {
 				steps.append(foregroundRejectedActResult(details: failure.details))
 				stoppedAt = index
 				break
+			} catch let failure as ModifierInputDispatchFailure {
+				steps.append(modifierRejectedActResult(details: failure.details))
+				stoppedAt = index
+				break
 			} catch let failure as TextInputSourceDispatchFailure {
 				steps.append(textInputSourceRejectedActResult(failure.inputDispatch))
 				stoppedAt = index
@@ -4167,6 +4177,10 @@ final class Bridge {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
 		let report = foregroundReport(target: target)
+		// Never turn an ordinary click into Control-click or take ownership of
+		// a user's held modifier. Inspect both source tables before every event;
+		// modifiers pressed by this exact action are the only allowed exception.
+		try verifyModifierState(target: target)
 		// AppKit views can ignore pid-targeted events, so verified foreground
 		// input is posted globally only after the exact PID and window recheck.
 		guard dispatchForegroundEventIfVerified(report, event: foregroundInputEvent(event), dispatch: target.dispatchState, emit: {
@@ -4221,6 +4235,10 @@ final class Bridge {
 
 	private func foregroundInputEvent(_ event: CGEvent) -> ForegroundInputEvent {
 		switch event.type {
+		case .flagsChanged:
+			let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+			let modifiers = activeModifierKeyCodes(event.flags)
+			return modifiers.contains(code) ? .keyDown(code, modifiers: modifiers) : .keyUp(code, modifiers: modifiers)
 		case .keyDown:
 			return .keyDown(Int(event.getIntegerValueField(.keyboardEventKeycode)), modifiers: activeModifierKeyCodes(event.flags))
 		case .keyUp:
@@ -4241,6 +4259,26 @@ final class Bridge {
 		if flags.contains(.maskAlternate) { keyCodes.append(58) }
 		if flags.contains(.maskControl) { keyCodes.append(59) }
 		return keyCodes
+	}
+
+	private func verifyModifierState(target: PhysicalInputTarget) throws {
+		var observed = Set<Int>()
+		var samples: [[String: Any]] = []
+		for state in [CGEventSourceStateID.hidSystemState, .combinedSessionState] {
+			let flags = CGEventSource.flagsState(state)
+			let keys = [55, 54, 56, 60, 58, 61, 59, 62].filter { CGEventSource.keyState(state, key: CGKeyCode($0)) }
+			observed.formUnion(keys)
+			observed.formUnion(activeModifierKeyCodes(flags))
+			samples.append(["state": state.rawValue, "flags": flags.rawValue, "pressedModifierKeys": keys])
+		}
+		let unowned = unownedForegroundModifiers(observed: observed, dispatch: target.dispatchState)
+		guard unowned.isEmpty else {
+			throw ModifierInputDispatchFailure(details: [
+				"target": ["pid": Int(target.pid), "windowId": Int(target.windowId)],
+				"samples": samples, "unownedModifierKeys": unowned.sorted(),
+				"inputDispatch": target.dispatchState.details,
+			])
+		}
 	}
 
 	private func postMouseMove(to point: CGPoint, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
@@ -4501,6 +4539,43 @@ final class Bridge {
 				return
 			}
 			throw BridgeFailure(message: "Unsupported key '\(key)'", code: "invalid_args")
+		}
+		if delivery == "hid" {
+			guard let sequence = foregroundKeyChordEvents(code: Int(code), modifiers: activeModifierKeyCodes(flags)) else {
+				throw BridgeFailure(message: "Invalid physical key chord; no key event was sent", code: "invalid_args")
+			}
+			// Allocate the entire sequence before dispatch. Allocation failure
+			// cannot leave a half-created chord with a modifier held.
+			var events: [CGEvent] = []
+			for step in sequence {
+				let keyCode: Int
+				let down: Bool
+				let modifiers: [Int]
+				switch step {
+				case let .keyDown(code, active): (keyCode, down, modifiers) = (code, true, active)
+				case let .keyUp(code, active): (keyCode, down, modifiers) = (code, false, active)
+				default: throw BridgeFailure(message: "Invalid key event sequence", code: "invalid_args")
+				}
+				guard let event = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: down) else {
+					throw BridgeFailure(message: "Failed to create key event", code: "input_failed")
+				}
+				var eventFlags = CGEventFlags()
+				for modifier in modifiers {
+					switch modifier {
+					case 55: eventFlags.insert(.maskCommand)
+					case 56: eventFlags.insert(.maskShift)
+					case 58: eventFlags.insert(.maskAlternate)
+					case 59: eventFlags.insert(.maskControl)
+					default: break
+					}
+				}
+				event.flags = eventFlags
+				if foregroundModifierKeyCodes.contains(keyCode) { event.type = .flagsChanged }
+				events.append(event)
+			}
+			for event in events { try postEvent(event, pid: pid, target: target, delivery: delivery) }
+			usleep(8_000)
+			return
 		}
 		guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
 			let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)

@@ -84,18 +84,34 @@ export class ManagedBrowser {
 				if (this.exited()) finish();
 			});
 		}
-		let current;
-		try { current = await lstat(this.profileDir); }
-		catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.cleaned = true; return; }
-			throw error;
+		await this.removeOwnedProfile();
+	}
+
+	private async removeOwnedProfile(): Promise<void> {
+		for (let attempt = 0; ; attempt++) {
+			let current;
+			try { current = await lstat(this.profileDir); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.cleaned = true; return; }
+				throw error;
+			}
+			if (!current.isDirectory() || current.isSymbolicLink()
+				|| current.dev !== this.identity.dev || current.ino !== this.identity.ino) {
+				throw new Error("Managed browser profile identity changed; refusing cleanup.");
+			}
+			try {
+				// rm unlinks symlink entries without following their targets. Chromium
+				// can finish profile writes briefly after the owned main-child exit.
+				await rm(this.profileDir, { recursive: true });
+				this.cleaned = true;
+				return;
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (attempt >= 3 || !["ENOTEMPTY", "EBUSY"].includes(code ?? "")) throw error;
+				// Retry filesystem cleanup only, never input, child signaling, or launch.
+				// Recheck the original inode before every subsequent removal attempt.
+				await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+			}
 		}
-		if (!current.isDirectory() || current.isSymbolicLink()
-			|| current.dev !== this.identity.dev || current.ino !== this.identity.ino) {
-			throw new Error("Managed browser profile identity changed; refusing cleanup.");
-		}
-		// rm unlinks entries that are symlinks rather than following their targets.
-		await rm(this.profileDir, { recursive: true });
-		this.cleaned = true;
 	}
 }

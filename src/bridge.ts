@@ -101,6 +101,7 @@ interface ExecutionTrace {
 }
 
 interface ComputerUseDetails {
+	windowDocumentEvidence?: Record<string, unknown>;
 	focusContext?: ReturnType<typeof serializeFocusContext>;
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
 	observationTimings?: Record<string, number>;
@@ -1168,6 +1169,7 @@ async function buildToolResult(
 		lookId: result.look.lookId,
 		focusContext: serializeFocusContext(result.look.focusContext, result.outline),
 		observationTimings: result.look.timings,
+		windowDocumentEvidence: result.look.window.metadata?.documentEvidence as Record<string, unknown> | undefined,
 		uiaDiagnostics: result.look.uiaDiagnostics,
 		captureDiagnostics: result.look.captureDiagnostics,
 		ocrDiagnostics: result.look.ocrDiagnostics,

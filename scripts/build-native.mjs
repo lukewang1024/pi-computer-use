@@ -13,7 +13,7 @@ const macosSourcePaths = [
 	"agent_cursor_motion.swift",
 	"foreground_gate.swift",
 	"text_input_source.swift",
-	"optional_image_capture.swift", "accessibility_value.swift", "bounded_read.swift", "text_selection.swift", "permission_probe.swift",
+	"optional_image_capture.swift", "accessibility_value.swift", "window_document.swift", "bounded_read.swift", "text_selection.swift", "permission_probe.swift",
 	"outline_walk.swift",
 	"bridge.swift",
 ].map((file) => path.join(rootDir, "native", "macos", file));

@@ -191,20 +191,47 @@ enum ForegroundInputEvent: Equatable {
 	case other
 }
 
+let foregroundModifierKeyCodes: Set<Int> = [55, 56, 58, 59]
+
+/// A chord owns only the modifiers it presses, and releases them in reverse
+/// order after releasing the base key. Each event still passes the HID gate.
+func foregroundKeyChordEvents(code: Int, modifiers: [Int]) -> [ForegroundInputEvent]? {
+	guard (0...127).contains(code), !foregroundModifierKeyCodes.contains(code),
+		Set(modifiers).count == modifiers.count,
+		modifiers.allSatisfy({ foregroundModifierKeyCodes.contains($0) }) else { return nil }
+	var active: [Int] = []
+	var events: [ForegroundInputEvent] = []
+	for modifier in modifiers {
+		active.append(modifier)
+		events.append(.keyDown(modifier, modifiers: active))
+	}
+	events.append(.keyDown(code, modifiers: active))
+	events.append(.keyUp(code, modifiers: active))
+	for modifier in modifiers.reversed() {
+		active.removeAll { $0 == modifier }
+		events.append(.keyUp(modifier, modifiers: active))
+	}
+	return events
+}
+
 final class ForegroundInputDispatchState {
 	private(set) var eventsDispatched = 0
-	private(set) var pressedKeys = Set<Int>()
+	private var pressedKeyCodes = Set<Int>()
+	private var modifierKeys = Set<Int>()
+	var pressedKeys: Set<Int> { pressedKeyCodes.union(modifierKeys) }
 	private(set) var pressedMouseButtons = Set<Int>()
 
 	func record(_ event: ForegroundInputEvent) {
 		eventsDispatched += 1
 		switch event {
 		case let .keyDown(code, modifiers):
-			pressedKeys.insert(code)
-			pressedKeys.formUnion(modifiers)
+			pressedKeyCodes.insert(code)
+			modifierKeys = Set(modifiers)
 		case let .keyUp(code, modifiers):
-			pressedKeys.remove(code)
-			pressedKeys.subtract(modifiers)
+			pressedKeyCodes.remove(code)
+			// Flags describe modifier state on this event. Releasing the base
+			// key while Control remains in its flags does not release Control.
+			modifierKeys = Set(modifiers)
 		case let .mouseDown(button): pressedMouseButtons.insert(button)
 		case let .mouseUp(button): pressedMouseButtons.remove(button)
 		case .other: break
@@ -220,6 +247,10 @@ final class ForegroundInputDispatchState {
 			"retrySafe": eventsDispatched == 0,
 		]
 	}
+}
+
+func unownedForegroundModifiers(observed: Set<Int>, dispatch: ForegroundInputDispatchState) -> Set<Int> {
+	observed.subtracting(dispatch.pressedKeys.intersection(foregroundModifierKeyCodes))
 }
 
 func foregroundFailureDetails(report: ForegroundGateReport, dispatch: ForegroundInputDispatchState) -> [String: Any] {
@@ -261,6 +292,24 @@ func foregroundRejectedActResult(details: [String: Any]) -> [String: Any] {
 		"error": error,
 	]
 	if partial { result["inputDispatch"] = inputDispatch }
+	return result
+}
+
+func modifierRejectedActResult(details: [String: Any]) -> [String: Any] {
+	let dispatch = details["inputDispatch"] as? [String: Any] ?? [:]
+	let partial = (dispatch["eventsDispatched"] as? Int ?? 0) > 0
+	var result: [String: Any] = [
+		"outcome": partial ? "unknown" : "didnt",
+		"performed": ["delivery": "hid"],
+		"evidence": ["modifierVerification": details],
+		"error": [
+			"code": partial ? "modifier_interrupted_after_partial_hid" : "modifier_state_unverified",
+			"message": partial
+				? "Unowned modifier state appeared after HID dispatch; do not replay input"
+				: "A modifier is already held outside this action; no HID event was sent",
+		],
+	]
+	if partial { result["inputDispatch"] = dispatch }
 	return result
 }
 

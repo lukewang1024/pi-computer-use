@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { CdpTab,validateCdpKeypressKeys,mapRemoteFramePoint } from '../src/cdp.ts';
+import { CdpTab,validateCdpKeypressKeys,mapRemoteFramePoint,cdpHistoryCommands } from '../src/cdp.ts';
+
+
+assert.deepEqual(cdpHistoryCommands('darwin',4,'z'), ['Undo']);
+assert.deepEqual(cdpHistoryCommands('darwin',12,'Z'), ['Redo']);
+for (const platform of ['linux','win32']) for (const modifiers of [4,12])
+ assert.equal(cdpHistoryCommands(platform,modifiers,'z'), undefined);
+for (const modifiers of [0,2,6,5,14]) assert.equal(cdpHistoryCommands('darwin',modifiers,'z'), undefined);
+assert.equal(cdpHistoryCommands('darwin',4,'a'),undefined);
 
 const tab = Object.create(CdpTab.prototype), events = [];
 tab.send = async (method, params) => { events.push({method, params});return {}; };
@@ -28,6 +36,23 @@ assert.equal(events[0].params.text,undefined,'navigation must not insert text');
 events.length=0;
 await tab.keypress(['CTRL','Shift','a']);
 assert.equal(events[0].params.text,undefined,'shortcut modifiers must suppress text');
+
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+try {
+ Object.defineProperty(process, 'platform', {...platformDescriptor, value:'darwin'});
+ for (const [keys, command] of [[['Meta','z'],'Undo'], [['Command','Shift','z'],'Redo']]) {
+  events.length=0;
+  await tab.keypress(keys);
+  assert.equal(events.length,2,'command must use the original key pair');
+  assert.deepEqual(events[0].params.commands,[command]);
+  assert.equal(events[1].params.commands,undefined,'keyup must not execute history again');
+  assert.equal(events[0].params.text,undefined);
+ }
+ const failing=Object.create(CdpTab.prototype);let attempts=0;
+ failing.send=async()=>{attempts++;throw Error('Unknown keydown outcome');};
+ await assert.rejects(()=>failing.keypress(['Meta','z']),/Unknown keydown outcome/);
+ assert.equal(attempts,1,'unknown input must never dispatch a fallback command');
+} finally { Object.defineProperty(process,'platform',platformDescriptor); }
 
 for(const invalid of [[],['ctrl'],['no-such-key'],[3]]){
  assert.throws(()=>validateCdpKeypressKeys(invalid));

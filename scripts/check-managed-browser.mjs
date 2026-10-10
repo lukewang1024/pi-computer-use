@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { access, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
@@ -166,3 +168,53 @@ try {
  }
 }
 console.log('Public bridge lifecycle: startup failure cleans up; uncertain exit blocks relaunch and retains ownership for reconciliation.');
+
+// Exercise transient filesystem errors after real owned subprocess exit.
+// The hook is scoped to this exact freshly allocated profile, never other paths.
+async function cleanupFailureCase(codes, expectedAttempts, expectedFailure) {
+ const browser = await launch(), original = fs.promises.rm;
+ const kill = browser.child.kill.bind(browser.child); let signals = 0, attempts = 0;
+ browser.child.kill = (...args) => { signals++; return kill(...args); };
+ fs.promises.rm = async (target, options) => {
+  if (target !== browser.profileDir) return original(target, options);
+  attempts++;
+  const code = codes[attempts - 1];
+  if (code) throw Object.assign(new Error('owned fixture ' + code), { code });
+  return original(target, options);
+ };
+ syncBuiltinESMExports();
+ try {
+  if (expectedFailure) { await assert.rejects(browser.close(), { code: expectedFailure }); await access(browser.profileDir); }
+  else { await browser.close(); await absent(browser.profileDir); }
+  assert.equal(attempts, expectedAttempts); assert.equal(signals, 1, 'Filesystem retries never repeat child signaling');
+  assert(browser.child.exitCode !== null || browser.child.signalCode !== null);
+ } finally {
+  fs.promises.rm = original; syncBuiltinESMExports(); await ensureStopped(browser);
+  await original(browser.profileDir, { recursive: true, force: true });
+ }
+}
+await cleanupFailureCase(['ENOTEMPTY', 'EBUSY'], 3);
+await cleanupFailureCase(['ENOTEMPTY', 'ENOTEMPTY', 'ENOTEMPTY', 'ENOTEMPTY'], 4, 'ENOTEMPTY');
+await cleanupFailureCase(['EPERM'], 1, 'EPERM');
+
+const changed = await launch(), originalRemoval = fs.promises.rm;
+const backup = changed.profileDir + '-original'; let changedAttempts = 0;
+fs.promises.rm = async (target, options) => {
+ if (target !== changed.profileDir) return originalRemoval(target, options);
+ changedAttempts++;
+ await rename(changed.profileDir, backup);
+ await fs.promises.mkdir(changed.profileDir);
+ await writeFile(path.join(changed.profileDir, 'foreign-marker'), 'preserve');
+ throw Object.assign(new Error('owned fixture ENOTEMPTY'), { code: 'ENOTEMPTY' });
+};
+syncBuiltinESMExports();
+try {
+ await assert.rejects(changed.close(), /profile identity changed/);
+ assert.equal(changedAttempts, 1, 'Changed inode blocks the next recursive removal');
+ assert.equal(await readFile(path.join(changed.profileDir, 'foreign-marker'), 'utf8'), 'preserve');
+} finally {
+ fs.promises.rm = originalRemoval; syncBuiltinESMExports(); await ensureStopped(changed);
+ await originalRemoval(changed.profileDir, { recursive: true, force: true });
+ await originalRemoval(backup, { recursive: true, force: true });
+}
+console.log('Bounded owned-profile cleanup retries verified');

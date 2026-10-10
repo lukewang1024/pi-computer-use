@@ -27,3 +27,12 @@ Unexpected modifiers appearing after dispatch stop the sequence with
 `modifier_interrupted_after_partial_hid`, retain outstanding key diagnostics,
 and require recovery without replay. The helper does not release unrelated
 modifiers or infer ownership from an earlier action.
+
+Modifier chords require a base key with an actual native key-code mapping.
+An unmapped chord such as `cmd+🙂` is rejected before any action in the
+transaction is sent, rather than falling back to inserting plain text without
+the requested modifier. Printable ASCII symbols use their native base key and
+implied Shift, so `cmd+?` and `["cmd", "+"]` retain the
+requested Command modifier while pressing Shift with `/` or `=` respectively.
+Unmodified Unicode key input retains its existing
+behavior; use `typeText` for text insertion.

@@ -68,6 +68,8 @@ jobs:
         with:
           targets: aarch64-pc-windows-msvc
       - run: node scripts/check-windows-architecture.mjs
+      - name: Verify owned browser lifecycle on this platform
+        run: npm run typecheck && npx --no-install tsx scripts/check-managed-browser.mjs
       - name: Test Windows helper
         if: matrix.platform == 'windows'
         run: cargo test --locked --manifest-path native/windows/bridge-rs/Cargo.toml

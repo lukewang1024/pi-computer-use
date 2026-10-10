@@ -19,7 +19,8 @@ exec sleep 60
 await fs.writeFile(helper,`#!/usr/bin/env node
 const readline=require('node:readline');
 const fs=require('node:fs');
-readline.createInterface({input:process.stdin}).on('line',line=>{
+const {once}=require('node:events');
+readline.createInterface({input:process.stdin}).on('line',async line=>{
  const r=JSON.parse(line);
  if(r.cmd==='exit')return process.exit(0);
  if(r.cmd==='silent')return;
@@ -32,7 +33,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   return;
  }
 
- if(r.cmd==='stderr-pressure'){const chunk=Buffer.alloc(65536,120);for(let i=0;i<64;i++)fs.writeSync(2,chunk);}
+ // Pipe descriptors can be nonblocking: writeSync may throw EAGAIN before
+ // the parent gets a turn to drain. Preserve the 4MiB pressure with backpressure.
+ if(r.cmd==='stderr-pressure'){const chunk=Buffer.alloc(65536,120);for(let i=0;i<64;i++)if(!process.stderr.write(chunk))await once(process.stderr,'drain');}
  const value={id:r.id,protocolVersion:r.cmd==='wrong-version'?99:r.protocolVersion,ok:true,result:r.args.value};
  const output=JSON.stringify(value)+'\\n';
  setTimeout(()=>{process.stdout.write('not-json\\n');process.stdout.write(output.slice(0,9));setTimeout(()=>process.stdout.write(output.slice(9)),1);},r.args.delay||0);

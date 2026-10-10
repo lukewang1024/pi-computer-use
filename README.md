@@ -107,6 +107,8 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
 ## Development status
 
+`act_ui` accepts optional `outlineView: "folded"` to bound its returned structured UI tree. The complete successor remains available to state-scoped `search_ui` and `expand_ui`; this does not change dispatch, postconditions or stale-reference checks. The default remains the full tree.
+
 The architecture is centered on immutable, state-scoped observations. Desktop surfaces and CDP pages form one multi-root forest; progressive outline queries remain cached, while live work is ordered per physical resource so independent roots can run in parallel. `act_ui` accepts one or more intent steps, preserves focus across dependent input, verifies delivery, recovers safely, stores one complete successor state, and returns a compact diff when identity confidence allows. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
 
 ## License

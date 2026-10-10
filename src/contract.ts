@@ -110,6 +110,8 @@ export interface ActParams extends StateTargetParams {
 	expect?: UiCondition;
 	/** Desktop successor observation only; input delivery and focus guards are unchanged. */
 	observationMode?: "semantic" | "fused";
+	/** Response projection only; the complete successor remains saved for queries. */
+	outlineView?: "full" | "folded";
 }
 
 export interface ReadTextParams extends StateTargetParams {

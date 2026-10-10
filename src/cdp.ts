@@ -116,6 +116,16 @@ export function validateCdpKeypressKeys(value: unknown): asserts value is string
 	if (value.every(key => CDP_MODIFIERS.has(key.toLowerCase()))) throw new Error("Browser keypress requires a base key; modifier-only input is unsupported.");
 }
 
+// macOS Chromium does not resolve native Cocoa editing bindings from CDP
+// modifier bits alone. Attach the intended command to the original keydown,
+// never as a second dispatch or a fallback after an uncertain input result.
+export function cdpHistoryCommands(platform: string, modifiers: number, key: string): string[] | undefined {
+	if (platform !== "darwin" || key.toLowerCase() !== "z") return undefined;
+	if (modifiers === 4) return ["Undo"];
+	if (modifiers === 12) return ["Redo"];
+	return undefined;
+}
+
 const COMMAND_TIMEOUT_MS = 5_000;
 const CDP_CONTEXT_PREFIX = "browser:";
 const NAVIGATE_LOAD_TIMEOUT_MS = 10_000;
@@ -760,7 +770,8 @@ export class CdpTab {
 			const text = (modifiers & ~8) === 0 ? value === "Enter" ? "\r" : value.length === 1 ? value : undefined : undefined;
 			const fields = { key: value, code, modifiers, windowsVirtualKeyCode: virtualKey };
 			if (beforeKey) await beforeKey();
-			await this.send("Input.dispatchKeyEvent", { type: "keyDown", ...fields, text }, COMMAND_TIMEOUT_MS, sessionId);
+			const commands = cdpHistoryCommands(process.platform, modifiers, baseValue);
+			await this.send("Input.dispatchKeyEvent", { type: "keyDown", ...fields, text, ...(commands ? { commands } : {}) }, COMMAND_TIMEOUT_MS, sessionId);
 			await this.send("Input.dispatchKeyEvent", { type: "keyUp", ...fields }, COMMAND_TIMEOUT_MS, sessionId);
 		}
 	}

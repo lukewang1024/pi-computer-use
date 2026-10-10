@@ -2578,6 +2578,7 @@ function validateActionTarget(action: UiAction): void {
 }
 
 async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
+	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
 	if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused") {
 		throw new Error("act_ui.observationMode must be semantic or fused.");
 	}
@@ -2851,7 +2852,13 @@ export const executeObserve = makeToolExecutor("observe_ui", async (params: Obse
 export const executeSearchUi = makeToolExecutor("search_ui", performSearchUi);
 export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);
-export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>("act_ui", performAct);
+export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>("act_ui", async (params, signal) => {
+	const result = await performAct(params, signal);
+	// Project only after the original transaction has saved its complete successor.
+	// Terminal failures retain their original evidence and never trigger more input.
+	if (params.outlineView !== "folded" || !("outline" in result.details) || !result.details.outline) return result;
+	return { ...result, details: { ...result.details, outline: serializeFoldedOutline(restoreOutline(result.details.outline)) } };
+});
 export const executeNavigateBrowser = makeToolExecutor("navigate_browser", performNavigateBrowser);
 export const executeEvaluateBrowser = makeToolExecutor("evaluate_browser", performEvaluateBrowser);
 export const executeLaunchBrowser = makeToolExecutor("launch_browser", performLaunchBrowser);

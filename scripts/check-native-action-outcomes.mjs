@@ -62,13 +62,14 @@ try{
   const matches=await call('search_ui',{stateId:initial.details.capture.stateId,text:'Field',role:'textbox'});
   const ref=matches.details.matches.find(m=>m.matchReason==='exact').ref;
   const count=calls.length;observations=[];
-  const successor=await call('act_ui',{stateId:initial.details.capture.stateId,observationMode:'semantic',actions:[{action:'setText',ref,text:'semantic-successor'}]});
+  const successor=await call('act_ui',{stateId:initial.details.capture.stateId,observationMode:'semantic',outlineView:'folded',actions:[{action:'setText',ref,text:'semantic-successor'}]});
   assert.equal(calls.length,count+1);
   assert.equal(observations.length,1);
   assert.equal(observations[0].includeImage,false);
   assert.equal(observations[0].readText,'never');
   assert(!successor.content.some(c=>c.type==='image'));
   assert.equal(successor.details.execution.outcome,'worked');
+  assert.equal(successor.details.outline.view,'folded');
   const fresh=await call('search_ui',{stateId:successor.details.capture.stateId,text:'Field',role:'textbox'});
   assert(fresh.details.matches.some(m=>m.matchReason==='exact'));
   assert.equal(successor.details.outline.root.children.find(n=>n.title==='Field').value,'semantic-successor');

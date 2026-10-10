@@ -52,5 +52,35 @@ try{
  assert.equal(partial.details.stateId,undefined);
  await assert.rejects(()=>call(executeAct,{stateId:fresh.details.capture.stateId,actions:[{action:'press',ref:freshSearch.details.matches[0].ref}]}));
  assert.equal(dispatches,1,'partial input invalidates the old observation and is never replayed');
+ // A returned modifier interruption needs the same public quarantine semantics;
+ // its complete helper reply is not proof that the chord finished dispatching.
+ for (const evidenceOnly of [false, true]) {
+  await shutdownComputerUseSession();
+  dispatches = 0;
+  backend.act = async () => {
+   dispatches++;
+   const inputDispatch={eventsDispatched:2,unreleasedKeys:[4,59],unreleasedMouseButtons:[],recoveryRequired:true,retrySafe:false};
+   return {outcome:'unknown',performed:{delivery:'hid'},
+    error:{code:'modifier_interrupted_after_partial_hid',message:'Unowned modifier appeared'},
+    ...(evidenceOnly ? {evidence:{modifierVerification:{inputDispatch}}} : {inputDispatch})};
+  };
+  const roots = await call(executeFind,{text:'Owned fixture'});
+  const observation = await call(executeObserve,{root:roots.details.windows[0].windowRef,mode:'semantic'});
+  const search=await call(executeSearchUi,{stateId:observation.details.capture.stateId,text:'Submit',role:'button'});
+  const ref=search.details.matches[0].ref;
+  const before=observations;
+  const result=await call(executeAct,{stateId:observation.details.capture.stateId,actions:[{action:'press',ref},{action:'press',ref}]});
+  assert.equal(dispatches,1,'modifier interruption stops the remaining action');
+  assert.equal(observations,before,'modifier interruption does not mint successor state');
+  assert.equal(result.details.status,'dispatch_outcome_unknown');
+  assert.equal(result.details.error.code,'modifier_interrupted_after_partial_hid');
+  assert.equal(result.details.execution.dispatchCompletion,'unknown');
+  assert.deepEqual(result.details.execution.inputDispatch.unreleasedKeys,[4,59]);
+  assert.equal(result.details.execution.inputDispatch.recoveryRequired,true);
+  assert.equal(result.details.stateId,undefined);
+  assert(result.content.some(c=>c.type==='text'&&c.text.includes('Modifier verification failed')));
+  await assert.rejects(()=>call(executeAct,{stateId:observation.details.capture.stateId,actions:[{action:'press',ref}]}));
+  assert.equal(dispatches,1,'modifier interruption must not be replayed');
+ }
  console.log('CU public executor unknown-delivery regression passed (new coverage; injected native backend)');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

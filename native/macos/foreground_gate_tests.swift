@@ -148,6 +148,70 @@ private struct ForegroundGateTests {
 		precondition(chord.sink == [.keyDown(0, modifiers: [55])])
 		assertPartial(chord.result, count: 1, keys: [0, 55])
 
+		// A completed base-key pair can still leave modifiers asserted. A
+		// foreground loss on the next event must report that remaining state.
+		let heldControl = sendSequence([
+			.keyDown(4, modifiers: [59]), .keyUp(4, modifiers: [59]), .mouseDown(0),
+		], reports: [gateReport(correct), gateReport(correct), gateReport(correct, focused: false)])
+		assertPartial(heldControl.result, count: 2, keys: [59])
+		let modifierState = ForegroundInputDispatchState()
+		modifierState.record(.keyDown(4, modifiers: [55, 59]))
+		modifierState.record(.keyUp(4, modifiers: [55, 59]))
+		precondition(modifierState.pressedKeys == Set([55, 59]))
+		modifierState.record(.keyUp(59, modifiers: [55]))
+		precondition(modifierState.pressedKeys == Set([55]))
+		modifierState.record(.keyUp(55, modifiers: []))
+		precondition(modifierState.pressedKeys.isEmpty)
+		let baseStillDown = ForegroundInputDispatchState()
+		baseStillDown.record(.keyDown(4, modifiers: [59]))
+		baseStillDown.record(.keyUp(59, modifiers: []))
+		precondition(baseStillDown.pressedKeys == Set([4]), "modifier release cannot erase an outstanding base key")
+
+		let controlH: [ForegroundInputEvent] = [
+			.keyDown(59, modifiers: [59]), .keyDown(4, modifiers: [59]),
+			.keyUp(4, modifiers: [59]), .keyUp(59, modifiers: []),
+		]
+		precondition(foregroundKeyChordEvents(code: 4, modifiers: [59]) == controlH)
+		precondition(foregroundKeyChordEvents(code: 4, modifiers: []) == [.keyDown(4, modifiers: []), .keyUp(4, modifiers: [])])
+		precondition(foregroundKeyChordEvents(code: 4, modifiers: [55, 56]) == [
+			.keyDown(55, modifiers: [55]), .keyDown(56, modifiers: [55, 56]),
+			.keyDown(4, modifiers: [55, 56]), .keyUp(4, modifiers: [55, 56]),
+			.keyUp(56, modifiers: [55]), .keyUp(55, modifiers: []),
+		])
+		for modifiers in [[59, 59], [62], [4]] {
+			precondition(foregroundKeyChordEvents(code: 4, modifiers: modifiers) == nil)
+		}
+		precondition(foregroundKeyChordEvents(code: 59, modifiers: []) == nil)
+		precondition(foregroundKeyChordEvents(code: -1, modifiers: []) == nil)
+		// Interrupt at every event, including before the owned modifier release.
+		// The emitted prefix and outstanding state must be retained without cleanup.
+		for stop in controlH.indices {
+			var reports = Array(repeating: gateReport(correct), count: controlH.count)
+			reports[stop] = gateReport(correct, focused: false)
+			let interrupted = sendSequence(controlH, reports: reports)
+			precondition(interrupted.sink == Array(controlH.prefix(stop)))
+			if stop == 0 {
+				precondition(interrupted.result?["outcome"] as? String == "didnt")
+			} else {
+				assertPartial(interrupted.result, count: stop, keys: stop == 2 ? [4, 59] : [59])
+			}
+		}
+		let completeChord = ForegroundInputDispatchState()
+		precondition(unownedForegroundModifiers(observed: [59], dispatch: completeChord) == Set([59]))
+		for event in controlH { completeChord.record(event) }
+		precondition(completeChord.pressedKeys.isEmpty)
+		precondition(unownedForegroundModifiers(observed: [59], dispatch: completeChord) == Set([59]), "previous chords do not own later modifiers")
+		let activeChord = ForegroundInputDispatchState()
+		activeChord.record(controlH[0])
+		precondition(unownedForegroundModifiers(observed: [59], dispatch: activeChord).isEmpty)
+		precondition(unownedForegroundModifiers(observed: [59, 62], dispatch: activeChord) == Set([62]), "right Control is never owned by a left Control chord")
+		let deniedInitial = modifierRejectedActResult(details: ["inputDispatch": ForegroundInputDispatchState().details])
+		precondition(deniedInitial["outcome"] as? String == "didnt")
+		precondition(deniedInitial["inputDispatch"] == nil)
+		let deniedPartial = modifierRejectedActResult(details: ["inputDispatch": activeChord.details])
+		precondition(deniedPartial["outcome"] as? String == "unknown")
+		precondition((deniedPartial["inputDispatch"] as? [String: Any])?["recoveryRequired"] as? Bool == true)
+
 		var transient = gateReport(ForegroundActualIdentity(pid: correct.pid, windowId: nil), focused: false)
 		transient.secondDiagnostics = ["mappingStage": "ax_read_failed"]
 		precondition(shouldReobserveForegroundRead(transient))

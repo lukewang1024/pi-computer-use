@@ -15,7 +15,7 @@ import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outco
 import { cdpSetManagedDownloadDirectory, validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
-import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineAncestors, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineAncestors, type SerializedOutlineSearchMatch } from "./outline.ts";
+import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeFoldedOutline, serializeOutlineNodeShallow, serializeOutlineAncestors, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineAncestors, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type FocusWindowParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
@@ -2836,7 +2836,14 @@ export const executeFind = makeToolExecutor("find_roots", performListWindows);
 export const executeFocusWindow = makeToolExecutor<FocusWindowParams, ComputerUseDetails | FocusOnlyDetails>("focus_window", performFocusWindow);
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
-export const executeObserve = makeToolExecutor("observe_ui", performObserve);
+export const executeObserve = makeToolExecutor("observe_ui", async (params: ObserveParams, signal?: AbortSignal) => {
+	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
+	if (params.outlineView !== undefined && (params.mode === "pixels" || params.mode === "metrics")) throw new Error("outlineView requires a semantic outline; it is unavailable with pixels or metrics.");
+	const result = await performObserve(params, signal);
+	if (params.outlineView !== "folded") return result;
+	if (!("outline" in result.details) || !result.details.outline) throw new Error("Observation returned no structured outline to fold.");
+	return { ...result, details: { ...result.details, outline: serializeFoldedOutline(restoreOutline(result.details.outline)) } };
+});
 export const executeSearchUi = makeToolExecutor("search_ui", performSearchUi);
 export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);

@@ -46,7 +46,7 @@ try{
   const field=await call('search_ui',{stateId:observed.details.capture.stateId,text:'Field',role:'textbox'});
   const commit=await call('search_ui',{stateId:observed.details.capture.stateId,text:'Commit',role:'button'});
   const exact=r=>{const matches=r.details.matches.filter(m=>m.matchReason==='exact');assert.equal(matches.length,1);return matches[0].ref;};
-  const result=await call('act_ui',{stateId:observed.details.capture.stateId,actions:[{action:'setText',ref:exact(field),text:'new'},{action:'press',ref:exact(commit)}]});
+  const result=await call('act_ui',{stateId:observed.details.capture.stateId,outlineQuery:{text:'Field',role:'textbox'},actions:[{action:'setText',ref:exact(field),text:'new'},{action:'press',ref:exact(commit)}]});
   assert.equal(result.details.execution.outcome,expected);
   const text=result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
   if(expected==='worked'){assert.equal(calls.length,2);assert.equal(presses,1);assert.match(text,/Attempted 2 of 2/);}
@@ -62,7 +62,7 @@ try{
   const matches=await call('search_ui',{stateId:initial.details.capture.stateId,text:'Field',role:'textbox'});
   const ref=matches.details.matches.find(m=>m.matchReason==='exact').ref;
   const count=calls.length;observations=[];
-  const successor=await call('act_ui',{stateId:initial.details.capture.stateId,observationMode:'semantic',outlineView:'folded',actions:[{action:'setText',ref,text:'semantic-successor'}]});
+  const successor=await call('act_ui',{stateId:initial.details.capture.stateId,observationMode:'semantic',outlineView:'folded',outlineQuery:{text:'Field',role:'textbox'},actions:[{action:'setText',ref,text:'semantic-successor'}]});
   assert.equal(calls.length,count+1);
   assert.equal(observations.length,1);
   assert.equal(observations[0].includeImage,false);
@@ -70,6 +70,11 @@ try{
   assert(!successor.content.some(c=>c.type==='image'));
   assert.equal(successor.details.execution.outcome,'worked');
   assert.equal(successor.details.outline.view,'folded');
+  assert.equal(successor.details.queryResult.stateId,successor.details.capture.stateId);
+  assert.equal(successor.details.queryResult.exactMatchCount,1);
+  assert.equal(successor.details.queryResult.exactMatchesComplete,true);
+  assert.equal(successor.details.queryResult.matches[0].label,'Field');
+  assert.equal(successor.details.queryResult.ocrEscalated,false);
   const fresh=await call('search_ui',{stateId:successor.details.capture.stateId,text:'Field',role:'textbox'});
   assert(fresh.details.matches.some(m=>m.matchReason==='exact'));
   assert.equal(successor.details.outline.root.children.find(n=>n.title==='Field').value,'semantic-successor');

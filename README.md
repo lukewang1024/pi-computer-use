@@ -56,6 +56,8 @@ Required macOS permissions:
 
 Session startup and computer-use tools check these permissions without opening prompts or Settings. If a permission is missing, run `/computer-use permissions` to explicitly request the macOS prompt or open the relevant Settings pane. After changing a toggle, run the command again and choose **Recheck permissions** to restart the helper and check the result.
 
+Explicit local macOS builds reuse an existing signed helper across SDK-only version changes when its native sources, compiler arguments, toolchain, and installer rules match. Its original signed bundle version and build provenance remain intact. Reuse still checks the resource signature and pinned signing identity; native changes require deployment. This avoids unnecessary recompilation and replacement, but does not grant or restore macOS permissions.
+
 On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 
 Windows window captures verify the same HWND, PID, GUI thread and bounds before

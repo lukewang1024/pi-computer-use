@@ -419,6 +419,7 @@ final class Bridge {
 		return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
 	}()
 	private let textRecognition = BoundedReadExecutor<[OCRBox]>(label: "pi-computer-use.text-recognition")
+	private let documentEvidenceRead = BoundedReadExecutor<[String: Any]>(label: "pi-computer-use.window-document")
 	private let captureTraceLock = NSLock()
 	private var captureTraces: [CaptureTrace] = []
 	private let refStore = AXRefStore()
@@ -1268,6 +1269,36 @@ final class Bridge {
 			|| text.range(of: "sheet", options: [.caseInsensitive]) != nil
 	}
 
+	private func windowDocumentEvidence(_ window: AXUIElement, pid: Int32) -> [String: Any] {
+		// Only observe this exact root and its direct AX parent. An application
+		// parent or absent AXDocument never implies a document owner.
+		do {
+			return try documentEvidenceRead.run(timeout: 0.25, cancel: {}, operation: {
+				var evidence: [String: Any] = ["status": "observed", "readOnly": true, "source": "AXDocument"]
+				if let url = accessibilityDocumentURL(self.copyAttribute(window, attribute: kAXDocumentAttribute as CFString)) {
+					evidence["documentURL"] = url
+				}
+				if let parent = self.copyAttribute(window, attribute: kAXParentAttribute as CFString).flatMap(self.asAXElement) {
+					var parentPid: pid_t = 0
+					if AXUIElementGetPid(parent, &parentPid) == .success, parentPid == pid,
+					   let role = self.stringAttribute(parent, attribute: kAXRoleAttribute as CFString) {
+						evidence["parentRole"] = String(role.prefix(128))
+						if role == "AXWindow" || role == "AXSheet",
+						   let url = accessibilityDocumentURL(self.copyAttribute(parent, attribute: kAXDocumentAttribute as CFString)) {
+							evidence["parentDocumentURL"] = url
+							evidence["parentSource"] = "AXParent"
+						}
+					}
+				}
+				return evidence
+			})
+		} catch BoundedReadFailure.busy {
+			return ["status": "busy", "readOnly": true, "source": "AXDocument"]
+		} catch {
+			return ["status": "unconfirmed", "readOnly": true, "source": "AXDocument"]
+		}
+	}
+
 	private func rootMetadata(pairing: WindowPairing, sheetCount: Int) -> [String: Any] {
 		["pairing": ["confidence": pairing.confidence, "score": pairing.score], "sheetCount": sheetCount]
 	}
@@ -1578,6 +1609,8 @@ final class Bridge {
 		let role = stringAttribute(window, attribute: kAXRoleAttribute as CFString) ?? ""
 		let subrole = stringAttribute(window, attribute: kAXSubroleAttribute as CFString) ?? ""
 		let sheetCount = sheetElements(of: window).count
+		var observedMetadata = rootMetadata(pairing: pairing, sheetCount: sheetCount)
+		observedMetadata["documentEvidence"] = windowDocumentEvidence(window, pid: pid)
 		var response: [String: Any] = [
 			"lookId": lookId,
 			"capturedAt": captureStart.timeIntervalSince1970,
@@ -1588,7 +1621,7 @@ final class Bridge {
 				"framePoints": ["x": (capture?.frame ?? rootFrame).origin.x, "y": (capture?.frame ?? rootFrame).origin.y, "w": (capture?.frame ?? rootFrame).width, "h": (capture?.frame ?? rootFrame).height],
 				"scaleFactor": scale,
 				"isModal": (boolAttribute(window, attribute: "AXModal" as CFString) ?? false) || sheetCount > 0 || isDialogLikeRoot(role: role, subrole: subrole),
-				"metadata": rootMetadata(pairing: pairing, sheetCount: sheetCount),
+				"metadata": observedMetadata,
 				"role": role,
 				"subrole": subrole,
 			],

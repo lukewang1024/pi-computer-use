@@ -1,6 +1,16 @@
 /** Fixed, bounded measurements; never exposes arbitrary evaluation to callers. */
 export const BROWSER_PERFORMANCE_SAMPLE = String.raw`(async () => {
  const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+ const positive = value => finite(value) > 0 ? value : null;
+ const environment = () => ({
+   userAgent:typeof navigator === 'object' && typeof navigator.userAgent === 'string' ? navigator.userAgent.slice(0,512) : null,
+   browserLanguage:typeof navigator === 'object' && typeof navigator.language === 'string' ? navigator.language.slice(0,64) : null,
+   viewportCssPixels:{width:positive(globalThis.innerWidth),height:positive(globalThis.innerHeight)},
+   devicePixelRatio:positive(globalThis.devicePixelRatio),
+   visualViewport:globalThis.visualViewport ? {width:positive(globalThis.visualViewport.width),height:positive(globalThis.visualViewport.height),scale:positive(globalThis.visualViewport.scale)} : null,
+   visibility:typeof document.visibilityState === 'string' ? document.visibilityState.slice(0,32) : null
+ });
+ const environmentStart=environment();
  const identityStart = {href:location.href,timeOrigin:performance.timeOrigin};
  const started = performance.now();
  while(document.readyState !== 'complete' && performance.now() - started < 3000)
@@ -59,7 +69,11 @@ export const BROWSER_PERFORMANCE_SAMPLE = String.raw`(async () => {
    url:navigation.url,timeOriginMs:finite(performance.timeOrigin),
    title:typeof document.title==='string'?document.title.slice(0,512):null,
    heading:typeof heading==='string'?heading.trim().slice(0,512):null};
- return {navigation,observation,loadWait,documentIdentity};
+ const environmentEnd=environment();
+ const changedFields=Object.keys(environmentStart).filter(key=>JSON.stringify(environmentStart[key])!==JSON.stringify(environmentEnd[key]));
+ const measurementConditions={environment:environmentEnd,stableDuringCollection:changedFields.length===0,changedFields,
+   scope:'browser-reported conditions; network, cache, hardware and OS state not established'};
+ return {navigation,observation,loadWait,documentIdentity,measurementConditions};
 })()`;
 
 export interface BrowserMetricsRead {
@@ -124,7 +138,7 @@ export function summarizeBrowserPerformance(sample: Record<string, unknown>): Re
 	const entries = rawEntries && typeof rawEntries === "object" && !Array.isArray(rawEntries) ? rawEntries as Record<string, unknown> : {};
 	const entryCounts = Object.fromEntries(["paint", "largest-contentful-paint", "layout-shift", "event", "longtask"]
 		.filter(kind => Array.isArray(entries[kind])).map(kind => [kind, (entries[kind] as unknown[]).length]));
-	return { navigation: sample.navigation, loadWait: sample.loadWait,
+	return { navigation: sample.navigation, loadWait: sample.loadWait, measurementConditions: sample.measurementConditions,
 		observation: { supported: observation.supported, truncated: observation.truncated,
 			scope: observation.scope, failures: observation.failures, entryCounts },
 		pageHealth: "not-assessed", finalCoreWebVitals: false };

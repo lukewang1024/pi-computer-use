@@ -2745,21 +2745,23 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		const page = (await measure("pageDiscoveryMs", () => listCdpPageContexts()))[0];
 		if (!page) throw new Error("Managed browser launched without a CDP page context.");
 		if (downloadDirectory) {
-			if (!await cdpSetManagedDownloadDirectory(page.contextId, downloadDirectory, () => {
+			if (!await measure("downloadPolicyMs", () => cdpSetManagedDownloadDirectory(page.contextId, downloadDirectory, () => {
 				// Chromium removes this connection's override on disconnect. Stop
 				// the owned browser before later actions can use default downloads.
 				if (runtimeState.managedBrowser === managedBrowser) managedBrowser.requestStop();
-			})) {
+			}))) {
 				throw new Error("Managed browser download directory could not be configured.");
 			}
-			if (requestedUrl && !await cdpNavigateContext(page.contextId, requestedUrl)) {
+			if (requestedUrl && !await measure("initialNavigationMs", () => cdpNavigateContext(page.contextId, requestedUrl))) {
 				throw new Error("Managed browser context disappeared before navigation.");
 			}
 		}
 		const resourceKey = `cdp:${page.targetId}`;
 		const scheduled = await measure("initialObservationMs", () => resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId)));
 		if (!scheduled.value) throw new Error("Managed browser page could not be observed after launch.");
+		const resultStarted = performance.now();
 		const observation = browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
+		launchTimings.initialResultBuildMs = performance.now() - resultStarted;
 		observation.details.managedBrowser = { pid: managedBrowser.child.pid, profileDirectory: managedBrowser.profileDir };
 		launchTimings.totalMs = performance.now() - started;
 		if (observation.details.diagnostics) observation.details.diagnostics.launchTimings = launchTimings;

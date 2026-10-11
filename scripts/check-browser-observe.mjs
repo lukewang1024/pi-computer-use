@@ -387,6 +387,42 @@ try {
     assert.equal(calls.slice(duplicateStart).filter(c=>c.method.startsWith('Input.')).length,0);
     axNodes=priorNodes;
   }
+  {
+    const priorNodes=axNodes;
+    axNodes=[{nodeId:'nav-fold-root',role:{value:'RootWebArea'},childIds:['nav-fold-group']},
+      {nodeId:'nav-fold-group',role:{value:'group'},childIds:Array.from({length:300},(_,i)=>'nav-fold-'+i)},
+      ...Array.from({length:300},(_,i)=>({nodeId:'nav-fold-'+i,role:{value:'button'},name:{value:'Navigation control '+i},backendDOMNodeId:8000+i}))];
+    const base=await tool(executeObserve,{root,mode:'semantic'});
+    const beforeInvalid=calls.length;
+    await assert.rejects(tool(executeNavigateBrowser,{stateId:base.details.stateId,url:'https://example.test',outlineView:'invalid'}),/outlineView must be/);
+    assert.equal(calls.length,beforeInvalid,'Invalid navigation projection must reject before any CDP request');
+    const start=calls.length;
+    const navigated=await tool(executeNavigateBrowser,{stateId:base.details.stateId,url:'https://example.test',outlineView:'folded',includePerformance:true});
+    assert.equal(navigated.details.outline.view,'folded');
+    assert(navigated.details.outline.observedNodeCount>300);
+    assert(navigated.details.outline.returnedNodeCount<=150);
+    assert(navigated.details.performanceSample,'Projection must preserve optional performance evidence');
+    assert.notEqual(navigated.details.stateId,base.details.stateId);
+    assert.equal(calls.slice(start).filter(c=>c.method==='Page.navigate').length,1,'One original navigation only');
+    assert.equal(calls.slice(start).filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'Reuse the original complete successor');
+    assert.equal(calls.slice(start).some(c=>c.method.startsWith('Input.')),false);
+    const count=calls.length;
+    const searched=await tool(executeSearchUi,{stateId:navigated.details.stateId,text:'Navigation control 299',role:'button'});
+    assert.equal(searched.details.matches[0].label,'Navigation control 299');
+    const refs=new Set();const visit=n=>{refs.add(n.ref);n.children.forEach(visit)};visit(navigated.details.outline.root);
+    assert(!refs.has(searched.details.matches[0].ref),'Search must resolve an omitted navigation target from the full cache');
+    assert.equal(calls.length,count,'Cache search adds no snapshot or navigation');
+    await assert.rejects(tool(executeAct,{stateId:base.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
+    assert.equal(calls.length,count,'Pre-navigation state must not dispatch input');
+    const full=await tool(executeNavigateBrowser,{stateId:navigated.details.stateId,url:'https://example.test'});
+    assert.notEqual(full.details.outline.view,'folded','Unspecified projection preserves the full response');
+    failPerformance=true;
+    const unavailable=await tool(executeNavigateBrowser,{stateId:full.details.stateId,url:'https://example.test',outlineView:'folded',includePerformance:true});
+    failPerformance=false;
+    assert.equal(unavailable.details.outline.view,'folded');
+    assert.equal(unavailable.details.performanceError.status,'unavailable','Projection preserves measurement failure evidence');
+    axNodes=priorNodes;
+  }
   console.log('Browser observe executor integration checks passed');
 } finally {
   await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);

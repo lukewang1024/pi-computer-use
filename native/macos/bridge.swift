@@ -1690,6 +1690,20 @@ final class Bridge {
 				"canSetValue": node.canSetValue, "isTextInput": node.isTextInput]
 			if let enabled = node.isEnabled { result["isEnabled"] = enabled }
 			if !secure { result["title"] = String(node.title.prefix(256)); result["description"] = String(node.description.prefix(256)) }
+			if !secure, node.isTextInput,
+				let raw = read(focused, kAXSelectedTextRangeAttribute as CFString),
+				CFGetTypeID(raw) == AXValueGetTypeID() {
+				let value = unsafeBitCast(raw, to: AXValue.self)
+				var range = CFRange(location: -1, length: -1)
+				if AXValueGetType(value) == .cfRange, AXValueGetValue(value, .cfRange, &range),
+					range.location >= 0, range.length >= 0, range.length <= 100_000,
+					range.location <= 100_000 - range.length,
+					let current = read(app, kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement),
+					let currentWindow = read(app, kAXFocusedWindowAttribute as CFString).flatMap(asAXElement),
+					sameElement(current, focused), sameElement(currentWindow, window) {
+					result["selectionRange"] = ["location": range.location, "length": range.length]
+				}
+			}
 			return finish(result)
 		}
 		// A focused descendant may be absent from a bounded/scoped outline. Prove

@@ -109,6 +109,18 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
 `act_ui` accepts optional `outlineView: "folded"` to bound its returned structured UI tree. The complete successor remains available to state-scoped `search_ui` and `expand_ui`; this does not change dispatch, postconditions or stale-reference checks. The default remains the full tree.
 
+`evaluate_browser` also accepts `outlineView: "folded"` and a bounded `outlineQuery`.
+Both reuse its original successor snapshot, without evaluating or observing again.
+`outlineView` cannot be combined with `includeOutline: false`; a query alone can.
+Query receipts report `cachedTreeComplete` and `observedNodeCount` separately from
+`exactMatchesComplete`: all exact cached matches may fit while an unobserved tree
+frontier still hides additional controls. For scoped uniqueness, require a complete
+tree within the caller's node budget and complete exact matches, then inspect each
+candidate with `inspect_ui({stateId, ref, includeAncestors: true})`. Check current
+state, enabled status and structured ancestor identities; reject truncated ancestor
+chains or duplicate scoped targets. Display paths are diagnostic text, not ancestry
+proof. Default evaluation still returns the full tree and all stale-state guards apply.
+
 `observe_ui` and `act_ui` also accept an optional `outlineQuery: {text, role, capability}` with at least one nonempty predicate. The response's `queryResult` contains at most 12 ranked matches from the complete saved successor, before folding, with its exact stateId. This cached-only query adds no capture, input or OCR escalation. Check `exactMatchesComplete` and `exactMatchCount === 1` before treating a text query as unique; `exactMatchCount` is null when the exact matches exceed the returned budget. `hasMore` can still be true for lower-ranked matches. Missing query results on terminal failures authorize no input, and all normal stale-reference and foreground guards remain in effect. Pixel-only and metrics-only observations reject this option.
 
 

@@ -53,6 +53,9 @@ export interface EvaluateBrowserParams {
 	expression: string;
 	/** Omit the returned tree only; always collect and retain a complete successor state. */
 	includeOutline?: boolean;
+	/** Project the retained successor without repeating evaluation or observation. */
+	outlineView?: "full" | "folded";
+	outlineQuery?: OutlineQuery;
 }
 
 export interface ObserveParams extends ObserveTargetParams {

@@ -141,6 +141,7 @@ export class SavedStates {
 					ocrDiagnostics: state.currentLook.ocrDiagnostics ? { status: state.currentLook.ocrDiagnostics.status,
 						nativeCompletion: state.currentLook.ocrDiagnostics.nativeCompletion, readOnly: true } : undefined,
 					// Retain only the fixed capture policy marker, not arbitrary diagnostic payloads.
+					elementCollection: state.currentLook.elementCollection ? { ...state.currentLook.elementCollection } : undefined,
 					uiaDiagnostics: state.currentLook.uiaDiagnostics?.status === "skipped" && state.currentLook.uiaDiagnostics?.reason === "pixel_only_observation"
 						? { status: "skipped", reason: "pixel_only_observation" } : undefined,
 				},

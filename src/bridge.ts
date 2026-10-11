@@ -1,4 +1,5 @@
 import { prepareManagedDownloadDirectory } from "./browser-downloads.ts";
+import { CdpNavigationFailure, ManagedLaunchNavigationFailure } from "./navigation-failure.ts";
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
 import { serializeFocusContext } from "./focus-context.ts";
 import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
@@ -2770,6 +2771,10 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 			}
 			runtimeState.managedBrowser = undefined;
 			restoreManagedBrowserPort();
+			// The inner CDP receipt alone cannot prove launch cleanup. Emit a
+			// separate receipt only after close verified exit/profile removal
+			// and this exact owned browser has relinquished runtime ownership.
+			if (error instanceof CdpNavigationFailure) throw new ManagedLaunchNavigationFailure(error);
 		}
 		throw error;
 	}

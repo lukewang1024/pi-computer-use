@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import {cachedOutlineCompleteness} from '../src/outline.ts';
 import {changesBetween} from '../src/view.ts';
 import {parseLookResponse, graftScopedOutline, nodeByRef, serializeOutline, restoreOutline, searchOutline, serializeOutlineSubtree, serializeOutlineAncestors} from '../src/outline.ts';
 const node=(ref,title,children=[],truncated=false)=>({ref,title,role:'AXGroup',children,truncated});
 const outline=root=>parseLookResponse({lookId:'test',outline:root,window:{}}).parsedOutline;
 const full=outline(node('window','Window',[node('pane','Document Pane',[node('old-body','Page 1 content')]),node('save','Save')]));
+assert.equal(cachedOutlineCompleteness(full).cachedTreeComplete,true);
 const pane=full.nodes.find(n=>n.wireRef==='pane');
 const old=full.nodes.find(n=>n.wireRef==='old-body');
 const save=full.nodes.find(n=>n.wireRef==='save');
@@ -17,6 +19,8 @@ assert.equal(nodeByRef(full,body.ref),body,'observed matching wire identity reta
 graftScopedOutline(full,pane.ref,outline(node('pane','Document Pane',[],true)));
 assert.equal(nodeByRef(full,body.ref),undefined,'unobserved descendants cannot remain actionable');
 assert.equal(pane.truncated,true,'partial scoped observations retain their frontier');
+assert.equal(cachedOutlineCompleteness(full).cachedTreeComplete,false,'an unrelated read frontier must prevent a complete-grounding receipt');
+assert.equal(cachedOutlineCompleteness(full).observedNodeCount,full.nodes.length);
 const restored=restoreOutline(serializeOutline(full));
 graftScopedOutline(restored,pane.ref,outline(node('pane','Document Pane',[node('third-body','Page 1 content')])));
 const third=restored.nodes.find(n=>n.wireRef==='third-body');

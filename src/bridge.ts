@@ -2935,7 +2935,15 @@ export const executeNavigateBrowser = makeToolExecutor("navigate_browser", async
 		outline: serializeFoldedOutline(restoreOutline(result.details.outline)) } };
 });
 export const executeEvaluateBrowser = makeToolExecutor("evaluate_browser", performEvaluateBrowser);
-export const executeLaunchBrowser = makeToolExecutor("launch_browser", performLaunchBrowser);
+export const executeLaunchBrowser = makeToolExecutor("launch_browser", async (params: LaunchBrowserParams, signal?: AbortSignal) => {
+	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
+	const result = await performLaunchBrowser(params, signal);
+	if (params.outlineView !== "folded") return result;
+	// Startup has already retained the complete original observation. Project
+	// only the response; never launch, navigate, snapshot or dispatch input again.
+	return { ...result, details: { ...result.details,
+		outline: serializeFoldedOutline(restoreOutline(result.details.outline)) } };
+});
 
 export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 	savedStates.clear();

@@ -44,6 +44,8 @@ export interface NavigateBrowserParams extends StateTargetParams {
 
 export interface LaunchBrowserParams {
 	url?: string;
+	/** Project the returned initial outline only; retain the complete launch state. */
+	outlineView?: "full" | "folded";
 }
 
 export interface EvaluateBrowserParams {

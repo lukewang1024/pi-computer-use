@@ -14,6 +14,7 @@ export interface FocusContext {
 	isTextInput?: boolean;
 	isSecure?: boolean;
 	elapsedMs?: number;
+	selectionRange?: { location: number; length: number };
 }
 
 export function parseFocusContext(raw: unknown): FocusContext | undefined {
@@ -32,6 +33,13 @@ export function parseFocusContext(raw: unknown): FocusContext | undefined {
 		if (typeof value[key] === "string") result[key] = value[key].slice(0, 256);
 	}
 	if (result.status === "matched" && typeof value.wireRef === "string") result.wireRef = value.wireRef;
+	const range = value.selectionRange as Record<string, unknown> | undefined;
+	if (result.status === "matched" && result.isSecure === false && result.isTextInput === true
+		&& range && typeof range === "object" && typeof range.location === "number" && typeof range.length === "number"
+		&& Number.isSafeInteger(range.location) && Number.isSafeInteger(range.length)
+		&& range.location >= 0 && range.length >= 0 && range.location <= 100_000 - range.length) {
+		result.selectionRange = { location: range.location, length: range.length };
+	}
 	return result;
 }
 
@@ -41,5 +49,6 @@ export function serializeFocusContext(context: FocusContext | undefined, outline
 	const { wireRef, ...result } = context;
 	const matches = wireRef ? outline.nodes.filter(node => node.wireRef === wireRef) : [];
 	if (context.status === "matched" && context.scopeVerified && matches.length === 1) return { ...result, ref: matches[0].ref };
-	return { ...result, status: context.status === "matched" ? "unobserved" : context.status };
+	const { selectionRange: _range, ...unmatched } = result;
+	return { ...unmatched, status: context.status === "matched" ? "unobserved" : context.status };
 }

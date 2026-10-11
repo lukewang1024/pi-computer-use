@@ -123,7 +123,7 @@
 		"test:native-commit": "tsx scripts/check-native-commit.mjs",
 		"test:root-delta-identity": "tsx scripts/check-root-delta-identity.mjs",
 		"test:macos-selection": "tsx scripts/check-native-text-selection.mjs && node scripts/check-macos-text-selection.mjs",
-		"test:focus-context": "tsx scripts/check-focus-context.mjs && node scripts/check-macos-focused-context.mjs",
+		"test:focus-context": "tsx scripts/check-focus-selection.mjs && tsx scripts/check-focus-context.mjs && node scripts/check-macos-focused-context.mjs",
 		"test:root-pages": "tsx scripts/check-root-pages.mjs",
 		"test:macos-window-document": "tsx scripts/check-window-document-evidence.mjs && node scripts/check-macos-window-document.mjs"
 	},

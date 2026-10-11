@@ -272,6 +272,10 @@ try {
   const invalidStart=calls.length;
   await assert.rejects(()=>tool(executeEvaluateBrowser,{stateId:projectionBase.details.stateId,expression:'mutation()',includeOutline:'no'}),/must be boolean/);
   assert.equal(calls.length,invalidStart,'invalid projection must not evaluate JavaScript');
+  await assert.rejects(()=>tool(executeEvaluateBrowser,{stateId:projectionBase.details.stateId,expression:'mutation()',outlineView:'compact'}),/full or folded/);
+  await assert.rejects(()=>tool(executeEvaluateBrowser,{stateId:projectionBase.details.stateId,expression:'mutation()',includeOutline:false,outlineView:'folded'}),/requires includeOutline/);
+  await assert.rejects(()=>tool(executeEvaluateBrowser,{stateId:projectionBase.details.stateId,expression:'mutation()',outlineQuery:{}}),/predicate/);
+  assert.equal(calls.length,invalidStart,'invalid query and projection must be rejected before evaluation');
   const projectionStart=calls.length;
   const projected=await tool(executeEvaluateBrowser,{stateId:projectionBase.details.stateId,expression:'1',includeOutline:false});
   assert.equal(projected.details.outline,undefined);assert.equal(projected.details.outlineIncluded,false);
@@ -282,6 +286,19 @@ try {
   await assert.rejects(()=>tool(executeAct,{stateId:projectionBase.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
   const included=await tool(executeEvaluateBrowser,{stateId:projected.details.stateId,expression:'1'});
   assert(included.details.outline);assert.equal(included.details.outlineIncluded,true,'default keeps the complete response contract');
+  const foldedStart=calls.length;
+  const foldedEvaluation=await tool(executeEvaluateBrowser,{stateId:included.details.stateId,expression:'1',outlineView:'folded',outlineQuery:{text:'Projection control',role:'button'}});
+  assert.equal(foldedEvaluation.details.outline.view,'folded');
+  assert.equal(foldedEvaluation.details.queryResult.exactMatchCount,1);
+  assert.equal(foldedEvaluation.details.queryResult.exactMatchesComplete,true);
+  assert.equal(foldedEvaluation.details.queryResult.cachedTreeComplete,true);
+  assert.equal(foldedEvaluation.details.queryResult.stateId,foldedEvaluation.details.stateId);
+  assert.equal(calls.slice(foldedStart).filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'query and projection must share the original successor snapshot');
+  const ancestorStart=calls.length;
+  const inspectedEvaluation=await tool(executeInspectUi,{stateId:foldedEvaluation.details.stateId,ref:foldedEvaluation.details.queryResult.matches[0].ref,includeAncestors:true});
+  assert.equal(inspectedEvaluation.details.ancestors.truncated,false);
+  assert.equal(calls.length,ancestorStart,'structured ancestors must read retained cache without CDP or input');
+  await assert.rejects(()=>tool(executeAct,{stateId:included.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale/i);
   axNodes=[
     {nodeId:'local-root',role:{value:'RootWebArea'},childIds:['local-nav','outside']},
     {nodeId:'local-nav',parentId:'local-root',role:{value:'navigation'},name:{value:'Contents'},childIds:['local-button']},

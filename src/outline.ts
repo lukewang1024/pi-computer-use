@@ -553,6 +553,11 @@ export function serializeOutline(outline: Outline): SerializedOutline {
 	return { lookId: outline.lookId, refHighWaterMark: outline.refHighWaterMark, root: serializeOutlineNode(outline.root) };
 }
 
+/** A complete cached index may still contain an unobserved read frontier. */
+export function cachedOutlineCompleteness(outline: Outline) {
+	return { cachedTreeComplete: outline.nodes.every(node => !node.truncated), observedNodeCount: outline.nodes.length };
+}
+
 /** Project the same refs as the rendered outline without pruning cached state. */
 export function serializeFoldedOutline(outline: Outline): SerializedOutline {
 	const visible = new Set(foldToBudget(outline).renderedRefs);

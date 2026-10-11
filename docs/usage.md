@@ -238,3 +238,9 @@ remain connected and active. Remote frame loader/ownership checks are retained.
 These checks precede the input command; they are not an atomic guarantee against
 arbitrary subsequent application focus changes. Application effect evidence is
 still required.
+
+### macOS pixel-only observation
+
+Use `observe_ui({root: exactNativeRoot, mode: "pixels"})` to capture a macOS window without collecting its accessibility tree or running OCR. The helper acknowledges this with `elementCollection: {status: "skipped", reason: "pixel_only_observation"}`. A helper without this acknowledgement cannot establish a pixel-only state. Normal screen capture permissions and exact window identity checks still apply.
+
+The observation contains a nonactionable placeholder and fresh image state. Observe semantic or fused before using element references, querying elements, collecting focus context, or verifying semantic postconditions. Coordinate actions retain the existing foreground, modifier, geometry and stale-state guards; returned dispatch does not verify its effect and must not be replayed. A screenshot alone does not prove successful editing.

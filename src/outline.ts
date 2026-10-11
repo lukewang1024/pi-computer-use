@@ -84,6 +84,7 @@ export interface LookResponse {
 	imageError?: string;
 	imageDiagnostics?: { code?: string; nativeCompletion: "completed" | "unconfirmed"; readOnly: true };
 	ocrDiagnostics?: { status: "succeeded" | "failed"; nativeCompletion: "completed" | "unconfirmed"; readOnly: true; errorKind?: string; operationNotStarted?: boolean; cancellationRequested?: boolean; errorDomain?: string; errorCode?: number; error?: string };
+	elementCollection?: { status: "skipped"; reason: "pixel_only_observation" };
 	uiaDiagnostics?: Record<string, unknown>;
 	captureDiagnostics?: Record<string, unknown>;
 	outline: OutlineNode;
@@ -274,6 +275,7 @@ export function parseLookResponse(raw: unknown): LookResponse {
 			errorCode: typeof record.ocrDiagnostics.errorCode === "number" && Number.isSafeInteger(record.ocrDiagnostics.errorCode) ? record.ocrDiagnostics.errorCode : undefined,
 			error: typeof record.ocrDiagnostics.error === "string" ? record.ocrDiagnostics.error.slice(0, 1024) : undefined,
 		} : undefined,
+		elementCollection: isRecord(record.elementCollection) && record.elementCollection.status === "skipped" && record.elementCollection.reason === "pixel_only_observation" ? { status: "skipped", reason: "pixel_only_observation" } : undefined,
 		uiaDiagnostics: isRecord(record.uiaDiagnostics) ? { ...record.uiaDiagnostics,
 			error: typeof record.uiaDiagnostics.error === "string" ? record.uiaDiagnostics.error.slice(0, 1024) : undefined } : undefined,
 		captureDiagnostics: isRecord(record.captureDiagnostics) ? record.captureDiagnostics : undefined,

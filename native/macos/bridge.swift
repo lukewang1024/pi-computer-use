@@ -2181,25 +2181,19 @@ final class Bridge {
 		guard let snapshot = refStore.snapshot(for: ref),
 			let window = windowElement(pid: pid, windowId: windowId)
 		else { return nil }
-		let targetCenter = CGPoint(x: snapshot.rect.midX, y: snapshot.rect.midY)
 		let candidates = collectDescendants(startingAt: window, maxDepth: 8).filter { candidate in
 			let role = stringAttribute(candidate, attribute: kAXRoleAttribute as CFString) ?? ""
-			guard role == snapshot.role else { return false }
 			let identifier = stringAttribute(candidate, attribute: "AXIdentifier" as CFString) ?? ""
-			if !snapshot.identifier.isEmpty { return identifier == snapshot.identifier }
 			let subrole = stringAttribute(candidate, attribute: kAXSubroleAttribute as CFString) ?? ""
 			let title = stringAttribute(candidate, attribute: kAXTitleAttribute as CFString) ?? ""
 			let description = stringAttribute(candidate, attribute: kAXDescriptionAttribute as CFString) ?? ""
 			let value = displayValue(candidate, role: role, subrole: subrole)
-			return normalizedLabel([title, description, value].joined(separator: " ")) == snapshot.label
+			return nativeRefindSemanticMatch(observedRole: snapshot.role, observedIdentifier: snapshot.identifier,
+				observedLabel: snapshot.label, currentRole: role, currentIdentifier: identifier,
+				currentLabel: normalizedLabel([title, description, value].joined(separator: " ")))
 		}
-		return candidates.min { left, right in
-			let leftFrame = frameForElement(left) ?? .zero
-			let rightFrame = frameForElement(right) ?? .zero
-			let leftDistance = hypot(leftFrame.midX - targetCenter.x, leftFrame.midY - targetCenter.y)
-			let rightDistance = hypot(rightFrame.midX - targetCenter.x, rightFrame.midY - targetCenter.y)
-			return leftDistance < rightDistance
-		}
+		// A nearby candidate is not proof of reference identity. Refuse aliases.
+		return candidates.count == 1 ? candidates[0] : nil
 	}
 
 	private func hitTest(_ request: [String: Any]) throws -> [String: Any] {
@@ -2232,6 +2226,23 @@ final class Bridge {
 			}
 			if let candidateElement, !sameElement(candidateElement, menuRoot), !isElement(candidateElement, descendantOf: menuRoot) {
 				throw BridgeFailure(message: "Element does not belong to the observed popup menu; input was not sent", code: "stale_ref")
+			}
+			if let candidateElement,
+				stringAttribute(candidateElement, attribute: kAXRoleAttribute as CFString) == "AXMenuItem" {
+				let targetRef = (request["target"] as? [String: Any])?["ref"] as? String
+				guard let targetRef, let snapshot = refStore.snapshot(for: targetRef) else {
+					throw BridgeFailure(message: "Observed menu item identity is unavailable; no input was sent", code: "stale_ref")
+				}
+				let role = stringAttribute(candidateElement, attribute: kAXRoleAttribute as CFString) ?? ""
+				let subrole = stringAttribute(candidateElement, attribute: kAXSubroleAttribute as CFString) ?? ""
+				let identifier = stringAttribute(candidateElement, attribute: "AXIdentifier" as CFString) ?? ""
+				let title = stringAttribute(candidateElement, attribute: kAXTitleAttribute as CFString) ?? ""
+				let description = stringAttribute(candidateElement, attribute: kAXDescriptionAttribute as CFString) ?? ""
+				let label = normalizedLabel([title, description, displayValue(candidateElement, role: role, subrole: subrole)].joined(separator: " "))
+				guard nativeRefindSemanticMatch(observedRole: snapshot.role, observedIdentifier: snapshot.identifier,
+					observedLabel: snapshot.label, currentRole: role, currentIdentifier: identifier, currentLabel: label) else {
+					throw BridgeFailure(message: "Observed menu item changed identity; no input was sent", code: "stale_ref")
+				}
 			}
 		}
 		try validateObservedMenu()
@@ -2281,8 +2292,9 @@ final class Bridge {
 				stringAttribute($0, attribute: kAXRoleAttribute as CFString) != nil && frameForElement($0) != nil
 			} ?? false
 			let resolved: AXUIElement?
-			if (action == "selectText" || action == "cancel" || record.appMenuBarRoot != nil) && !cachedIsLive {
-				throw BridgeFailure(message: "Native selection, cancellation or application-menu reference is stale; no input was sent", code: "stale_ref")
+			if nativeReferenceRequiresCachedElement(action: action, popupMenu: record.menuRoot != nil,
+				applicationMenu: record.appMenuBarRoot != nil) && !cachedIsLive {
+				throw BridgeFailure(message: "Native selection, cancellation or menu reference is stale; no input was sent", code: "stale_ref")
 			}
 			if cachedIsLive {
 				resolved = cached
@@ -2434,6 +2446,8 @@ final class Bridge {
 		}
 
 		func refreshElement() -> AXUIElement? {
+			guard !nativeReferenceRequiresCachedElement(action: action, popupMenu: record.menuRoot != nil,
+				applicationMenu: record.appMenuBarRoot != nil) else { return nil }
 			guard let ref = target["ref"] as? String,
 				let refreshed = refindElement(ref: ref, pid: pid, windowId: record.windowId)
 			else { return nil }

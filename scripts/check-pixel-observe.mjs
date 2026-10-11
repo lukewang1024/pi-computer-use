@@ -13,7 +13,7 @@ Object.assign(currentPlatformBackend,{name:'windows',
  ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:root.appName,pid:root.pid,isFrontmost:true}],listRoots:async()=>{if(targetDelayMs)await new Promise(resolve=>setTimeout(resolve,targetDelayMs));return [root];},
  getFrontmost:async()=>({appName:root.appName,pid:root.pid,windowTitle:root.title,windowId:root.windowId,rootRef:root.rootRef}),
  isBrowserApp:()=>false,isChromeFamilyApp:()=>false,
- observe:async(request)=>{requests.push(request);const pixels=request.includeElements===false;return parseLookResponse({lookId:'pixel-look-'+(++looks),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1,role:'window'},outline:node('@w1','window',root.title,{truncated:pixels,pictureOnly:pixels,children:pixels?[]:[node('native-save','button','Save',{canPress:true})]}),image:request.includeImage!==false&&image?{jpegBase64:png,mimeType:'image/png',width:1,height:1}:undefined,captureDiagnostics:request.includeImage!==false?captureDiagnostics:undefined,uiaDiagnostics:pixels&&ack?{status:'skipped',reason:'pixel_only_observation'}:undefined,timings:{totalMs:1}});},
+ observe:async(request)=>{requests.push(request);const pixels=request.includeElements===false;return parseLookResponse({lookId:'pixel-look-'+(++looks),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1,role:'window'},outline:node('@w1','window',root.title,{truncated:pixels,pictureOnly:pixels,children:pixels?[]:[node('native-save','button','Save',{canPress:true})]}),image:request.includeImage!==false&&image?{jpegBase64:png,mimeType:'image/png',width:1,height:1}:undefined,captureDiagnostics:request.includeImage!==false?captureDiagnostics:undefined,elementCollection:pixels&&ack&&currentPlatformBackend.name==='macos'?{status:'skipped',reason:'pixel_only_observation'}:undefined,uiaDiagnostics:pixels&&ack&&currentPlatformBackend.name==='windows'?{status:'skipped',reason:'pixel_only_observation'}:undefined,timings:{totalMs:1}});},
  act:async()=>{acts++;return {outcome:'unknown',performed:{grounding:'coordinates',delivery:'hid'}};},shutdown:async()=>{},
 });
 const ctx={cwd:process.cwd()};const call=(fn,params)=>fn('pixels-test',params,undefined,undefined,ctx);
@@ -40,10 +40,26 @@ try{
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'semantic',actions:[{action:'click',x:0,y:0}]}),/semantic successor/);assert.equal(acts,0);
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'invalid',actions:[{action:'click',x:0,y:0}]}),/must be semantic or fused/);assert.equal(acts,0);
  const acted=await call(executeAct,{stateId:pixels.details.capture.stateId,actions:[{action:'click',x:0,y:0}]});assert.equal(acted.details.execution.outcome,'unknown');assert.equal(acted.details.uiaDiagnostics.status,'skipped');assert.equal(requests.length,1);assert.equal(requests[0].includeElements,false);assert.equal(acts,1,'controlled input completion remains unverified; no batch replay');
- requests=[];await assert.rejects(()=>call(executeObserve,{mode:'pixels'}),/exact Windows native/);assert.equal(requests.length,0);
- currentPlatformBackend.name='macos';await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/exact Windows native/);assert.equal(requests.length,0);currentPlatformBackend.name='windows';
+ requests=[];await assert.rejects(()=>call(executeObserve,{mode:'pixels'}),/exact Windows or macOS native/);assert.equal(requests.length,0);
+ currentPlatformBackend.name='macos';
+ const actsBeforeMac=acts;
+ await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels',focusContext:true}),/does not collect focus context/);
+ for(const marker of [{status:'done',reason:'pixel_only_observation'},{status:'skipped',reason:'other'},null]) {
+  const parsed=parseLookResponse({lookId:'invalid-marker',window:{windowId:71,framePoints:root.framePoints},outline:node('root','window','root'),elementCollection:marker});
+  assert.equal(parsed.elementCollection,undefined);
+ }
+ const macPixels=await call(executeObserve,{root:ref,mode:'pixels'});
+ assert.equal(macPixels.details.observation.status,'pixels_only');assert.deepEqual(macPixels.details.elementCollection,{status:'skipped',reason:'pixel_only_observation'});assert.equal(requests[0].includeElements,false);assert.equal(requests[0].readText,'never');
+ await assert.rejects(()=>call(executeSearchUi,{text:'Save',stateId:macPixels.details.capture.stateId}),/no semantic elements/);
+ await assert.rejects(()=>call(executeAct,{stateId:macPixels.details.capture.stateId,actions:[{action:'press',ref:oldRef}]}));
+ await assert.rejects(()=>call(executeAct,{stateId:macPixels.details.capture.stateId,observationMode:'semantic',actions:[{action:'click',x:0,y:0}]}),/semantic successor/);
+ ack=false;await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/did not confirm/);ack=true;
+ image=false;await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/did not confirm/);image=true;
+ assert.equal(acts,actsBeforeMac,'Mac negative paths must not send any input');
+ currentPlatformBackend.name='linux';await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/exact Windows or macOS native/);
+ currentPlatformBackend.name='windows';
  ack=false;await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/did not confirm/);ack=true;
  image=false;await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/did not confirm/);image=true;
  requests=[];const restored=await call(executeObserve,{root:ref,mode:'semantic'});assert.notEqual(requests[0].includeElements,false);assert.equal(restored.details.outline.root.children.length,1);
- console.log('Windows pixel-only contract checks passed (controlled backend; no native performance claim)');
+ console.log('Windows and macOS pixel-only contract checks passed (controlled backend; no native performance claim)');
 }finally{await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);}

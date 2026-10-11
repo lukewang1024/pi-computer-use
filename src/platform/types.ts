@@ -173,7 +173,7 @@ export interface PlatformObserveRequest {
 	scopeRef?: string;
 	maxDimension?: number;
 	includeImage?: boolean;
-	/** Windows native pixel capture can explicitly skip UIA enumeration. */
+	/** Native pixel capture can explicitly skip accessibility tree enumeration. */
 	includeElements?: boolean;
 	allowImageFailure?: boolean;
 }

@@ -53,17 +53,21 @@ export interface ObserveParams extends ObserveTargetParams {
 	mode?: "semantic" | "visual" | "fused" | "pixels" | "metrics";
 	/** Fold only the returned structured tree; retain the complete actionable state. */
 	outlineView?: "full" | "folded";
+	/** Bounded cached-only matches from this complete successor, before response projection. */
+	outlineQuery?: OutlineQuery;
 	/** Opt-in macOS focused-element diagnosis; never grants input authority. */
 	focusContext?: boolean;
 	/** Internal capture override; not part of the model-facing schema. */
 	readText?: "auto" | "always" | "never";
 }
 
-export interface SearchUiParams extends StateTargetParams {
+export interface OutlineQuery {
 	text?: string;
 	role?: string;
 	capability?: string;
 }
+
+export interface SearchUiParams extends StateTargetParams, OutlineQuery {}
 
 export interface ExpandUiParams extends StateTargetParams {
 	/** Return a bounded structured subtree instead of repeated rendered context. */
@@ -112,6 +116,8 @@ export interface ActParams extends StateTargetParams {
 	observationMode?: "semantic" | "fused";
 	/** Response projection only; the complete successor remains saved for queries. */
 	outlineView?: "full" | "folded";
+	/** Bounded cached-only matches from this complete successor, before response projection. */
+	outlineQuery?: OutlineQuery;
 }
 
 export interface ReadTextParams extends StateTargetParams {

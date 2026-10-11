@@ -337,12 +337,30 @@ try {
     const priorNodes=axNodes;
     axNodes=[{nodeId:'action-fold-root',role:{value:'RootWebArea'},childIds:Array.from({length:300},(_,i)=>'action-fold-'+i)},
       ...Array.from({length:300},(_,i)=>({nodeId:'action-fold-'+i,role:{value:'button'},name:{value:'Fold control '+i},backendDOMNodeId:3000+i}))];
-    const compact=await tool(executeObserve,{root,mode:'semantic'});
+    const observeStart=calls.length;
+    for(const outlineQuery of [{}, {text:1}, {text:'x'.repeat(257)}, {text:'ok',stateId:'foreign'}, []]) {
+      await assert.rejects(()=>tool(executeObserve,{root,mode:'semantic',outlineQuery}),/outlineQuery/);
+    }
+    await assert.rejects(()=>tool(executeObserve,{root,mode:'pixels',outlineQuery:{text:'Fold control 299'}}),/semantic observation/);
+    assert.equal(calls.length,observeStart,'Invalid/pixel queries reject before observation');
+    const compact=await tool(executeObserve,{root,mode:'semantic',outlineView:'folded',outlineQuery:{text:'Fold control 299',role:'button'}});
+    assert.equal(compact.details.queryResult.stateId,compact.details.stateId);
+    assert.equal(compact.details.queryResult.matches[0].label,'Fold control 299');
+    assert.equal(calls.slice(observeStart).filter(c=>c.method==='Accessibility.getFullAXTree').length,1,'Inline query reuses one observation');
     const readCount=calls.length;
     await assert.rejects(()=>tool(executeAct,{stateId:compact.details.stateId,outlineView:'invalid',actions:[{action:'click',x:1,y:1}]}),/outlineView must be/);
     assert.equal(calls.length,readCount,'Invalid action projection must reject before dispatch');
-    const action=await tool(executeAct,{stateId:compact.details.stateId,outlineView:'folded',actions:[{action:'click',x:1,y:1}]});
+    await assert.rejects(()=>tool(executeAct,{stateId:compact.details.stateId,outlineQuery:{text:''},actions:[{action:'click',x:1,y:1}]}),/nonempty predicate/);
+    assert.equal(calls.length,readCount,'Invalid cached query must reject before input');
+    const action=await tool(executeAct,{stateId:compact.details.stateId,outlineView:'folded',outlineQuery:{text:'Fold control 299',role:'button'},actions:[{action:'click',x:1,y:1}]});
     assert.equal(action.details.outline.view,'folded');
+    assert.equal(action.details.queryResult.stateId,action.details.stateId);
+    assert.equal(action.details.queryResult.matches[0].label,'Fold control 299');
+    assert.equal(action.details.queryResult.hasMore,true,'Fuzzy rows remain bounded without hiding exact uniqueness');
+    assert.equal(action.details.queryResult.exactMatchesComplete,true);
+    assert(action.details.queryResult.exactMatchCount>=1);
+    assert.equal(action.details.queryResult.scope,'complete-cached-outline');
+    assert.equal(action.details.queryResult.ocrEscalated,false);
     assert(action.details.outline.returnedNodeCount <= 150);
     assert(action.details.outline.observedNodeCount > 300);
     assert.notEqual(action.details.stateId,compact.details.stateId);
@@ -351,10 +369,22 @@ try {
     const afterAction=calls.length;
     const actionHidden=await tool(executeSearchUi,{stateId:action.details.stateId,text:'Fold control 299'});
     assert.equal(actionHidden.details.matches[0].label,'Fold control 299');
+    assert.equal(action.details.queryResult.exactMatchCount,actionHidden.details.matches.filter(m=>m.matchReason==='exact').length);
+    assert.deepEqual(action.details.queryResult.matches,actionHidden.details.matches);
     const actionRefs=new Set();const visitAction=n=>{actionRefs.add(n.ref);n.children.forEach(visitAction);};visitAction(action.details.outline.root);
     assert(!actionRefs.has(actionHidden.details.matches[0].ref),'Omitted action successor nodes remain queryable');
     await assert.rejects(()=>tool(executeAct,{stateId:compact.details.stateId,outlineView:'folded',actions:[{action:'click',x:1,y:1}]}),/stale/i);
     assert.equal(calls.length,afterAction,'Queries and stale-action refusal must not dispatch or collect again');
+    axNodes=[{nodeId:'duplicate-root',role:{value:'RootWebArea'},childIds:Array.from({length:20},(_,i)=>'duplicate-'+i)},
+      ...Array.from({length:20},(_,i)=>({nodeId:'duplicate-'+i,role:{value:'button'},name:{value:'Duplicate control'},backendDOMNodeId:5000+i}))];
+    const duplicateStart=calls.length;
+    const duplicates=await tool(executeObserve,{root,mode:'semantic',outlineView:'folded',outlineQuery:{text:'Duplicate control',role:'button'}});
+    assert.equal(duplicates.details.queryResult.matches.length,12);
+    assert.equal(duplicates.details.queryResult.hasMore,true);
+    assert.equal(duplicates.details.queryResult.exactMatchesComplete,false);
+    assert.equal(duplicates.details.queryResult.exactMatchCount,null,'Truncated exact matches must not claim uniqueness');
+    assert(duplicates.details.queryResult.totalMatches>=20);
+    assert.equal(calls.slice(duplicateStart).filter(c=>c.method.startsWith('Input.')).length,0);
     axNodes=priorNodes;
   }
   console.log('Browser observe executor integration checks passed');

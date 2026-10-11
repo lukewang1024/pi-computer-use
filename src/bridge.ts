@@ -17,7 +17,7 @@ import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputer
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeFoldedOutline, serializeOutlineNodeShallow, serializeOutlineAncestors, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineAncestors, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
-import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type FocusWindowParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
+import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type FocusWindowParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type OutlineQuery, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
 import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
@@ -101,6 +101,7 @@ interface ExecutionTrace {
 }
 
 interface ComputerUseDetails {
+	queryResult?: ReturnType<typeof queryCachedOutline>;
 	windowDocumentEvidence?: Record<string, unknown>;
 	focusContext?: ReturnType<typeof serializeFocusContext>;
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
@@ -241,6 +242,7 @@ interface ListWindowsDetails {
 }
 
 interface BrowserObservationDetails {
+	queryResult?: ReturnType<typeof queryCachedOutline>;
 	managedDownloadDirectory?: string;
 	managedBrowser?: { pid?: number; profileDirectory: string };
 	diagnostics?: CdpPageSnapshot["diagnostics"];
@@ -2841,23 +2843,58 @@ export const executeFind = makeToolExecutor("find_roots", performListWindows);
 export const executeFocusWindow = makeToolExecutor<FocusWindowParams, ComputerUseDetails | FocusOnlyDetails>("focus_window", performFocusWindow);
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
+function validateOutlineQuery(raw: OutlineQuery | undefined): OutlineQuery | undefined {
+ if (raw === undefined) return undefined;
+ if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).some(k => !["text", "role", "capability"].includes(k))) throw new Error("outlineQuery must contain only text, role or capability.");
+ const query: OutlineQuery = {};
+ for (const key of ["text", "role", "capability"] as const) {
+  const value = raw[key];
+  if (value === undefined) continue;
+  if (typeof value !== "string" || value.length > (key === "text" ? 256 : 128)) throw new Error("outlineQuery predicate must be a bounded string.");
+  if (value.trim()) query[key] = value.trim();
+ }
+ if (!Object.keys(query).length) throw new Error("outlineQuery requires a nonempty predicate.");
+ return query;
+}
+
+function queryCachedOutline(outline: Outline, query: OutlineQuery, stateId: string) {
+ const ranked = searchOutlineRanked(outline, query.text, query.role, query.capability, 12);
+ const exactCount = ranked.matches.filter(match => match.matchReason === "exact").length;
+ // Exact matches sort before every other rank. A non-exact returned row proves all exact rows fit.
+ const exactMatchesComplete = exactCount < 12 || ranked.totalMatches <= 12;
+ return { stateId, lookId: outline.lookId,
+  query, matches: ranked.matches.map(serializeOutlineSearchMatch), totalMatches: ranked.totalMatches,
+  returned: ranked.matches.length, hasMore: ranked.totalMatches > ranked.matches.length,
+  exactMatchesComplete, exactMatchCount: exactMatchesComplete ? exactCount : null,
+  scope: "complete-cached-outline" as const, ocrEscalated: false as const };
+}
+
 export const executeObserve = makeToolExecutor("observe_ui", async (params: ObserveParams, signal?: AbortSignal) => {
 	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
 	if (params.outlineView !== undefined && (params.mode === "pixels" || params.mode === "metrics")) throw new Error("outlineView requires a semantic outline; it is unavailable with pixels or metrics.");
+	const query = validateOutlineQuery(params.outlineQuery);
+	if (query && (params.mode === "pixels" || params.mode === "metrics")) throw new Error("outlineQuery requires a semantic observation.");
 	const result = await performObserve(params, signal);
-	if (params.outlineView !== "folded") return result;
-	if (!("outline" in result.details) || !result.details.outline) throw new Error("Observation returned no structured outline to fold.");
-	return { ...result, details: { ...result.details, outline: serializeFoldedOutline(restoreOutline(result.details.outline)) } };
+	if (params.outlineView !== "folded" && !query) return result;
+	if (!("outline" in result.details) || !result.details.outline) throw new Error("Observation returned no structured outline to project.");
+	const outline = restoreOutline(result.details.outline);
+	return { ...result, details: { ...result.details,
+		...(query ? { queryResult: queryCachedOutline(outline, query, "stateId" in result.details ? result.details.stateId : result.details.capture.stateId) } : {}),
+		outline: params.outlineView === "folded" ? serializeFoldedOutline(outline) : result.details.outline } };
 });
 export const executeSearchUi = makeToolExecutor("search_ui", performSearchUi);
 export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);
 export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>("act_ui", async (params, signal) => {
+	const query = validateOutlineQuery(params.outlineQuery);
 	const result = await performAct(params, signal);
 	// Project only after the original transaction has saved its complete successor.
 	// Terminal failures retain their original evidence and never trigger more input.
-	if (params.outlineView !== "folded" || !("outline" in result.details) || !result.details.outline) return result;
-	return { ...result, details: { ...result.details, outline: serializeFoldedOutline(restoreOutline(result.details.outline)) } };
+	if ((params.outlineView !== "folded" && !query) || !("outline" in result.details) || !result.details.outline) return result;
+	const outline = restoreOutline(result.details.outline);
+	return { ...result, details: { ...result.details,
+		...(query ? { queryResult: queryCachedOutline(outline, query, "stateId" in result.details ? result.details.stateId : result.details.capture.stateId) } : {}),
+		outline: params.outlineView === "folded" ? serializeFoldedOutline(outline) : result.details.outline } };
 });
 export const executeNavigateBrowser = makeToolExecutor("navigate_browser", performNavigateBrowser);
 export const executeEvaluateBrowser = makeToolExecutor("evaluate_browser", performEvaluateBrowser);

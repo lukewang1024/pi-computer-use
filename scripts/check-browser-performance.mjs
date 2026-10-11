@@ -40,6 +40,30 @@ assert.equal(summary.pageHealth,'not-assessed');
 assert.equal(summary.observation.entryCounts.longtask,64);
 assert(!Object.hasOwn(summary.observation.entryCounts,'event'),'unsupported empty buffer must not become a zero count');
 assert(!Object.hasOwn(summary.observation,'entries'),'model summary should not repeat full entry arrays');
+assert.equal(sample.measurementConditions.environment.userAgent,null,'Missing browser metadata is unavailable, never invented');
+assert.equal(sample.measurementConditions.environment.viewportCssPixels.width,null);
+const reported={...context,navigator:{userAgent:'u'.repeat(900),language:'en-US'},innerWidth:1200,innerHeight:800,devicePixelRatio:2,
+ visualViewport:{width:1200,height:800,scale:1}};
+const conditioned=await vm.runInNewContext(BROWSER_PERFORMANCE_SAMPLE,reported);
+assert.equal(conditioned.measurementConditions.environment.userAgent.length,512);
+assert.equal(conditioned.measurementConditions.environment.browserLanguage,'en-US');
+assert.equal(conditioned.measurementConditions.environment.viewportCssPixels.width,1200);
+assert.equal(conditioned.measurementConditions.environment.devicePixelRatio,2);
+assert.equal(conditioned.measurementConditions.stableDuringCollection,true);
+assert.equal(conditioned.measurementConditions.changedFields.length,0);
+assert.equal(summarizeBrowserPerformance(conditioned).measurementConditions,conditioned.measurementConditions);
+const resized={...reported,setTimeout:fn=>{resized.innerWidth=1000;resized.document={...reported.document,visibilityState:'hidden'};fn();return 1;}};
+const changed=await vm.runInNewContext(BROWSER_PERFORMANCE_SAMPLE,resized);
+assert.equal(changed.measurementConditions.stableDuringCollection,false,'Resize or hidden-page drift must not silently qualify for comparison');
+assert.equal(JSON.stringify(changed.measurementConditions.changedFields),JSON.stringify(['viewportCssPixels','visibility']));
+assert.equal(changed.measurementConditions.environment.viewportCssPixels.width,1000);
+assert.equal(changed.measurementConditions.environment.visibility,'hidden');
+const invalid={...reported,innerWidth:0,innerHeight:Infinity,devicePixelRatio:NaN,visualViewport:{width:-1,height:800,scale:0}};
+const invalidSample=await vm.runInNewContext(BROWSER_PERFORMANCE_SAMPLE,invalid);
+assert.equal(invalidSample.measurementConditions.environment.viewportCssPixels.width,null);
+assert.equal(invalidSample.measurementConditions.environment.viewportCssPixels.height,null);
+assert.equal(invalidSample.measurementConditions.environment.devicePixelRatio,null);
+assert.equal(invalidSample.measurementConditions.environment.visualViewport.scale,null);
 
 // A slow page must produce an incomplete sample before Runtime.evaluate's
 // 5-second deadline, not race the CDP deadline with a 5-second in-page wait.

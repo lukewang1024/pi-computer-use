@@ -188,7 +188,7 @@ const navigateBrowserTool = defineTool({
 	label: "Navigate Browser",
 	description: "Navigate an observed CDP browser-page state to an HTTP(S) URL.",
 	promptSnippet: "Native browser windows use act_ui; this tool is CDP-only.",
-	parameters: Type.Object({ url: Type.String({ maxLength: 8192 }), stateId, includePerformance: Type.Optional(Type.Boolean({ description: "Collect fixed bounded performance measurements during navigation; avoids a separate evaluation/snapshot. Not page health, field vitals or a load test." })) }),
+	parameters: Type.Object({ url: Type.String({ maxLength: 8192 }), stateId, outlineView: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("folded")], { description: "Response outline projection only, default full. Folded bounds the returned tree while retaining the complete navigation successor for search_ui and expand_ui. Navigation, readiness, performance collection and stale-reference checks are unchanged." })), includePerformance: Type.Optional(Type.Boolean({ description: "Collect fixed bounded performance measurements during navigation; avoids a separate evaluation/snapshot. Not page health, field vitals or a load test." })) }),
 	execute: executeNavigateBrowser,
 });
 

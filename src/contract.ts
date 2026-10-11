@@ -34,6 +34,8 @@ export interface StateTargetParams {
 
 export interface NavigateBrowserParams extends StateTargetParams {
 	url: string;
+	/** Response projection only; retain the complete navigation successor. */
+	outlineView?: "full" | "folded";
 	/** Collect bounded navigation/paint/observer metrics before the successor snapshot. */
 	includePerformance?: boolean;
 }

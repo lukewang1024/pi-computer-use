@@ -9,6 +9,7 @@ import { ManagedBrowser } from '../src/managed-browser.ts';
 import { executeLaunchBrowser, shutdownComputerUseSession } from '../src/bridge.ts';
 import { currentPlatformBackend } from '../src/platform/index.ts';
 import { CdpTab } from '../src/cdp.ts';
+import { CdpNavigationFailure, ManagedLaunchNavigationFailure } from '../src/navigation-failure.ts';
 
 const fixture = String.raw`
 const fs = require('node:fs');
@@ -165,6 +166,63 @@ try {
  await access(owner.profileDir);
  await shutdownComputerUseSession(); await absent(owner.profileDir);
  assert.equal(process.env.PI_COMPUTER_USE_CDP_PORT, 'external-browser-port', 'Replacing an owned browser preserves the original external endpoint');
+ const downloadRoot = await mkdtemp(path.join(os.tmpdir(), 'cu-launch-failure-'));
+ const savedDownloadRoot = process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;
+ process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT = downloadRoot;
+ CdpTab.connect = async () => ({ isOpen: true,
+  setDisconnectHandler() {}, setManagedDownloadDirectory: async () => {},
+  navigate: async () => { throw new CdpNavigationFailure(new Error('owned CDP navigation timeout')); },
+  close() { this.isOpen = false; } });
+ const launchWithUrl = () => executeLaunchBrowser('navigation-cleanup-test', { url: 'https://example.test/' }, undefined, undefined, { cwd: process.cwd() });
+ function launchReceipt(error) {
+  for (let item = error, depth = 0; item && depth < 8; item = item.cause, depth++) {
+   if (item instanceof ManagedLaunchNavigationFailure) return item.launchFailure;
+  }
+ }
+ try {
+  await assert.rejects(launchWithUrl(), error => {
+   assert.deepEqual(launchReceipt(error), { version: 1, tool: 'launch_browser', phase: 'navigation',
+    physicalInputDispatched: false, navigationOutcome: 'unknown', ownedBrowserClosed: true,
+    ownedProfileRemoved: true, ownershipReleased: true, retrySafe: false });
+   return true;
+  });
+  await absent(owner.profileDir);
+  assert(owner.child.exitCode !== null || owner.child.signalCode !== null);
+  assert.equal(process.env.PI_COMPUTER_USE_CDP_PORT, 'external-browser-port');
+  const originalLaunchRemoval = fs.promises.rm;
+  fs.promises.rm = async (target, options) => {
+   if (target === owner?.profileDir) throw Object.assign(new Error('owned profile removal denied'), { code: 'EPERM' });
+   return originalLaunchRemoval(target, options);
+  };
+  syncBuiltinESMExports();
+  try {
+   await assert.rejects(launchWithUrl(), error => {
+    assert.equal(launchReceipt(error), undefined, 'Failed profile cleanup never emits a cleanup receipt');
+    return /shutdown is unverified/.test(error.message);
+   });
+   await access(owner.profileDir);
+   assert(owner.child.exitCode !== null || owner.child.signalCode !== null);
+  } finally {
+   fs.promises.rm = originalLaunchRemoval; syncBuiltinESMExports();
+   await shutdownComputerUseSession();
+   await absent(owner.profileDir);
+  }
+  if (process.platform !== 'win32') {
+   blocked = true;
+   await assert.rejects(launchWithUrl(), error => {
+    assert.equal(launchReceipt(error), undefined, 'Unknown shutdown never emits a cleanup receipt');
+    return /shutdown is unverified/.test(error.message);
+   });
+   await access(owner.profileDir);
+   await ensureStopped(owner);
+   await shutdownComputerUseSession();
+   await absent(owner.profileDir);
+  }
+ } finally {
+  if (savedDownloadRoot === undefined) delete process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;
+  else process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT = savedDownloadRoot;
+  await rm(downloadRoot, { recursive: true, force: true });
+ }
 } finally {
  if (owner) await ensureStopped(owner);
  await shutdownComputerUseSession();

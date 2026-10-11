@@ -246,7 +246,7 @@ interface BrowserObservationDetails {
 	queryResult?: ReturnType<typeof queryCachedOutline>;
 	managedDownloadDirectory?: string;
 	managedBrowser?: { pid?: number; profileDirectory: string };
-	diagnostics?: CdpPageSnapshot["diagnostics"];
+	diagnostics?: CdpPageSnapshot["diagnostics"] & { launchTimings?: Record<string, number> };
 	capture?: { stateId: string; width: number; height: number; cssWidth: number; cssHeight: number; pixelScale: number; coordinateSpace: "browser-viewport-screenshot-pixels" };
 	tool: string;
 	kind: "browser_page";
@@ -2704,15 +2704,22 @@ async function waitForCdpPort(port: number, signal?: AbortSignal): Promise<void>
 // Side effects: starts a Pi-managed browser process, replaces any previous managed browser,
 // and sets PI_COMPUTER_USE_CDP_PORT for subsequent CDP context discovery.
 async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
+	const started = performance.now();
+	const launchTimings: Record<string, number> = {};
+	const measure = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
+		const phaseStarted = performance.now();
+		try { return await operation(); }
+		finally { launchTimings[phase] = performance.now() - phaseStarted; }
+	};
 	const browser = getComputerUseConfig().managed_browser;
-	const executable = await managedBrowserExecutable(browser);
-	const port = await freeTcpPort();
+	const executable = await measure("executableResolutionMs", () => managedBrowserExecutable(browser));
+	const port = await measure("portAllocationMs", () => freeTcpPort());
 	const requestedUrl = trimOrUndefined(params.url);
 	if (requestedUrl && !/^https?:\/\//i.test(requestedUrl)) throw new Error("launch_browser.url must be an absolute HTTP(S) URL.");
 	const url = requestedUrl ?? "about:blank";
-	const downloadDirectory = await prepareManagedDownloadDirectory(process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT);
+	const downloadDirectory = await measure("downloadPreparationMs", () => prepareManagedDownloadDirectory(process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT));
 	disconnectCdp();
-	await runtimeState.managedBrowser?.close();
+	await measure("previousBrowserCloseMs", async () => await runtimeState.managedBrowser?.close());
 	runtimeState.managedBrowser = undefined;
 	restoreManagedBrowserPort();
 	const args = [
@@ -2721,14 +2728,14 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		"--no-default-browser-check",
 		downloadDirectory ? "about:blank" : url,
 	];
-	const managedBrowser = await ManagedBrowser.launch(executable, browser, args, signal);
+	const managedBrowser = await measure("spawnMs", () => ManagedBrowser.launch(executable, browser, args, signal));
 	runtimeState.previousCdpPort = process.env.PI_COMPUTER_USE_CDP_PORT;
 	runtimeState.managedBrowser = managedBrowser;
 	runtimeState.managedBrowserCdpPort = String(port);
 	process.env.PI_COMPUTER_USE_CDP_PORT = String(port);
 	try {
-		await waitForBrowserStartup(managedBrowser.child, (startupSignal) => waitForCdpPort(port, startupSignal), signal);
-		const page = (await listCdpPageContexts())[0];
+		await measure("cdpReadyMs", () => waitForBrowserStartup(managedBrowser.child, (startupSignal) => waitForCdpPort(port, startupSignal), signal));
+		const page = (await measure("pageDiscoveryMs", () => listCdpPageContexts()))[0];
 		if (!page) throw new Error("Managed browser launched without a CDP page context.");
 		if (downloadDirectory) {
 			if (!await cdpSetManagedDownloadDirectory(page.contextId, downloadDirectory, () => {
@@ -2743,10 +2750,12 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 			}
 		}
 		const resourceKey = `cdp:${page.targetId}`;
-		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
+		const scheduled = await measure("initialObservationMs", () => resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId)));
 		if (!scheduled.value) throw new Error("Managed browser page could not be observed after launch.");
 		const observation = browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
 		observation.details.managedBrowser = { pid: managedBrowser.child.pid, profileDirectory: managedBrowser.profileDir };
+		launchTimings.totalMs = performance.now() - started;
+		if (observation.details.diagnostics) observation.details.diagnostics.launchTimings = launchTimings;
 		if (downloadDirectory) observation.details.managedDownloadDirectory = downloadDirectory;
 		return observation;
 	} catch (error) {

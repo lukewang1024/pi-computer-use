@@ -1,4 +1,5 @@
 import { prepareManagedDownloadDirectory } from "./browser-downloads.ts";
+import { cachedOutlineCompleteness } from "./outline.ts";
 import { CdpNavigationFailure, ManagedLaunchNavigationFailure } from "./navigation-failure.ts";
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
 import { serializeFocusContext } from "./focus-context.ts";
@@ -263,6 +264,7 @@ interface BrowserObservationDetails {
 }
 
 interface EvaluateBrowserDetails {
+	queryResult?: ReturnType<typeof queryCachedOutline>;
 	diagnostics?: CdpPageSnapshot["diagnostics"] & { evaluationMs?: number };
 	tool: "evaluate_browser";
 	baseStateId: string;
@@ -2808,6 +2810,9 @@ async function performNavigateBrowser(params: NavigateBrowserParams): Promise<Ag
 
 async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<AgentToolResult<EvaluateBrowserDetails>> {
 	if (params.includeOutline !== undefined && typeof params.includeOutline !== "boolean") throw new Error("evaluate_browser.includeOutline must be boolean.");
+	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("evaluate_browser.outlineView must be full or folded.");
+	if (params.includeOutline === false && params.outlineView !== undefined) throw new Error("evaluate_browser.outlineView requires includeOutline.");
+	const query = validateOutlineQuery(params.outlineQuery);
 	const contextId = browserContextForOperation();
 	const expression = typeof params.expression === "string" ? params.expression : "";
 	if (!contextId) throw new Error("evaluate_browser.stateId must belong to a browser observation.");
@@ -2820,6 +2825,7 @@ async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<Ag
 		const evaluationMs = performance.now() - evaluationStarted;
 		if (!result) throw new Error(`Browser context '${contextId}' is no longer available. Observe it again.`);
 		const successor = await refreshBrowserSnapshot(contextId, "evaluate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline });
+		const outline = query || params.outlineView === "folded" ? restoreOutline(successor.details.outline) : undefined;
 		const details: EvaluateBrowserDetails = {
 			diagnostics: successor.details.diagnostics ? { ...successor.details.diagnostics, evaluationMs } : undefined,
 			tool: "evaluate_browser",
@@ -2827,7 +2833,8 @@ async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<Ag
 			stateId: successor.details.stateId,
 			view: successor.details.view,
 			changes: successor.details.changes,
-			outline: params.includeOutline === false ? undefined : successor.details.outline,
+			outline: params.includeOutline === false ? undefined : params.outlineView === "folded" ? serializeFoldedOutline(outline!) : successor.details.outline,
+			...(query ? { queryResult: queryCachedOutline(outline!, query, successor.details.stateId) } : {}),
 			outlineIncluded: params.includeOutline !== false,
 			renderedOutline: successor.details.renderedOutline,
 		};
@@ -2895,7 +2902,8 @@ function queryCachedOutline(outline: Outline, query: OutlineQuery, stateId: stri
   query, matches: ranked.matches.map(serializeOutlineSearchMatch), totalMatches: ranked.totalMatches,
   returned: ranked.matches.length, hasMore: ranked.totalMatches > ranked.matches.length,
   exactMatchesComplete, exactMatchCount: exactMatchesComplete ? exactCount : null,
-  scope: "complete-cached-outline" as const, ocrEscalated: false as const };
+  scope: "complete-cached-outline" as const, ocrEscalated: false as const,
+  ...cachedOutlineCompleteness(outline) };
 }
 
 export const executeObserve = makeToolExecutor("observe_ui", async (params: ObserveParams, signal?: AbortSignal) => {

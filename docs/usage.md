@@ -244,3 +244,11 @@ still required.
 Use `observe_ui({root: exactNativeRoot, mode: "pixels"})` to capture a macOS window without collecting its accessibility tree or running OCR. The helper acknowledges this with `elementCollection: {status: "skipped", reason: "pixel_only_observation"}`. A helper without this acknowledgement cannot establish a pixel-only state. Normal screen capture permissions and exact window identity checks still apply.
 
 The observation contains a nonactionable placeholder and fresh image state. Observe semantic or fused before using element references, querying elements, collecting focus context, or verifying semantic postconditions. Coordinate actions retain the existing foreground, modifier, geometry and stale-state guards; returned dispatch does not verify its effect and must not be replayed. A screenshot alone does not prove successful editing.
+
+Native macOS popup cancellation uses `cancel` with the current exact `AXMenu` root
+reference. The menu must declare `AXCancel`; menu items, buttons, picture-only
+roots and other platforms are rejected. The helper revalidates the same visible
+menu immediately before one AX call, without refinding, raising, Escape, key
+releases or retries. Returned API success is dispatch evidence: verify menu
+closure from a fresh observation before continuing. This does not cancel an
+invisible or unobservable historical menu by PID.

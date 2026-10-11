@@ -95,7 +95,7 @@ export interface UiCondition {
 }
 
 export interface UiAction {
-	action: "selectText" | "invoke" | "commit" | "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
+	action: "selectText" | "invoke" | "commit" | "cancel" | "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
 	ref?: string;
 	x?: number;
 	y?: number;

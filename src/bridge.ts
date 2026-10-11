@@ -2896,7 +2896,15 @@ export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | Termi
 		...(query ? { queryResult: queryCachedOutline(outline, query, "stateId" in result.details ? result.details.stateId : result.details.capture.stateId) } : {}),
 		outline: params.outlineView === "folded" ? serializeFoldedOutline(outline) : result.details.outline } };
 });
-export const executeNavigateBrowser = makeToolExecutor("navigate_browser", performNavigateBrowser);
+export const executeNavigateBrowser = makeToolExecutor("navigate_browser", async (params: NavigateBrowserParams) => {
+	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
+	const result = await performNavigateBrowser(params);
+	if (params.outlineView !== "folded") return result;
+	// The original navigation has already retained its complete successor.
+	// Projection never issues another navigation, snapshot or input.
+	return { ...result, details: { ...result.details,
+		outline: serializeFoldedOutline(restoreOutline(result.details.outline)) } };
+});
 export const executeEvaluateBrowser = makeToolExecutor("evaluate_browser", performEvaluateBrowser);
 export const executeLaunchBrowser = makeToolExecutor("launch_browser", performLaunchBrowser);
 

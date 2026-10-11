@@ -1,6 +1,20 @@
 // Application-menu ownership is distinct from window-descendant ownership.
 // These predicates require freshly read identities; callers must not substitute
 // cached process IDs or use them to authorize keyboard/pointer delivery.
+func nativeReferenceRequiresCachedElement(action: String, popupMenu: Bool, applicationMenu: Bool) -> Bool {
+    return popupMenu || applicationMenu || action == "selectText" || action == "cancel"
+}
+
+func nativeRefindSemanticMatch(observedRole: String, observedIdentifier: String, observedLabel: String,
+                              currentRole: String, currentIdentifier: String, currentLabel: String) -> Bool {
+    guard currentRole == observedRole else { return false }
+    guard !observedIdentifier.isEmpty || !observedLabel.isEmpty else { return false }
+    if !observedIdentifier.isEmpty && currentIdentifier != observedIdentifier { return false }
+    // AX identifiers can name a shared action handler, not a unique control.
+    if !observedLabel.isEmpty && currentLabel != observedLabel { return false }
+    return true
+}
+
 struct AppMenuIdentity {
     var pid: Int32
     var windowId: UInt32

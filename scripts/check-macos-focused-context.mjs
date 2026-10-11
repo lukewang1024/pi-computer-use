@@ -12,9 +12,10 @@ const source=fs.readFileSync(path.join(root,'native/macos/bridge.swift'),'utf8')
 const start=source.indexOf('\tprivate func focusedContext(');
 const end=source.indexOf('\n\tprivate func elapsedMs(',start);
 assert(start>=0&&end>start);
-const method=source.slice(start,end);
+const method=source.slice(start,end).replaceAll('AXUIElementCreateApplication', 'TestAXUIElementCreateApplication');
 const swift=`import Foundation
 import CoreFoundation
+import ApplicationServices
 final class AXUIElement {
  let pid: Int32
  var attributes: [String: AnyObject] = [:]
@@ -24,10 +25,13 @@ final class AXUIElement {
  var copies = 0
  var settableReads = 0
  var delay: TimeInterval = 0
+ var afterCopy: ((String) -> Void)?
  init(_ pid: Int32 = 7) { self.pid = pid }
 }
 enum AXError { case success, failure }
 let kAXFocusedUIElementAttribute = "AXFocusedUIElement"
+let kAXFocusedWindowAttribute = "AXFocusedWindow"
+let kAXSelectedTextRangeAttribute = "AXSelectedTextRange"
 let kAXParentAttribute = "AXParent"
 let kAXRoleAttribute = "AXRole"
 let kAXSubroleAttribute = "AXSubrole"
@@ -37,7 +41,7 @@ let kAXEnabledAttribute = "AXEnabled"
 let kAXValueAttribute = "AXValue"
 var application = AXUIElement()
 var valueReads = 0
-func AXUIElementCreateApplication(_ pid: Int32) -> AXUIElement { application }
+func TestAXUIElementCreateApplication(_ pid: Int32) -> AXUIElement { application }
 func AXUIElementSetMessagingTimeout(_ element: AXUIElement, _ timeout: Float) -> AXError {
  precondition(timeout == 0.05)
  return element.timeoutRejected ? .failure : .success
@@ -48,6 +52,7 @@ func AXUIElementCopyAttributeValue(_ element: AXUIElement, _ attribute: CFString
  if name == "AXValue" { valueReads += 1 }
  if element.delay > 0 { Thread.sleep(forTimeInterval: element.delay) }
  output = element.attributes[name]
+ element.afterCopy?(name)
  return output == nil ? .failure : .success
 }
 func AXUIElementIsAttributeSettable(_ element: AXUIElement, _ attribute: CFString, _ output: inout DarwinBoolean) -> AXError {
@@ -82,13 +87,33 @@ ${method}
   precondition(result["status"] as? String == "matched")
   precondition(result["wireRef"] as? String == "body")
   precondition(result["isEnabled"] as? Bool == false)
-  precondition(editor.copies == 0 && editor.settableReads == 0,"Reuse observed metadata without extra AX reads")
+  precondition(editor.copies == 1 && editor.settableReads == 0,"Only optional selection range adds an editor read")
+  var selected = CFRange(location:2,length:4)
+  editor.attributes["AXSelectedTextRange"] = AXValueCreate(.cfRange,&selected)!
+  application.attributes["AXFocusedWindow"] = window
+  result = focusedContext(pid:7,window:window,outline:root)
+  precondition(result["selectionRange"] as? [String:Int] == ["location":2,"length":4])
+  editor.afterCopy = { attribute in
+   if attribute == "AXSelectedTextRange" { application.attributes["AXFocusedUIElement"] = other }
+  }
+  result = focusedContext(pid:7,window:window,outline:root)
+  precondition(result["selectionRange"] == nil,"Focus drift during range read omits stale range")
+  editor.afterCopy = nil
+  application.attributes["AXFocusedUIElement"] = editor
+  application.attributes["AXFocusedWindow"] = other
+  result = focusedContext(pid:7,window:window,outline:root)
+  precondition(result["selectionRange"] == nil,"Wrong focused window omits range")
+  application.attributes["AXFocusedWindow"] = window
+  selected = CFRange(location:100000,length:1)
+  editor.attributes["AXSelectedTextRange"] = AXValueCreate(.cfRange,&selected)!
+  result = focusedContext(pid:7,window:window,outline:root)
+  precondition(result["selectionRange"] == nil,"Out-of-budget range omitted")
   body.isEnabled = nil
   result = focusedContext(pid:7,window:window,outline:root)
   precondition(result["isEnabled"] == nil,"Missing enabled stays unknown")
   body.role = "AXSecureTextField"
   result = focusedContext(pid:7,window:window,outline:root)
-  precondition(result["isSecure"] as? Bool == true && result["title"] == nil && result["description"] == nil)
+  precondition(result["isSecure"] as? Bool == true && result["title"] == nil && result["description"] == nil && result["selectionRange"] == nil)
   root.children = [body, LookNode(editor,"duplicate")]
   result = focusedContext(pid:7,window:window,outline:root)
   precondition(result["status"] as? String == "ambiguous" && result["wireRef"] == nil)
@@ -124,7 +149,7 @@ ${method}
  }
 }
 Harness().check()
-print("PASS production focused-context method: exact scope, disabled/unknown, duplicate refs, secure redaction, bounded cyclic parent, rejected timeout, exhausted deadline and no AXValue reads")
+print("PASS production focused-context method: exact scope, selection focus drift, disabled/unknown, duplicate refs, secure redaction, bounded cyclic parent, rejected timeout, exhausted deadline and no AXValue reads")
 `;
 if(process.platform!=='darwin') console.log('SKIP compiled Mac focused-context tests: requires Swift on macOS');
 else {

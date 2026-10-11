@@ -41,6 +41,12 @@ const uiAction = Type.Union([
 	Type.Object({ action: Type.Literal("moveMouse"), ...point }),
 ]);
 
+const outlineQuerySchema = Type.Optional(Type.Object({
+ text: Type.Optional(Type.String({ maxLength: 256 })),
+ role: Type.Optional(Type.String({ maxLength: 128 })),
+ capability: Type.Optional(Type.String({ maxLength: 128 })),
+}, { additionalProperties: false, description: "Return at most 12 ranked matches from the complete saved successor. Requires a predicate; cached-only, no OCR escalation or additional observation/input. Check queryResult.hasMore and exact-match uniqueness before acting." }));
+
 const conditionProperties = {
 	ref: Type.Optional(Type.String({ description: "Specific @e ref to test", maxLength: 128 })),
 	scopeRef: Type.Optional(Type.String({ description: "Restrict matching to this @e subtree", maxLength: 128 })),
@@ -98,6 +104,7 @@ const observeTool = defineTool({
 		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused"), Type.Literal("pixels"), Type.Literal("metrics")], { description: "Observation mode, default fused; metrics requires an exact browser_page root" })),
 		focusContext: Type.Optional(Type.Boolean({ description: "macOS native roots only: bounded read-only diagnosis of the application's actual focused element. Defaults false; does not authorize input or create refs for unobserved elements." })),
 		outlineView: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("folded")], { description: "Structured outline response only, default full. Folded retains cached state and marks omitted descendants; unavailable with pixels or metrics." })),
+		outlineQuery: outlineQuerySchema,
 	}),
 	execute: executeObserve,
 });
@@ -144,7 +151,7 @@ const actTool = defineTool({
 		"An unknown outcome is not permission to resend input. Inspect the returned state or an independent postcondition before the next action.",
 		"For a split button, press may run the default action. Ground a separate dropdown click from the current image and parent/child rectangles.",
 	],
-	parameters: Type.Object({ stateId, outlineView: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("folded")], { description: "Response outline projection; full is the default. Folded bounds the returned structured tree while preserving the complete successor for search_ui and expand_ui. Input delivery, saved state and stale-reference guards are unchanged." })), observationMode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("fused")], { description: "Desktop successor observation: semantic skips the post-action screenshot and returns current UI refs; fused (default) captures pixels. Image-coordinate actions after a semantic successor require a fresh image-bearing observation. This does not change input delivery or focus requirements." })), expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
+	parameters: Type.Object({ stateId, outlineQuery: outlineQuerySchema, outlineView: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("folded")], { description: "Response outline projection; full is the default. Folded bounds the returned structured tree while preserving the complete successor for search_ui and expand_ui. Input delivery, saved state and stale-reference guards are unchanged." })), observationMode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("fused")], { description: "Desktop successor observation: semantic skips the post-action screenshot and returns current UI refs; fused (default) captures pixels. Image-coordinate actions after a semantic successor require a fresh image-bearing observation. This does not change input delivery or focus requirements." })), expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
 });
 

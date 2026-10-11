@@ -109,6 +109,9 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
 `act_ui` accepts optional `outlineView: "folded"` to bound its returned structured UI tree. The complete successor remains available to state-scoped `search_ui` and `expand_ui`; this does not change dispatch, postconditions or stale-reference checks. The default remains the full tree.
 
+`observe_ui` and `act_ui` also accept an optional `outlineQuery: {text, role, capability}` with at least one nonempty predicate. The response's `queryResult` contains at most 12 ranked matches from the complete saved successor, before folding, with its exact stateId. This cached-only query adds no capture, input or OCR escalation. Check `exactMatchesComplete` and `exactMatchCount === 1` before treating a text query as unique; `exactMatchCount` is null when the exact matches exceed the returned budget. `hasMore` can still be true for lower-ranked matches. Missing query results on terminal failures authorize no input, and all normal stale-reference and foreground guards remain in effect. Pixel-only and metrics-only observations reject this option.
+
+
 The architecture is centered on immutable, state-scoped observations. Desktop surfaces and CDP pages form one multi-root forest; progressive outline queries remain cached, while live work is ordered per physical resource so independent roots can run in parallel. `act_ui` accepts one or more intent steps, preserves focus across dependent input, verifies delivery, recovers safely, stores one complete successor state, and returns a compact diff when identity confidence allows. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
 
 ## License

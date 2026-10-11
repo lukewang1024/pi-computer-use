@@ -105,6 +105,7 @@ const observeTool = defineTool({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
 		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused"), Type.Literal("pixels"), Type.Literal("metrics")], { description: "Observation mode, default fused; metrics requires an exact browser_page root" })),
 		focusContext: Type.Optional(Type.Boolean({ description: "macOS native roots only: bounded read-only diagnosis of the application's actual focused element. Defaults false; does not authorize input or create refs for unobserved elements." })),
+		applicationMenu: Type.Optional(Type.Boolean({ description: "Exact macOS native window in semantic mode only: observe its current foreground application's menu bar. Menu refs require explicit invoke; no keyboard/pointer fallback." })),
 		outlineView: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("folded")], { description: "Structured outline response only, default full. Folded retains cached state and marks omitted descendants; unavailable with pixels or metrics." })),
 		outlineQuery: outlineQuerySchema,
 	}),

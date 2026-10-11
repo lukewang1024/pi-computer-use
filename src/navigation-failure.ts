@@ -14,3 +14,17 @@ export class CdpNavigationFailure extends Error {
 		this.name = "CdpNavigationFailure";
 	}
 }
+
+/** Only the launch catch may emit this after its owned browser has closed. */
+export class ManagedLaunchNavigationFailure extends Error {
+	readonly launchFailure = Object.freeze({
+		version: 1, tool: "launch_browser", phase: "navigation",
+		physicalInputDispatched: false, navigationOutcome: "unknown",
+		ownedBrowserClosed: true, ownedProfileRemoved: true,
+		ownershipReleased: true, retrySafe: false,
+	} as const);
+	constructor(cause: CdpNavigationFailure) {
+		super(cause.message, { cause });
+		this.name = "ManagedLaunchNavigationFailure";
+	}
+}

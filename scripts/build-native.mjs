@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { windowsArchitecture, verifyWindowsPe } from "./windows-architecture.mjs";
+import { resolveHelperSourcePaths } from "./setup-helper.mjs";
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -8,15 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const macosSourcePaths = [
-	"agent_cursor.swift",
-	"agent_cursor_motion.swift",
-	"foreground_gate.swift",
-	"text_input_source.swift",
-	"optional_image_capture.swift", "accessibility_value.swift", "window_document.swift", "bounded_read.swift", "text_selection.swift", "permission_probe.swift",
-	"outline_walk.swift",
-	"bridge.swift",
-].map((file) => path.join(rootDir, "native", "macos", file));
+const macosSourcePaths = resolveHelperSourcePaths(rootDir);
 const windowsCrateDir = path.join(rootDir, "native", "windows", "bridge-rs");
 const linuxCrateDir = path.join(rootDir, "native", "linux", "bridge-rs");
 const linuxTargets = { x64: "x86_64-unknown-linux-gnu", arm64: "aarch64-unknown-linux-gnu" };

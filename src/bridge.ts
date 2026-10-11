@@ -1081,11 +1081,12 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean; includeElements?: boolean; focusContext?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean; includeElements?: boolean; focusContext?: boolean; applicationMenu?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
 	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find_roots and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
 		...(options.focusContext === true ? { focusContext: true } : {}),
+		...(options.applicationMenu === true ? { applicationMenu: true } : {}),
 		baseLookId: options.baseLookId,
 		readText: options.readText,
 		scopeRef: options.scopeRef,
@@ -1109,13 +1110,14 @@ function isPixelOnlyLook(look: LookResponse): boolean {
 	return look.elementCollection?.reason === "pixel_only_observation" || (look.uiaDiagnostics?.status === "skipped" && look.uiaDiagnostics?.reason === "pixel_only_observation");
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean, focusContext = false): Promise<CaptureResult> {
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean, focusContext = false, applicationMenu = false): Promise<CaptureResult> {
 	const state = operationState();
 	const baseOutline = state.currentOutline;
 	const baseTarget = state.currentTarget;
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements, focusContext }, signal);
+	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements, focusContext, applicationMenu }, signal);
+	if (applicationMenu && look.applicationMenuIncluded !== true) throw new Error("Native helper did not verify application menu observation.");
 	if (includeElements === false && (!isPixelOnlyLook(look) || !look.image)) {
 		throw new Error("Native helper did not confirm pixel-only capture; no state was adopted.");
 	}
@@ -1960,6 +1962,8 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const requestedRoot = typeof params.root === "string" ? params.root : undefined;
 	if (requestedRoot && !/^@r\d+$/.test(requestedRoot)) throw new Error("observe_ui.root must be an exact @r ref issued by find_roots.");
 	const browserContextId = requestedRoot ? runtimeState.browserContextByRoot.get(requestedRoot) : undefined;
+	if (params.applicationMenu !== undefined && typeof params.applicationMenu !== "boolean") throw new Error("applicationMenu must be a boolean.");
+	if (params.applicationMenu === true && (!requestedRoot || currentPlatformBackend.name !== "macos" || isBrowserContextId(browserContextId) || params.mode !== "semantic")) throw new Error("applicationMenu requires an exact macOS native window in semantic mode.");
 	if (params.focusContext === true && (currentPlatformBackend.name !== "macos" || isBrowserContextId(browserContextId))) throw new Error("focusContext requires a macOS native root.");
 	if (params.mode === "metrics") {
 		if (!requestedRoot || !isBrowserContextId(browserContextId)) throw new Error("mode=metrics requires an exact browser_page @r root.");
@@ -2037,7 +2041,7 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		}
 		// Publish real semantic evidence first; optional image failure cannot erase it.
 		const semanticStarted = performance.now();
-		const semantic = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, requestedTarget, false, false, undefined, params.focusContext === true);
+		const semantic = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, requestedTarget, false, false, undefined, params.focusContext === true, params.applicationMenu === true);
 		semanticObservationMs = performance.now() - semanticStarted;
 		if (imageMode === "never") return semantic;
 		const imageStarted = performance.now();

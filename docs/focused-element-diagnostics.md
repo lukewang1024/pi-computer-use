@@ -23,8 +23,21 @@ between synchronous AX calls, each configured for 50 ms. No new work starts
 after the budget expires; the final in-flight call may overrun the elapsed
 budget. A rejected timeout configuration prevents that attribute read.
 
-For matched elements, metadata comes from the current outline, avoiding more
-AX attribute queries. For unobserved descendants, only bounded role, subrole,
+For matched elements, ordinary metadata comes from the current outline. A
+nonsecure text input can additionally expose `selectionRange: {location, length}`
+from `AXSelectedTextRange`. Both offsets count UTF-16 code units; zero length
+denotes a caret. Nonnegative offsets whose sum is at most 100,000 are accepted.
+The application must still report the same focused element and exact focused
+window after the range read. Missing, malformed, out-of-bounds or changed-focus
+results omit the range. Serialization retains it only with a unique existing
+ref in the current outline. These extra reads share the same elapsed budget.
+
+The range contains no selected text and does not establish that an intended
+selection was made. Verify it against independently observed document contents
+and the intended range, and retain normal action guards. In particular, a range
+on a disabled element does not make that element eligible for input.
+
+For unobserved descendants, only bounded role, subrole,
 labels, enabled state and declared setter capability are read. Missing enabled
 state remains unknown. `AXValue` is never read for this diagnostic. Secure or
 unknown-security elements omit labels. Metadata and labels are bounded; no

@@ -182,7 +182,7 @@ const launchBrowserTool = defineTool({
 	description: "Launch the configured Pi-managed CDP browser and return an observed browser-page state.",
 	promptSnippet: "Use for browser work that needs a managed CDP context.",
 	promptGuidelines: ["Prefer curl through bash when the page is directly fetchable."],
-	parameters: Type.Object({ url: Type.Optional(Type.String({ maxLength: 8192 })) }),
+	parameters: Type.Object({ url: Type.Optional(Type.String({ maxLength: 8192 })), outlineView: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("folded")], { description: "Response outline projection only, default full. Folded bounds the returned initial tree while retaining the complete launch state for search_ui and expand_ui. Browser startup, navigation, cleanup and stale-reference checks are unchanged." })) }),
 	execute: executeLaunchBrowser,
 });
 

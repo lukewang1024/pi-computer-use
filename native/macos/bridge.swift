@@ -2220,8 +2220,8 @@ final class Bridge {
 				stringAttribute($0, attribute: kAXRoleAttribute as CFString) != nil && frameForElement($0) != nil
 			} ?? false
 			let resolved: AXUIElement?
-			if action == "selectText" && !cachedIsLive {
-				throw BridgeFailure(message: "Native selection reference is stale; no selection was set", code: "stale_ref")
+			if (action == "selectText" || action == "cancel") && !cachedIsLive {
+				throw BridgeFailure(message: "Native selection or cancellation reference is stale; no input was sent", code: "stale_ref")
 			}
 			if cachedIsLive {
 				resolved = cached
@@ -2446,6 +2446,28 @@ final class Bridge {
 					"valueUnchanged": valueMatches, "editorFocusMatches": focusMatches, "identityMatches": identityMatches,
 					"selectionRange": ["location": range.location, "length": range.length],
 					"observedRange": ["location": observed.location, "length": observed.length]]])
+		}
+
+		if action == "cancel" {
+			var elementPID: pid_t = 0
+			guard let element, target["ref"] is String, record.windowId > 0,
+				let menuRoot = record.menuRoot, sameElement(element, menuRoot),
+				stringAttribute(element, attribute: kAXRoleAttribute as CFString) == "AXMenu",
+				AXUIElementGetPid(element, &elementPID) == .success, elementPID == pid
+			else { throw BridgeFailure(message: "Cancellation requires the exact observed popup menu root", code: "stale_ref") }
+			guard boolAttribute(element, attribute: kAXEnabledAttribute as CFString) != false,
+				actionNames(element).contains(kAXCancelAction as String)
+			else { throw BridgeFailure(message: "Popup menu does not declare an enabled AXCancel action; no input was sent", code: "unsupported") }
+			// Cancel this exact live menu once. Never refind, raise another window,
+			// send Escape or key releases, or repeat a timed-out cancellation.
+			try validateObservedMenu(element)
+			let status = AXUIElementPerformAction(element, kAXCancelAction as CFString)
+			performed["delivery"] = "ax"
+			performed["nativeAction"] = "AXCancel"
+			performed["apiStatus"] = status.rawValue
+			return finish(["outcome": "unknown", "performed": performed,
+				"evidence": ["nativeCancellationAttempted": true, "actionReturned": true,
+					"apiSucceeded": status == .success, "inputRetryProhibited": true]])
 		}
 
 		if action == "commit" || action == "invoke" {

@@ -1529,6 +1529,8 @@ async function windowDetailsForFind(query: FindParams, config: ReturnType<typeof
 async function performListWindows(params: FindParams, signal?: AbortSignal): Promise<AgentToolResult<ListWindowsDetails>> {
 	const rawParams = params ?? {};
 	const offset = rawParams.offset ?? 0;
+	const pageSize = rawParams.pageSize ?? 12;
+	if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error("find_roots.pageSize must be an integer from 1 to 100.");
 	if (!Number.isInteger(offset) || offset < 0 || offset > 10000) throw new Error("find_roots.offset must be an integer from 0 to 10000.");
 	if (rawParams.expectedRootSetDigest !== undefined && !/^[a-f0-9]{64}$/.test(rawParams.expectedRootSetDigest)) throw new Error("find_roots.expectedRootSetDigest must be a 64-character lowercase SHA256 digest.");
 	const subrole = trimOrUndefined(rawParams.subrole);
@@ -1536,6 +1538,7 @@ async function performListWindows(params: FindParams, signal?: AbortSignal): Pro
 	const query: FindParams = {
 		subrole,
 		offset: rawParams.offset,
+		pageSize: rawParams.pageSize,
 		expectedRootSetDigest: rawParams.expectedRootSetDigest,
 		text: trimOrUndefined(rawParams.text),
 		app: trimOrUndefined(rawParams.app),
@@ -1574,7 +1577,7 @@ async function performListWindows(params: FindParams, signal?: AbortSignal): Pro
 	const rootSetDigest = createHash("sha256").update(JSON.stringify(ranked.map(({ root }) => [root.pid, root.windowId ?? null, root.windowId ? null : root.nativeWindowRef ?? root.windowRef, root.kind, root.subrole ?? null, root.url ?? null]))).digest("hex");
 	if (query.expectedRootSetDigest && query.expectedRootSetDigest !== rootSetDigest) throw Object.assign(new Error("Window list changed; restart find_roots at offset 0 before combining pages."), { code: "root_set_changed" });
 	const totalMatches = ranked.length;
-	const windows = ranked.slice(offset, offset + 12).map((entry) => entry.root);
+	const windows = ranked.slice(offset, offset + pageSize).map((entry) => entry.root);
 	const hasMore = offset + windows.length < totalMatches;
 	const nextOffset = hasMore ? offset + windows.length : undefined;
 	const details: ListWindowsDetails = { tool: "find_roots", query, offset, nextOffset, rootSetDigest, windows, totalMatches, returned: windows.length, hasMore, config };

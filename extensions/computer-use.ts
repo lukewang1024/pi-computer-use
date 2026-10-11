@@ -67,6 +67,7 @@ const findTool = defineTool({
 		text: Type.Optional(Type.String({ description: "Ranked app or title text", maxLength: 256 })),
 		subrole: Type.Optional(Type.String({ description: "Exact platform subrole or Windows window class", minLength: 1, maxLength: 256 })),
 		offset: Type.Optional(Type.Integer({ description: "Next page offset; roots are re-enumerated live, not a frozen snapshot", minimum: 0, maximum: 10000 })),
+		pageSize: Type.Optional(Type.Integer({ description: "Maximum roots per page; defaults to 12. Larger bounded pages reduce complete-inventory round trips", minimum: 1, maximum: 100 })),
 		expectedRootSetDigest: Type.Optional(Type.String({ description: "Prior page rootSetDigest; reject changed window lists instead of mixing pages", pattern: "^[a-f0-9]{64}$" })),
 		app: Type.Optional(Type.String({ description: "Exact normalized app name", maxLength: 256 })),
 		bundleId: Type.Optional(Type.String({ description: "Exact bundle id" })),

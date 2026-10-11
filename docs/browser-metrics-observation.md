@@ -34,3 +34,24 @@ general `evaluate_browser` tool. That general tool still accepts arbitrary
 JavaScript and keeps its existing mutation classification and uncertainty
 guards. Metrics-only observation is a fixed read, not a way to grant arbitrary
 evaluation read-only authority.
+
+## Measurement conditions
+
+SDK98 includes `measurementConditions` in the same fixed collector and compact
+summary. It records bounded browser-reported user agent (512 characters), language
+(64), layout viewport width/height in CSS pixels, device pixel ratio, visual
+viewport width/height/scale, and document visibility. Missing or invalid values are
+explicitly null. It requires no additional CDP command, screenshot, navigation or
+input. These values do not establish hardware, OS, network, cache or proxy state.
+
+The collector compares conditions before and after its existing asynchronous
+wait. `stableDuringCollection=false` and `changedFields` identify observed drift;
+the existing navigation result remains available and is never replayed. Stable
+conditions do not prove complete metadata or continuous stability between reads.
+Performance comparisons must additionally require complete visible-page conditions,
+matching environments, comparable transfer groups and caller-declared experimental
+controls. Reported zero transfer bytes alone do not prove a cache hit. Unknown
+conditions from older SDKs remain unavailable, never an invented matching group.
+
+Viewport units and pixel-ratio semantics follow [Window.innerWidth](https://developer.mozilla.org/en-US/docs/Web/API/Window/innerWidth)
+and [Window.devicePixelRatio](https://developer.mozilla.org/en-US/docs/Web/API/Window/devicePixelRatio).

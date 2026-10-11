@@ -61,6 +61,7 @@ export interface ObserveParams extends ObserveTargetParams {
 	outlineQuery?: OutlineQuery;
 	/** Opt-in macOS focused-element diagnosis; never grants input authority. */
 	focusContext?: boolean;
+	applicationMenu?: boolean;
 	/** Internal capture override; not part of the model-facing schema. */
 	readText?: "auto" | "always" | "never";
 }

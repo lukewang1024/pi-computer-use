@@ -6,6 +6,7 @@ import path from "node:path";
 import { noteAfterAct, noteFromLook } from "../src/note.ts";
 import { countOutlineNodes, foldToBudget, graftScopedOutline, nodeByRef, parseLookResponse } from "../src/outline.ts";
 import { shouldPreferForegroundModalWindow } from "../src/root-selection.ts";
+import { helperSourceRelativePaths } from "./setup-helper.mjs";
 
 const root = path.resolve(new URL("..", import.meta.url).pathname);
 const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
@@ -296,13 +297,7 @@ checkMacos("INV-8 swift typecheck", () => {
 		"-framework", "Foundation",
 		"-framework", "SwiftUI",
 		"-typecheck",
-		"native/macos/agent_cursor.swift",
-		"native/macos/agent_cursor_motion.swift",
-		"native/macos/foreground_gate.swift",
-		"native/macos/text_input_source.swift",
-		"native/macos/optional_image_capture.swift", "native/macos/accessibility_value.swift", "native/macos/window_document.swift", "native/macos/bounded_read.swift", "native/macos/text_selection.swift", "native/macos/permission_probe.swift",
-		"native/macos/outline_walk.swift",
-		"native/macos/bridge.swift",
+		...helperSourceRelativePaths,
 	], { cwd: root, stdio: "pipe" });
 });
 

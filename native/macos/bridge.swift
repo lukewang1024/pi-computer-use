@@ -136,6 +136,8 @@ private struct LookRecord {
 	let imageHeight: Int
 	let hasImage: Bool
 	var menuRoot: AXUIElement? = nil
+	var appMenuBarRoot: AXUIElement? = nil
+	var appMenuElementRefs: Set<String> = []
 }
 
 private struct PhysicalInputTarget {
@@ -1475,6 +1477,7 @@ final class Bridge {
 	}
 
 	private func look(_ request: [String: Any]) throws -> [String: Any] {
+		let includeAppMenu = boolArg(request, "applicationMenu") == true
 		let windowId = optionalIntArg(request, "windowId").map { UInt32($0) }
 		let windowRef = optionalStringArg(request, "windowRef")
 		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
@@ -1535,6 +1538,22 @@ final class Bridge {
 		guard let window = windowElement(pid: pid, windowId: windowId, windowRef: windowRef) else {
 			throw BridgeFailure(message: "Root is not available through Accessibility", code: "root_not_found")
 		}
+		var observedAppMenu: AXUIElement?
+		if includeAppMenu {
+			guard !includeImage, readText == "never", includeElements,
+				windowRef != nil, let windowId, windowId > 0,
+				stringAttribute(window, attribute: kAXRoleAttribute as CFString) == "AXWindow",
+				optionalStringArg(request, "scopeRef") == nil, baseLookId == nil else {
+				throw BridgeFailure(message: "Application menu requires an exact semantic native window observation", code: "invalid_args")
+			}
+			let app = AXUIElementCreateApplication(pid)
+			AXUIElementSetMessagingTimeout(app, 0.1)
+			guard let menuBar = copyAttribute(app, attribute: kAXMenuBarAttribute as CFString).flatMap(asAXElement),
+				appMenuIdentityRefusal(applicationMenuIdentity(pid: pid, windowId: windowId, menuBar: menuBar)) == nil else {
+				throw BridgeFailure(message: "Application menu ownership or exact foreground window is unverified", code: "stale_ref")
+			}
+			observedAppMenu = menuBar
+		}
 		let rootElement: AXUIElement
 		if let scopeRef = optionalStringArg(request, "scopeRef") {
 			guard let scoped = refStore.element(for: scopeRef), isElement(scoped, descendantOf: window) else {
@@ -1581,6 +1600,30 @@ final class Bridge {
 			outline = LookNode(element: nil, ref: "pixels:" + UUID().uuidString, role: "AXWindow", subrole: "", identifier: "", title: "", description: "", value: "", actions: [], canPress: false, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, rect: CGRect(x: 0, y: 0, width: CGFloat(imageWidth), height: CGFloat(imageHeight)), pictureOnly: true)
 			outline.truncated = true
 		}
+		var observedAppMenuRefs: Set<String> = []
+		if let menuBar = observedAppMenu {
+			AXUIElementSetMessagingTimeout(menuBar, 0.05)
+			let deadline = ProcessInfo.processInfo.systemUptime + 0.75
+			let menuNode = lookNode(element: menuBar, transform: transform, offscreen: false)
+			observedAppMenuRefs.insert(menuNode.ref)
+			let children = axElementArray(menuBar, attribute: kAXChildrenAttribute as CFString)
+			for child in children.prefix(64) {
+				guard ProcessInfo.processInfo.systemUptime < deadline else { menuNode.truncated = true; break }
+				AXUIElementSetMessagingTimeout(child, 0.05)
+				guard pidForElement(child) == pid, isElement(child, descendantOf: menuBar) else {
+					throw BridgeFailure(message: "Application menu contains an unverified owner", code: "stale_ref")
+				}
+				// Only observed top-level items; hidden submenu descendants are not refs.
+				let childNode = lookNode(element: child, transform: transform, offscreen: false)
+				observedAppMenuRefs.insert(childNode.ref)
+				menuNode.children.append(childNode)
+			}
+			if children.count > 64 { menuNode.truncated = true }
+			guard let windowId, appMenuIdentityRefusal(applicationMenuIdentity(pid: pid, windowId: windowId, menuBar: menuBar)) == nil else {
+				throw BridgeFailure(message: "Application menu ownership changed during observation", code: "stale_ref")
+			}
+			outline.children.append(menuNode)
+		}
 		let describeMs = elapsedMs(describeStart)
 
 		var readTextMs = 0
@@ -1618,7 +1661,9 @@ final class Bridge {
 			imageWidth: baseRecord?.imageWidth ?? imageWidth,
 			imageHeight: baseRecord?.imageHeight ?? imageHeight,
 			hasImage: imageFailure == nil ? (baseRecord?.hasImage ?? (capture != nil)) : false,
-			menuRoot: stringAttribute(window, attribute: kAXRoleAttribute as CFString) == "AXMenu" ? window : nil
+			menuRoot: stringAttribute(window, attribute: kAXRoleAttribute as CFString) == "AXMenu" ? window : nil,
+			appMenuBarRoot: observedAppMenu,
+			appMenuElementRefs: observedAppMenuRefs
 		))
 		let scale = (capture?.frame.width ?? rootFrame.width) > 0 ? Double(imageWidth) / (capture?.frame.width ?? rootFrame.width) : displayScaleFactor(for: rootFrame)
 		let pairing = pairingForWindow(window, pid: pid)
@@ -1652,10 +1697,25 @@ final class Bridge {
 		if !includeElements { response["elementCollection"] = ["status": "skipped", "reason": "pixel_only_observation"] }
 		if let imagePayload { response["image"] = imagePayload }
 		if let ocrDiagnostics { response["ocrDiagnostics"] = ocrDiagnostics }
+		if includeAppMenu { response["applicationMenuIncluded"] = true }
 		if boolArg(request, "focusContext") == true {
 			response["focusContext"] = focusedContext(pid: pid, window: window, outline: outline)
 		}
 		return response
+	}
+
+	private func applicationMenuIdentity(pid: Int32, windowId: UInt32, menuBar: AXUIElement) -> AppMenuIdentity {
+		let app = AXUIElementCreateApplication(pid)
+		AXUIElementSetMessagingTimeout(app, 0.1)
+		let currentBar = copyAttribute(app, attribute: kAXMenuBarAttribute as CFString).flatMap(asAXElement)
+		let focused = focusedWindowIdentity(pid: pid)
+		let frontmost = currentForegroundIdentity()
+		return AppMenuIdentity(pid: pid, windowId: windowId,
+			menuBarRole: stringAttribute(menuBar, attribute: kAXRoleAttribute as CFString) ?? "",
+			menuBarOwnerPid: pidForElement(menuBar), windowOwnerPid: pidForWindowId(windowId),
+			frontmostPid: frontmost.pid, focusedWindowId: focused?.windowId,
+			frontmostWindowId: frontmost.windowId,
+			sameObservedMenuBar: currentBar.map { sameElement($0, menuBar) } ?? false)
 	}
 
 	// Optional synchronous read: no capture, focus mutation, or ref allocation.
@@ -2192,6 +2252,7 @@ final class Bridge {
 		defer { if holdsPhysicalInput { physicalInputLock.unlock() } }
 		var performed: [String: Any] = ["delivery": delivery]
 		var element: AXUIElement?
+		var isApplicationMenuElement = false
 		var rawPoint: CGPoint?
 		var preflightCapsUnknown = false
 		let rootPreparationStarted = ProcessInfo.processInfo.systemUptime
@@ -2220,8 +2281,8 @@ final class Bridge {
 				stringAttribute($0, attribute: kAXRoleAttribute as CFString) != nil && frameForElement($0) != nil
 			} ?? false
 			let resolved: AXUIElement?
-			if (action == "selectText" || action == "cancel") && !cachedIsLive {
-				throw BridgeFailure(message: "Native selection or cancellation reference is stale; no input was sent", code: "stale_ref")
+			if (action == "selectText" || action == "cancel" || record.appMenuBarRoot != nil) && !cachedIsLive {
+				throw BridgeFailure(message: "Native selection, cancellation or application-menu reference is stale; no input was sent", code: "stale_ref")
 			}
 			if cachedIsLive {
 				resolved = cached
@@ -2235,6 +2296,14 @@ final class Bridge {
 			try validateObservedMenu(stored)
 			if refound { performed["refound"] = true }
 			element = stored
+			if record.appMenuBarRoot != nil {
+				// Bind classification to the observed refs. A reparented menu item
+				// must never become eligible for physical fallback.
+				isApplicationMenuElement = record.appMenuElementRefs.contains(ref)
+				if isApplicationMenuElement && action != "invoke" {
+					throw BridgeFailure(message: "Application menu refs support only explicit AX Invoke; no fallback input was sent", code: "unsupported")
+				}
+			}
 			beforeValue = valueAttribute(stored)
 			beforeSelected = stringAttribute(stored, attribute: kAXSelectedTextAttribute as CFString)
 		} else if let xNumber = target["x"] as? NSNumber, let yNumber = target["y"] as? NSNumber {
@@ -2477,8 +2546,17 @@ final class Bridge {
 				AXUIElementGetPid(element, &elementPID) == .success, elementPID == pid, record.windowId > 0,
 				!hasAncestorRole(element, role: "AXWebArea"),
 				let boundWindow = windowElement(pid: pid, windowId: record.windowId),
-				isElement(element, descendantOf: boundWindow)
+				(isElement(element, descendantOf: boundWindow) || isApplicationMenuElement)
 			else { throw BridgeFailure(message: "Native action requires a current native element in the observed window", code: "stale_ref") }
+			if isApplicationMenuElement {
+				guard action == "invoke", let menuBar = record.appMenuBarRoot,
+					appMenuInvocationRefusal(applicationMenuIdentity(pid: pid, windowId: record.windowId, menuBar: menuBar),
+						elementOwnerPid: pidForElement(element), descendantOfObservedMenuBar: isElement(element, descendantOf: menuBar),
+						enabled: boolAttribute(element, attribute: kAXEnabledAttribute as CFString),
+						declaredActions: actionNames(element)) == nil else {
+					throw BridgeFailure(message: "Application menu identity or enabled AXPress is unverified; no input was sent", code: "stale_ref")
+				}
+			}
 			guard boolAttribute(element, attribute: kAXEnabledAttribute as CFString) != false else {
 				throw BridgeFailure(message: "Target control is disabled; no input was sent", code: "unsupported")
 			}

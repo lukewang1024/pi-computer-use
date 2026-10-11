@@ -76,6 +76,7 @@ export interface LookWindow {
 }
 
 export interface LookResponse {
+	applicationMenuIncluded?: boolean;
 	focusContext?: FocusContext;
 	lookId: string;
 	capturedAt: number;
@@ -238,6 +239,7 @@ export function parseLookResponse(raw: unknown): LookResponse {
 	const readText = isRecord(record.readText) ? record.readText : undefined;
 	const requestedReadText = readText?.requested === "auto" || readText?.requested === "always" || readText?.requested === "never" ? readText.requested : undefined;
 	const look: LookResponse = {
+		applicationMenuIncluded: record.applicationMenuIncluded === true ? true : undefined,
 		focusContext: parseFocusContext(record.focusContext),
 		lookId: toString(record.lookId),
 		capturedAt: toNumber(record.capturedAt, Date.now() / 1000),

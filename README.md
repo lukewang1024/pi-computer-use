@@ -190,6 +190,14 @@ an action's effect. Input validation, dispatch policy and retry limits are uncha
 
 ### Navigation performance sampling
 
+`navigate_browser` accepts optional `outlineView: "folded"` to bound only the
+returned outline. Navigation retains its complete successor for cached queries;
+omitted descendants are disclosed. This does not add another navigation or
+snapshot, change readiness, or authorize old references. The default remains
+full. When only a condition receipt is needed after navigation, the existing
+browser `wait_for(includeOutline: false)` retains its original predicate and
+complete saved state without returning the full tree.
+
 `navigate_browser` accepts optional `includePerformance: true`. It collects fixed,
 bounded top-frame navigation, paint and buffered observer measurements before the
 normal successor snapshot. This avoids a separate `evaluate_browser` call and a

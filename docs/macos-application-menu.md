@@ -18,3 +18,16 @@ application effect; check the new visible state. Never replay an unknown result.
 Missing, replaced or stale menu refs require a fresh observation. Helpers that do
 not acknowledge this observation capability are rejected rather than silently
 returning a window-only outline.
+# Popup reference identity
+
+Popup menu actions require the exact cached live AX element. An item in an
+unopened submenu may appear in an outline with zero geometry; this does not
+authorize selecting it through a replacement element. Expand the parent menu,
+observe again, and use the new current reference. Changed item labels or shared
+action identifiers cannot establish identity. Stale popup refs stop before input.
+
+For other native controls that permit semantic refinding, role, any observed
+identifier and any observed label must agree, and exactly one candidate must
+remain. Distance does not resolve ambiguous aliases. Dispatch receipts still
+require independent effect verification; menu invocation is never retried after
+an unknown effect.

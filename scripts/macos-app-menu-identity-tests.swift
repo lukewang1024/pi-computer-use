@@ -1,5 +1,29 @@
 @main struct AppMenuIdentityTests {
     static func main() {
+        // Word's hidden Zoom submenu shares an action identifier. Matching
+        // that handler must never turn a requested 125% into the first 500%.
+        precondition(!nativeRefindSemanticMatch(observedRole: "AXMenuItem",
+            observedIdentifier: "galleryItemSelected:", observedLabel: "125%",
+            currentRole: "AXMenuItem", currentIdentifier: "galleryItemSelected:", currentLabel: "500%"))
+        precondition(nativeRefindSemanticMatch(observedRole: "AXButton",
+            observedIdentifier: "shared", observedLabel: "Save",
+            currentRole: "AXButton", currentIdentifier: "shared", currentLabel: "Save"))
+        precondition(!nativeRefindSemanticMatch(observedRole: "AXButton",
+            observedIdentifier: "shared", observedLabel: "Save",
+            currentRole: "AXButton", currentIdentifier: "other", currentLabel: "Save"))
+        precondition(!nativeRefindSemanticMatch(observedRole: "AXButton",
+            observedIdentifier: "", observedLabel: "",
+            currentRole: "AXButton", currentIdentifier: "", currentLabel: ""))
+        precondition(!nativeRefindSemanticMatch(observedRole: "AXButton",
+            observedIdentifier: "shared", observedLabel: "Save",
+            currentRole: "AXMenuItem", currentIdentifier: "shared", currentLabel: "Save"))
+        for action in ["press", "invoke", "click", "typeText", "selectText", "cancel"] {
+            precondition(nativeReferenceRequiresCachedElement(action: action, popupMenu: true, applicationMenu: false))
+            precondition(nativeReferenceRequiresCachedElement(action: action, popupMenu: false, applicationMenu: true))
+        }
+        precondition(nativeReferenceRequiresCachedElement(action: "selectText", popupMenu: false, applicationMenu: false))
+        precondition(nativeReferenceRequiresCachedElement(action: "cancel", popupMenu: false, applicationMenu: false))
+        precondition(!nativeReferenceRequiresCachedElement(action: "press", popupMenu: false, applicationMenu: false))
         let observed = AppMenuIdentity(pid: 100, windowId: 20, menuBarRole: "AXMenuBar",
             menuBarOwnerPid: 100, windowOwnerPid: 100, frontmostPid: 100,
             focusedWindowId: 20, frontmostWindowId: 20, sameObservedMenuBar: true)

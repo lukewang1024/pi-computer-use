@@ -150,6 +150,14 @@ try {
   evaluate: async () => '', accessibilityTree: async () => [], close() { this.isOpen = false; } });
  const observed = await tool();
  assert.deepEqual(observed.details.managedBrowser, { pid: owner.child.pid, profileDirectory: owner.profileDir });
+ const timing = observed.details.diagnostics.launchTimings;
+ assert(timing && Object.values(timing).every(value => Number.isFinite(value) && value >= 0));
+ for (const key of ['executableResolutionMs','portAllocationMs','downloadPreparationMs',
+  'previousBrowserCloseMs','spawnMs','cdpReadyMs','pageDiscoveryMs','initialObservationMs','totalMs']) {
+  assert.equal(typeof timing[key], 'number', key);
+ }
+ assert(Object.entries(timing).filter(([key]) => key !== 'totalMs').reduce((sum,[,value]) => sum+value,0) <= timing.totalMs+1,
+  'Sequential launch phases must fit within the measured operation');
  const replaced = owner;
  await tool();
  await absent(replaced.profileDir);

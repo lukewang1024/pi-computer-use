@@ -157,6 +157,16 @@ Every model-visible textual result is limited to 48 KiB or 2,000 lines. Oversize
 
 Browser-specific commands operate only on CDP browser-page states. `launch_browser` chooses the configured browser and debugging port internally and immediately returns an observed state:
 
+Launch diagnostics include `launchTimings` in milliseconds for executable
+resolution, port allocation, download-directory preparation, previous owned
+browser closure, process creation, CDP readiness, page discovery and initial
+observation. `totalMs` covers the launch operation; it excludes prior SDK
+readiness checks and Controller/CLI transport. Optional download configuration
+and navigation are included in that total but are not separate phases. These
+timings identify costs in a successful launch, not native input latency or a
+reliability estimate. Failed launches retain their existing shutdown and
+unknown-outcome handling and never automatically relaunch.
+
 ```ts
 const launched = launch_browser({ url: "https://example.com" })
 act_ui({ stateId: launched.stateId, actions: [{ action: "press", ref: "@e7" }] })

@@ -23,3 +23,15 @@ references. A matching process ID alone grants neither permission.
 controlled backend: unrelated foreground modal, focused document, deliberate
 dialog action, two window remappings, and invalid references. It dispatches no
 real native input. Desktop application acceptance is a separate requirement.
+
+## Bounded root inventory pages
+
+`find_roots` defaults to 12 roots per page. Set `pageSize` to an integer from
+1 to 100 when a complete inventory needs fewer round trips. This bounds each
+response; it does not limit the total number of matching roots. Follow
+`nextOffset` while `hasMore` is true, passing the previous `rootSetDigest` as
+`expectedRootSetDigest`. Each page enumerates live roots again, and a changed
+ranked identity list is rejected rather than combined with an earlier page.
+Larger pages preserve the same ranking, root references and digest. Discovery
+does not activate windows or authorize input. Observe the selected exact root
+before acting, and never treat a partial page as a complete inventory.

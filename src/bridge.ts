@@ -106,6 +106,7 @@ interface ComputerUseDetails {
 	focusContext?: ReturnType<typeof serializeFocusContext>;
 	/** Helper observation-stage timings; captureMs may include UIA extraction. */
 	observationTimings?: Record<string, number>;
+	elementCollection?: LookResponse["elementCollection"];
 	uiaDiagnostics?: Record<string, unknown>;
 	captureDiagnostics?: Record<string, unknown>;
 	ocrDiagnostics?: LookResponse["ocrDiagnostics"];
@@ -1104,6 +1105,10 @@ function noteWindowForTarget(target: ResolvedTarget | CurrentTarget, look?: Look
 	};
 }
 
+function isPixelOnlyLook(look: LookResponse): boolean {
+	return look.elementCollection?.reason === "pixel_only_observation" || (look.uiaDiagnostics?.status === "skipped" && look.uiaDiagnostics?.reason === "pixel_only_observation");
+}
+
 async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean, focusContext = false): Promise<CaptureResult> {
 	const state = operationState();
 	const baseOutline = state.currentOutline;
@@ -1111,7 +1116,7 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
 	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements, focusContext }, signal);
-	if (includeElements === false && (look.uiaDiagnostics?.status !== "skipped" || look.uiaDiagnostics?.reason !== "pixel_only_observation" || !look.image)) {
+	if (includeElements === false && (!isPixelOnlyLook(look) || !look.image)) {
 		throw new Error("Native helper did not confirm pixel-only capture; no state was adopted.");
 	}
 	// An optional read may finish after its caller timed out. Never adopt that late look.
@@ -1178,6 +1183,7 @@ async function buildToolResult(
 		focusContext: serializeFocusContext(result.look.focusContext, result.outline),
 		observationTimings: result.look.timings,
 		windowDocumentEvidence: result.look.window.metadata?.documentEvidence as Record<string, unknown> | undefined,
+		elementCollection: result.look.elementCollection,
 		uiaDiagnostics: result.look.uiaDiagnostics,
 		captureDiagnostics: result.look.captureDiagnostics,
 		ocrDiagnostics: result.look.ocrDiagnostics,
@@ -1964,8 +1970,9 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 			: `Read-only browser performance collection unavailable: ${details.performanceError?.message}`;
 		return { content: [{ type: "text", text: summary }], details };
 	}
-	if (params.mode === "pixels" && (!requestedRoot || (currentPlatformBackend.name !== "windows" && !isBrowserContextId(browserContextId)))) {
-		throw new Error("mode=pixels requires an exact Windows native @r root or browser_page @r root.");
+	if (params.mode === "pixels" && params.focusContext === true) throw new Error("Pixel-only observation does not collect focus context; observe semantic or fused first.");
+	if (params.mode === "pixels" && (!requestedRoot || (currentPlatformBackend.name !== "windows" && currentPlatformBackend.name !== "macos" && !isBrowserContextId(browserContextId)))) {
+		throw new Error("mode=pixels requires an exact Windows or macOS native @r root or browser_page @r root.");
 	}
 	if (isBrowserContextId(browserContextId)) {
 		const targetId = browserContextId.slice(BROWSER_CONTEXT_PREFIX.length);
@@ -2060,7 +2067,7 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	}
 	if (mode === "pixels") {
 		result.details.observation = { status: "pixels_only", readOnly: true };
-		result.content.unshift({ type: "text", text: "Pixel-only observation: UIA and OCR were skipped. No semantic element refs were observed. Use the fresh screenshot state for coordinate actions; observe semantic or fused before querying elements." });
+		result.content.unshift({ type: "text", text: "Pixel-only observation: accessibility tree collection and OCR were skipped. No semantic element refs were observed. Use the fresh screenshot state for coordinate actions; observe semantic or fused before querying elements." });
 	}
 	if (imageError) {
 		result.details.observation = { status: "semantic_only", readOnly: true, imageError, nativeCompletion: imageCompletion };
@@ -2087,7 +2094,7 @@ function shouldEscalateSearchOCR(matches: OutlineSearchMatch[], text?: string): 
 async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
 	const state = operationState();
 	let outline = currentOutlineOrThrow(params.stateId);
-	if (state.currentLook?.uiaDiagnostics?.reason === "pixel_only_observation") throw new Error("Pixel-only observation has no semantic elements; observe semantic or fused before searching.");
+	if (state.currentLook && isPixelOnlyLook(state.currentLook)) throw new Error("Pixel-only observation has no semantic elements; observe semantic or fused before searching.");
 	const text = trimOrUndefined(params.text);
 	const role = trimOrUndefined(params.role);
 	const capability = trimOrUndefined(params.capability);
@@ -2405,7 +2412,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	state.currentImageMode = semanticSuccessor ? "never" : "auto";
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
-	const pixelOnly = look.uiaDiagnostics?.status === "skipped" && look.uiaDiagnostics?.reason === "pixel_only_observation";
+	const pixelOnly = isPixelOnlyLook(look);
 	if (pixelOnly && semanticSuccessor) throw new Error("Pixel-only state cannot return a semantic successor; observe semantic or fused first.");
 	if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };

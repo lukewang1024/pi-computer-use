@@ -1481,6 +1481,10 @@ final class Bridge {
 		let readText = optionalStringArg(request, "readText") ?? "auto"
 		let baseLookId = optionalStringArg(request, "baseLookId")
 		let includeImage = boolArg(request, "includeImage") ?? true
+		let includeElements = boolArg(request, "includeElements") ?? true
+		if !includeElements && (readText != "never" || !includeImage || baseLookId != nil || optionalStringArg(request, "scopeRef") != nil || boolArg(request, "focusContext") == true) {
+			throw BridgeFailure(message: "Pixel-only observation requires image capture without OCR, scope, base look, or focus context", code: "invalid_args")
+		}
 		let allowImageFailure = boolArg(request, "allowImageFailure") ?? false
 		guard readText == "auto" || readText == "always" || readText == "never" else {
 			throw BridgeFailure(message: "readText must be auto, always, or never", code: "invalid_args")
@@ -1570,13 +1574,19 @@ final class Bridge {
 			transform = rectTransform(windowFrame: rootFrame, imageWidth: imageWidth, imageHeight: imageHeight)
 		}
 		let describeStart = Date()
-		let outline = buildLookOutline(root: rootElement, transform: transform)
+		let outline: LookNode
+		if includeElements {
+			outline = buildLookOutline(root: rootElement, transform: transform)
+		} else {
+			outline = LookNode(element: nil, ref: "pixels:" + UUID().uuidString, role: "AXWindow", subrole: "", identifier: "", title: "", description: "", value: "", actions: [], canPress: false, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, rect: CGRect(x: 0, y: 0, width: CGFloat(imageWidth), height: CGFloat(imageHeight)), pictureOnly: true)
+			outline.truncated = true
+		}
 		let describeMs = elapsedMs(describeStart)
 
 		var readTextMs = 0
 		var readTextExecuted = false
 		var ocrDiagnostics: [String: Any]?
-		if let capture, readText == "always" {
+		if includeElements, let capture, readText == "always" {
 			let textStart = Date()
 			do {
 				let boxes = try recognizeText(in: capture.image, outputWidth: imageWidth, outputHeight: imageHeight)
@@ -1639,6 +1649,7 @@ final class Bridge {
 			response["imageError"] = failure.message
 			response["imageDiagnostics"] = ["code": failure.code, "nativeCompletion": failure.nativeCompletion, "readOnly": true]
 		}
+		if !includeElements { response["elementCollection"] = ["status": "skipped", "reason": "pixel_only_observation"] }
 		if let imagePayload { response["image"] = imagePayload }
 		if let ocrDiagnostics { response["ocrDiagnostics"] = ocrDiagnostics }
 		if boolArg(request, "focusContext") == true {

@@ -170,6 +170,11 @@ request. `launchTimings.pageActivationMs` measures the request, not a verified
 native foreground state or input delivery. Failed activation closes the owned
 browser without replay or fallback to another page. Existing native foreground
 and stale-reference guards still apply to later physical input.
+Interactive Windows launches also disable Chromium's native window-occlusion
+backgrounding for this fresh private browser. This keeps a covered page rendering;
+it does not prove that its HWND owns the foreground. Headless, macOS and Linux
+launches retain their existing rendering policy. No existing browser profile or
+system browser setting is changed.
 
 If exit cannot be verified, cleanup reports failure and retains the child,
 profile and CDP port. A replacement launch is refused. Later cleanup can

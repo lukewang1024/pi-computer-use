@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { access, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ManagedBrowser } from '../src/managed-browser.ts';
+import { ManagedBrowser, managedBrowserOcclusionArgs } from '../src/managed-browser.ts';
 import { executeLaunchBrowser, shutdownComputerUseSession } from '../src/bridge.ts';
 import { currentPlatformBackend } from '../src/platform/index.ts';
 import { CdpTab } from '../src/cdp.ts';
@@ -20,6 +20,12 @@ fs.writeFileSync(path.join(profile, 'ready'), 'ready');
 setInterval(() => {}, 1000);
 `;
 const canceled = new AbortController(); canceled.abort(new Error('canceled before launch'));
+assert.deepEqual(managedBrowserOcclusionArgs('win32', false),
+ ['--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion']);
+for (const platform of ['win32', 'linux', 'darwin']) {
+ assert.deepEqual(managedBrowserOcclusionArgs(platform, true), [], 'Headless launches retain their existing rendering policy');
+ if (platform !== 'win32') assert.deepEqual(managedBrowserOcclusionArgs(platform, false), [], 'Native occlusion flags belong only to Windows');
+}
 await assert.rejects(ManagedBrowser.launch(process.execPath, 'chrome', [], canceled.signal), /canceled before launch/);
 async function launch(handler = '', kind = 'chrome') {
  const browser = await ManagedBrowser.launch(process.execPath, kind, ['-e', fixture.replace('HANDLER', handler), '--']);

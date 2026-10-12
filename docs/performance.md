@@ -1,4 +1,18 @@
 
+## Managed browser launch accounting
+
+`diagnostics.launchTimings` measures the original launch operations. Redirected
+download setup reports `downloadPolicyMs`; a requested URL opened after that
+setup reports `initialNavigationMs`, including the existing navigation load
+wait. `initialObservationMs` measures the snapshot and `initialResultBuildMs`
+measures construction of the returned observation. Optional phases are absent
+when the corresponding operation did not run. These measurements do not add
+navigation, observation or input calls.
+
+`totalMs` covers this launch implementation. It is not the Controller round-trip
+duration: native readiness, Host admission and response transport may occur
+outside it. Network navigation latency is not browser process startup latency.
+
 ## macOS offscreen outline deferral
 
 Native observations retain offscreen containers and their exact refs, but defer

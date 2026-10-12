@@ -193,6 +193,11 @@ export class CdpTab {
 		}
 	}
 
+	/** Activate only this exact CDP page; this sends no pointer or keyboard event. */
+	async bringToFront(): Promise<void> {
+		await this.send("Page.bringToFront");
+	}
+
 	get isOpen(): boolean {
 		return !this.disconnected && this.ws.readyState === WebSocket.OPEN;
 	}
@@ -1080,6 +1085,14 @@ export async function cdpMouseForContext(contextId: string, x: number, y: number
 
 export async function cdpDragForContext(contextId: string, path: Array<{ x: number; y: number }>): Promise<boolean> {
 	return (await withCdpContextTab(contextId, async (tab) => { await tab.dragPath(path); return true; })) === true;
+}
+
+/** Used only for the freshly owned launch context; no retry or target fallback. */
+export async function cdpBringOwnedPageToFront(contextId: string): Promise<boolean> {
+	return (await withCdpContextTab(contextId, async (tab) => {
+		await tab.bringToFront();
+		return true;
+	})) === true;
 }
 
 export async function cdpNavigateContext(contextId: string, url: string): Promise<boolean> {

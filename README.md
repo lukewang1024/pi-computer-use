@@ -164,6 +164,12 @@ Historical profiles and external browsers are never adopted or swept. Download a
 available for inspection.
 `launch_browser` returns this child's PID and profile path in
 `details.managedBrowser` for integrations to verify cleanup independently.
+In interactive mode, launch requests `Page.bringToFront` once for that exact
+newly owned CDP page before the initial observation. Headless mode skips this
+request. `launchTimings.pageActivationMs` measures the request, not a verified
+native foreground state or input delivery. Failed activation closes the owned
+browser without replay or fallback to another page. Existing native foreground
+and stale-reference guards still apply to later physical input.
 
 If exit cannot be verified, cleanup reports failure and retains the child,
 profile and CDP port. A replacement launch is refused. Later cleanup can

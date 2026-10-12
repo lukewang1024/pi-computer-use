@@ -11,6 +11,14 @@ use serde_json::Value;
 
 use crate::refs::RefStore;
 
+// Observation only: a known negative cached capability avoids a provider call.
+// Missing/unsupported metadata retains the original live-pattern fallback.
+#[cfg(any(windows, test))]
+fn read_available_value_pattern<T>(available: Option<bool>, query: impl FnOnce() -> Option<T>) -> Option<T> {
+    if available == Some(false) { None } else { query() }
+}
+
+
 #[cfg(any(windows, test))]
 struct ElementIdentityResolver<T> {
     runtime_id: Vec<i32>,
@@ -508,6 +516,7 @@ mod native {
         let retained_started = Instant::now();
         let mut visited = 0usize;
         let mut cache_failures = 0usize;
+        let mut cached_unavailable_value_pattern_skips = 0usize;
         for i in order {
             if budget_expired() { break; }
             let element = unsafe {
@@ -527,7 +536,7 @@ mod native {
                     cache_failures += 1;
                     continue;
                 };
-            if let Some(json_val) = element_to_json(store, &observed, parent_runtime_id) {
+            if let Some(json_val) = element_to_json(store, &observed, parent_runtime_id, &mut cached_unavailable_value_pattern_skips) {
                 elements.push(json_val);
             }
         }
@@ -607,6 +616,7 @@ mod native {
         diagnostics["budgetMs"] = json!(EXTRACTION_BUDGET_MS);
         diagnostics["elapsedMs"] = json!(extraction_started.elapsed().as_millis() as u64);
         diagnostics["cacheFailures"] = json!(cache_failures);
+        diagnostics["cachedUnavailableValuePatternSkips"] = json!(cached_unavailable_value_pattern_skips);
         diagnostics["documentAnchors"] = json!({
             "tailCandidatesScanned": anchor_scanned, "selected": anchors.len(),
             "scanMs": anchor_ms,
@@ -664,6 +674,7 @@ mod native {
         store: &mut RefStore,
         element: &IUIAutomationElement,
         parent_runtime_id: Vec<i32>,
+        cached_unavailable_value_pattern_skips: &mut usize,
     ) -> Option<Value> {
         let ctrl_type = unsafe { element.CachedControlType().or_else(|_| element.CurrentControlType()).ok()? };
         let role = control_type_to_role(ctrl_type.0 as u32);
@@ -717,11 +728,14 @@ mod native {
                 .map(|value| value.as_bool())
                 .unwrap_or(false)
         };
-        let value_pattern = unsafe {
-            element
-                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                .ok()
+        let cached_value_available = unsafe {
+            element.GetCachedPropertyValue(UIA_IsValuePatternAvailablePropertyId).ok()
+                .and_then(|value| bool::try_from(&value).ok())
         };
+        if cached_value_available == Some(false) { *cached_unavailable_value_pattern_skips += 1; }
+        let value_pattern = super::read_available_value_pattern(cached_value_available, || unsafe {
+            element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId).ok()
+        });
         let value = value_pattern
             .as_ref()
             .and_then(|pattern| unsafe { pattern.CurrentValue().ok() })
@@ -1763,5 +1777,25 @@ mod ancestry_cache_tests {
         assert_eq!(retained_ancestor(2, &retained, &mut cache,
             |_| Some(String::new()), |_| Some(0)), None);
         assert!(cache.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod value_pattern_query_tests {
+    use super::read_available_value_pattern;
+    #[test]
+    fn known_negative_skips_provider_unknown_and_positive_keep_live_value() {
+        let mut queries = 0;
+        for available in [Some(false), None, Some(true)] {
+            let value = read_available_value_pattern(available, || { queries += 1; Some("live value") });
+            assert_eq!(value, if available == Some(false) { None } else { Some("live value") });
+        }
+        assert_eq!(queries, 2);
+    }
+    #[test]
+    fn live_pattern_failure_remains_unavailable() {
+        for available in [None, Some(true)] {
+            assert_eq!(read_available_value_pattern::<bool>(available, || None), None);
+        }
     }
 }

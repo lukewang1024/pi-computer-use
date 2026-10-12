@@ -28,7 +28,30 @@ pub fn run(command: &mut Command, budget: Duration, max_output: usize) -> Result
             .map_err(|e| e.to_string());
         let _ = sender.send(result);
     });
+    let mut drained_output = None;
     let status = loop {
+        if drained_output.is_none() {
+            if let Ok(result) = receiver.try_recv() {
+                if matches!(&result, Ok(bytes) if bytes.len() > max_output) {
+                    // A bounded reader stops draining at the output limit.
+                    // The provider can still be alive (or blocked writing).
+                    // Reap it now, rather than misclassifying overflow as a
+                    // deadline failure while waiting for its independent exit.
+                    if !matches!(child.try_wait(), Ok(Some(_))) {
+                        child
+                            .kill()
+                            .map_err(|e| format!("UIA read worker termination failed: {e}"))?;
+                    }
+                    child
+                        .wait()
+                        .map_err(|e| format!("UIA read worker reap failed: {e}"))?;
+                    return Err(
+                        "UIA read worker output limit exceeded; terminated and reaped".into(),
+                    );
+                }
+                drained_output = Some(result);
+            }
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < budget => thread::sleep(Duration::from_millis(5)),
@@ -48,9 +71,12 @@ pub fn run(command: &mut Command, budget: Duration, max_output: usize) -> Result
             }
         }
     };
-    let output = receiver
-        .recv_timeout(Duration::from_millis(100))
-        .map_err(|e| format!("UIA read worker output unavailable: {e}"))??;
+    let output = match drained_output {
+        Some(result) => result?,
+        None => receiver
+            .recv_timeout(Duration::from_millis(100))
+            .map_err(|e| format!("UIA read worker output unavailable: {e}"))??,
+    };
     if output.len() > max_output {
         return Err("UIA read worker output limit exceeded".into());
     }
@@ -86,6 +112,12 @@ mod tests {
                 std::io::stdout().write_all(&vec![b'x'; 200000]).unwrap();
             }
             Ok("hang") => thread::sleep(Duration::from_secs(20)),
+            Ok("overflow-then-hang") => {
+                use std::io::Write;
+                std::io::stdout().write_all(&vec![b'x'; 1001]).unwrap();
+                std::io::stdout().flush().unwrap();
+                thread::sleep(Duration::from_secs(20));
+            }
             Ok("fail") => std::process::exit(1),
             _ => panic!("worker fixture requires an explicit mode"),
         }
@@ -110,5 +142,17 @@ mod tests {
         assert!(run(&mut worker("large"), Duration::from_secs(2), 1000)
             .unwrap_err()
             .contains("output limit"));
+    }
+    #[test]
+    fn reaps_oversized_worker_without_waiting_for_exit_or_deadline() {
+        let started = Instant::now();
+        let error = run(
+            &mut worker("overflow-then-hang"),
+            Duration::from_secs(10),
+            1000,
+        )
+        .unwrap_err();
+        assert!(error.contains("output limit"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

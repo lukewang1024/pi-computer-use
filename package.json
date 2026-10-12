@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.2-workbench.103",
+	"version": "0.5.2-workbench.104",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -55,7 +55,8 @@
 		"native/macos/bounded_read.swift",
 		"native/macos/permission_probe.swift",
 		"native/macos/text_selection.swift",
-		"native/macos/window_document.swift"
+		"native/macos/window_document.swift",
+		"native/macos/root_reference_store.swift"
 	],
 	"pi": {
 		"extensions": [
@@ -127,7 +128,7 @@
 		"test:macos-selection": "tsx scripts/check-native-text-selection.mjs && node scripts/check-macos-text-selection.mjs",
 		"test:focus-context": "tsx scripts/check-focus-selection.mjs && tsx scripts/check-focus-context.mjs && node scripts/check-macos-focused-context.mjs",
 		"test:root-pages": "tsx scripts/check-root-pages.mjs",
-		"test:macos-window-document": "tsx scripts/check-window-document-evidence.mjs && node scripts/check-macos-window-document.mjs",
+		"test:macos-window-document": "tsx scripts/check-window-document-evidence.mjs && node scripts/check-macos-window-document.mjs && node scripts/check-macos-root-reference-store.mjs",
 		"test:macos-pixel-policy": "node scripts/check-macos-pixel-policy.mjs",
 		"test:native-menu-cancel": "tsx scripts/check-native-menu-cancel.mjs && tsx scripts/check-native-menu-cancel-routing.mjs",
 		"test:application-menu": "tsx scripts/check-application-menu.mjs && node scripts/check-macos-app-menu.mjs"

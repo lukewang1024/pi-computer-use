@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, preflightActionSequence, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpSetManagedDownloadDirectory, validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpBringOwnedPageToFront, cdpSetManagedDownloadDirectory, validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig, type ManagedBrowserKind } from "./config.ts";
 import { managedBrowserExecutableCandidates, managedBrowserOverrideName } from "./managed-browser-executable.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
@@ -2706,6 +2706,9 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 			if (requestedUrl && !await measure("initialNavigationMs", () => cdpNavigateContext(page.contextId, requestedUrl))) {
 				throw new Error("Managed browser context disappeared before navigation.");
 			}
+		}
+		if (!isHeadlessMode() && !await measure("pageActivationMs", () => cdpBringOwnedPageToFront(page.contextId))) {
+			throw new Error("Fresh owned browser page disappeared before activation.");
 		}
 		const resourceKey = `cdp:${page.targetId}`;
 		const scheduled = await measure("initialObservationMs", () => resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId)));

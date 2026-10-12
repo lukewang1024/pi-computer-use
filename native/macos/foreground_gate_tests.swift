@@ -79,6 +79,21 @@ private struct ForegroundGateTests {
 		for event in [ForegroundInputEvent.keyDown(2, modifiers: [55,56]), .mouseUp(0), .other, .keyUp(2, modifiers: [55,56]), .keyUp(1, modifiers: [55])] {
 			precondition(!dispatchForegroundEventIfVerified(sheet, event: event, dispatch: held, emit: { preconditionFailure() }))
 		}
+		var transition = sheet
+		transition.ownedSheetWindowId = nil
+		transition.firstActual = original.actual
+		transition.ownedSheetTransitionObserved = true
+		precondition(!shouldReobserveForegroundRead(transition))
+		precondition(shouldReobserveForegroundRead(transition, releasingOwnedKey: true))
+		precondition(isOwnedForegroundKeyRelease(.keyUp(1, modifiers: [55,56]), dispatch: held))
+		precondition(!isOwnedForegroundKeyRelease(.keyDown(1, modifiers: [55,56]), dispatch: held))
+		precondition(!dispatchForegroundEventIfVerified(transition, event: .keyUp(1, modifiers: [55,56]), dispatch: held, emit: { preconditionFailure() }))
+		var foreignTransition = transition
+		foreignTransition.firstActual = ForegroundActualIdentity(pid: 99, windowId: target.windowId)
+		precondition(!shouldReobserveForegroundRead(foreignTransition, releasingOwnedKey: true))
+		var racingTransition = transition
+		racingTransition.frontmostPidStable = false
+		precondition(!shouldReobserveForegroundRead(racingTransition, releasingOwnedKey: true))
 		var missingProof = sheet
 		missingProof.ownedSheetWindowId = nil
 		var racing = sheet

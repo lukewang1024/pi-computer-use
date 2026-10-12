@@ -128,6 +128,7 @@ struct ForegroundGateReport {
 	var secondDiagnostics: [String: Any]?
 	// Only native AX parent checks may establish this identity.
 	var ownedSheetWindowId: UInt32?
+	var ownedSheetTransitionObserved = false
 
 	var verified: Bool {
 		target.windowId > 0
@@ -157,13 +158,23 @@ struct ForegroundGateReport {
 			]
 		}
 		if let ownedSheetWindowId { output["ownedSheetReleaseWindowId"] = Int(ownedSheetWindowId) }
+		if ownedSheetTransitionObserved { output["ownedSheetTransitionObserved"] = true }
 		if let firstDiagnostics { output["firstMapping"] = firstDiagnostics }
 		if let secondDiagnostics { output["secondMapping"] = secondDiagnostics }
 		return output
 	}
 }
 
-func shouldReobserveForegroundRead(_ report: ForegroundGateReport) -> Bool {
+func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwnedKey: Bool = false) -> Bool {
+	// This grants another read, never input. The next sample must prove a
+	// stable direct owned sheet before any transaction-owned key is released.
+	if releasingOwnedKey, report.ownedSheetTransitionObserved,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.actual.pid == report.target.pid,
+		let windowId = report.actual.windowId, windowId > 0, windowId != report.target.windowId {
+		return true
+	}
 	for actual in [report.firstActual, report.actual].compactMap({ $0 }) {
 		if let pid = actual.pid, pid != report.target.pid { return false }
 		if let windowId = actual.windowId, windowId != report.target.windowId { return false }
@@ -262,6 +273,13 @@ func foregroundFailureDetails(report: ForegroundGateReport, dispatch: Foreground
 	return details
 }
 
+func isOwnedForegroundKeyRelease(_ event: ForegroundInputEvent, dispatch: ForegroundInputDispatchState) -> Bool {
+	guard case let .keyUp(code, modifiers) = event else { return false }
+	return dispatch.pressedKeys.contains(code)
+		&& Set(modifiers).count == modifiers.count
+		&& Set(modifiers) == dispatch.pressedKeys.intersection(foregroundModifierKeyCodes).subtracting([code])
+}
+
 @discardableResult
 func dispatchForegroundEventIfVerified(
 	_ report: ForegroundGateReport,
@@ -270,15 +288,12 @@ func dispatchForegroundEventIfVerified(
 	emit: () -> Void
 ) -> Bool {
 	let ownedRelease: Bool
-	if case let .keyUp(code, modifiers) = event,
+	if isOwnedForegroundKeyRelease(event, dispatch: dispatch),
 		let sheetId = report.ownedSheetWindowId,
 		sheetId > 0, sheetId != report.target.windowId,
 		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
 		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: sheetId),
-		report.firstActual == report.actual,
-		dispatch.pressedKeys.contains(code),
-		Set(modifiers).count == modifiers.count,
-		Set(modifiers) == dispatch.pressedKeys.intersection(foregroundModifierKeyCodes).subtracting([code]) {
+		report.firstActual == report.actual {
 		ownedRelease = true
 	} else {
 		ownedRelease = false

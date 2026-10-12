@@ -44,3 +44,8 @@ window and stable foreground PID. The original window must remain main. Only
 keys held by this transaction may be released, with precisely the remaining
 modifier flags. This does not authorize new key-down, mouse or text events,
 other same-process windows, or releasing keys from a previous failed action.
+
+If the two observations straddle the original-window to direct-sheet transition,
+only a pending transaction-owned key release can request up to two further
+read-only samples. The transition sample does not permit HID dispatch. A fresh
+stable owned-sheet proof is still mandatory before releasing the key.

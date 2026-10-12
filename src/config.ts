@@ -2,11 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+export type ManagedBrowserKind = "helium" | "chrome" | "edge";
+
 export interface ComputerUseConfig {
 	browser_use: boolean;
 	headless: boolean;
 	cursor_overlay: boolean;
-	managed_browser: "helium" | "chrome";
+	managed_browser: ManagedBrowserKind;
 }
 
 export interface ComputerUseConfigSource {
@@ -53,7 +55,7 @@ function normalizePartial(raw: unknown): Partial<ComputerUseConfig> {
 	if (headless !== undefined) out.headless = headless;
 	if (cursorOverlay !== undefined) out.cursor_overlay = cursorOverlay;
 	const managedBrowser = (source as any).managed_browser;
-	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
+	if (managedBrowser === "helium" || managedBrowser === "chrome" || managedBrowser === "edge") out.managed_browser = managedBrowser;
 	return out;
 }
 
@@ -76,7 +78,7 @@ function readEnv(): Partial<ComputerUseConfig> {
 	if (headless !== undefined) out.headless = headless;
 	if (cursorOverlay !== undefined) out.cursor_overlay = cursorOverlay;
 	const managedBrowser = process.env.PI_COMPUTER_USE_MANAGED_BROWSER;
-	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
+	if (managedBrowser === "helium" || managedBrowser === "chrome" || managedBrowser === "edge") out.managed_browser = managedBrowser;
 	return out;
 }
 

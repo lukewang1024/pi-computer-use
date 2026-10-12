@@ -15,7 +15,8 @@ import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, preflightActionSequence, type ActionState, type PreparedAction } from "./actions.ts";
 import { cdpSetManagedDownloadDirectory, validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
-import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
+import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig, type ManagedBrowserKind } from "./config.ts";
+import { managedBrowserExecutableCandidates, managedBrowserOverrideName } from "./managed-browser-executable.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeFoldedOutline, serializeOutlineNodeShallow, serializeOutlineAncestors, serializeOutlineSubtree, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineDiff, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSubtree, type SerializedOutlineAncestors, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
@@ -2614,57 +2615,7 @@ async function performAct(params: ActParams, signal?: AbortSignal): Promise<Agen
 	return await performDesktopTransaction(params, actions, signal);
 }
 
-function managedBrowserExecutableCandidates(browser: "helium" | "chrome"): string[] {
-	const overrideName = browser === "helium" ? "PI_COMPUTER_USE_HELIUM_EXECUTABLE" : "PI_COMPUTER_USE_CHROME_EXECUTABLE";
-	const override = trimOrUndefined(process.env[overrideName]);
-	if (override) return [path.resolve(override)];
-
-	const platformCandidates = process.platform === "darwin"
-		? browser === "helium"
-			? [
-				"/Applications/Helium.app/Contents/MacOS/Helium",
-				path.join(os.homedir(), "Applications", "Helium.app", "Contents", "MacOS", "Helium"),
-			]
-			: [
-				"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-				path.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
-			]
-		: process.platform === "win32"
-			? browser === "helium"
-				? [
-					process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Helium", "Application", "helium.exe"),
-					process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, "Helium", "Application", "helium.exe"),
-				]
-				: [
-					process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
-					process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, "Google", "Chrome", "Application", "chrome.exe"),
-					process.env["PROGRAMFILES(X86)"] && path.join(process.env["PROGRAMFILES(X86)"], "Google", "Chrome", "Application", "chrome.exe"),
-				]
-			: browser === "helium"
-				? [
-					"/usr/bin/helium",
-					"/usr/bin/helium-browser",
-					"/opt/helium/chrome",
-					path.join(os.homedir(), ".local", "helium", "chrome"),
-				]
-				: [
-					"/usr/bin/google-chrome",
-					"/usr/bin/google-chrome-stable",
-					"/usr/bin/chromium",
-					"/usr/bin/chromium-browser",
-					"/snap/bin/chromium",
-				];
-	const pathNames = browser === "helium"
-		? process.platform === "win32" ? ["helium.exe"] : ["helium", "helium-browser"]
-		: process.platform === "win32" ? ["chrome.exe"] : ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
-	const pathCandidates = (process.env.PATH ?? "")
-		.split(path.delimiter)
-		.filter(Boolean)
-		.flatMap((directory) => pathNames.map((name) => path.join(directory, name)));
-	return [...new Set([...platformCandidates.filter((candidate): candidate is string => Boolean(candidate)), ...pathCandidates])];
-}
-
-async function managedBrowserExecutable(browser: "helium" | "chrome"): Promise<string> {
+async function managedBrowserExecutable(browser: ManagedBrowserKind): Promise<string> {
 	const candidates = managedBrowserExecutableCandidates(browser);
 	for (const candidate of candidates) {
 		try {
@@ -2674,7 +2625,7 @@ async function managedBrowserExecutable(browser: "helium" | "chrome"): Promise<s
 			// Try the next platform-appropriate installation location.
 		}
 	}
-	const overrideName = browser === "helium" ? "PI_COMPUTER_USE_HELIUM_EXECUTABLE" : "PI_COMPUTER_USE_CHROME_EXECUTABLE";
+	const overrideName = managedBrowserOverrideName(browser);
 	if (trimOrUndefined(process.env[overrideName])) {
 		throw new Error(`${browser} executable from ${overrideName} was not found or is not executable: ${candidates[0]}.`);
 	}

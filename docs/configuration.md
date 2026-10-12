@@ -45,7 +45,7 @@ Known browser families include Safari, Chrome and Chromium-family browsers, Fire
 
 Default: `"chrome"`
 
-Selects `"helium"` or `"chrome"` for `launch_browser`. The debugging port is always allocated internally and isn't part of the model-facing contract.
+Selects `"helium"`, `"chrome"`, or `"edge"` for `launch_browser`. The debugging port is always allocated internally and isn't part of the model-facing contract.
 
 ### `headless`
 
@@ -66,6 +66,8 @@ PI_COMPUTER_USE_BROWSER_USE=0
 PI_COMPUTER_USE_BROWSER_USE=1
 PI_COMPUTER_USE_MANAGED_BROWSER=helium
 PI_COMPUTER_USE_MANAGED_BROWSER=chrome
+PI_COMPUTER_USE_MANAGED_BROWSER=edge
+PI_COMPUTER_USE_EDGE_EXECUTABLE=/absolute/path/to/msedge
 PI_COMPUTER_USE_CHROME_EXECUTABLE=/absolute/path/to/chrome
 PI_COMPUTER_USE_HELIUM_EXECUTABLE=/absolute/path/to/helium
 PI_COMPUTER_USE_HEADLESS=0

@@ -76,6 +76,7 @@ const originalLaunch=ManagedBrowser.launch;
 const originalExecutable=process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE;
 const originalBrowserUse=process.env.PI_COMPUTER_USE_BROWSER_USE;
 const originalDownloadRoot=process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;
+const originalHeadless=process.env.PI_COMPUTER_USE_HEADLESS;
 const downloadRoot=await mkdtemp(path.join(os.tmpdir(),'cu-launch-timing-'));
 delete process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;
 process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE=process.execPath;
@@ -108,6 +109,8 @@ try {
   assert.equal(folded.details.diagnostics.launchTimings.initialNavigationMs,undefined);
   assert(folded.details.diagnostics.launchTimings.initialResultBuildMs>=0);
   assert.equal(calls.slice(start).filter(c=>c.method==='Accessibility.getFullAXTree').length,1);
+  assert.equal(calls.slice(start).filter(c=>c.method==='Page.bringToFront').length,1, 'Activate the exact fresh page once without Input events');
+  assert(folded.details.diagnostics.launchTimings.pageActivationMs>=0);
   assert(!calls.slice(start).some(c=>c.method==='Page.navigate'||c.method.startsWith('Input.')));
   const count=calls.length;
   const searched=await tool(executeSearchUi,{stateId:folded.details.stateId,text:'Launch control 299',role:'button'});
@@ -135,6 +138,12 @@ try {
   assert.equal(calls.slice(navigationStart).filter(c=>c.method==='Browser.setDownloadBehavior').length,1);
   assert.equal(calls.slice(navigationStart).filter(c=>c.method==='Accessibility.getFullAXTree').length,1);
   assert(!calls.slice(navigationStart).some(c=>c.method.startsWith('Input.')));
+  process.env.PI_COMPUTER_USE_HEADLESS='true';
+  const headlessStart=calls.length;
+  const headless=await tool(executeLaunchBrowser,{outlineView:'folded'});
+  assert.equal(calls.slice(headlessStart).filter(c=>c.method==='Page.bringToFront').length,0, 'Headless launches must not activate a page');
+  assert.equal(headless.details.diagnostics.launchTimings.pageActivationMs,undefined);
+  assert(!calls.slice(headlessStart).some(c=>c.method.startsWith('Input.')));
   console.log('Browser launch projection: one startup/snapshot, full-cache lookup, default full, invalid preflight and stale input refusal passed.');
 } finally {
   await shutdownComputerUseSession();
@@ -142,6 +151,7 @@ try {
   if(originalExecutable===undefined)delete process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE;else process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE=originalExecutable;
   if(originalBrowserUse===undefined)delete process.env.PI_COMPUTER_USE_BROWSER_USE;else process.env.PI_COMPUTER_USE_BROWSER_USE=originalBrowserUse;
   if(originalDownloadRoot===undefined)delete process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;else process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT=originalDownloadRoot;
+  if(originalHeadless===undefined)delete process.env.PI_COMPUTER_USE_HEADLESS;else process.env.PI_COMPUTER_USE_HEADLESS=originalHeadless;
   Object.assign(currentPlatformBackend,original);
   for(const socket of sockets)socket.destroy();
   if(server.listening)await new Promise(resolve=>server.close(resolve));

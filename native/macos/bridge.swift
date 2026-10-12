@@ -4371,7 +4371,7 @@ final class Bridge {
 		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
 		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
 		let emitPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
-		let report = ForegroundGateReport(
+		var report = ForegroundGateReport(
 			target: ForegroundTargetIdentity(pid: target.pid, windowId: target.windowId),
 			actual: secondActual,
 			focusedWindowMatches: firstFocusedMatches && firstWindowMatches && secondFocusedMatches,
@@ -4381,6 +4381,23 @@ final class Bridge {
 			firstDiagnostics: firstResolution?.diagnostics,
 			secondDiagnostics: secondResolution?.diagnostics
 		)
+		// A shortcut can open its own sheet before key-up. Only balance keys
+		// already owned by this transaction; never authorize new input to it.
+		func isDirectOwnedSheet(_ focused: AXUIElement?) -> Bool {
+			guard let focused, let parentWindow = target.axWindow,
+				stringAttribute(focused, attribute: kAXRoleAttribute as CFString) == "AXSheet",
+				let parent = copyAttribute(focused, attribute: kAXParentAttribute as CFString).flatMap(asAXElement)
+			else { return false }
+			return sameElement(parent, parentWindow)
+		}
+		if firstActual == secondActual, firstActual.pid == target.pid,
+			let sheetId = secondActual.windowId, sheetId > 0, sheetId != target.windowId,
+			report.frontmostPidStable, report.targetIsMain,
+			isDirectOwnedSheet(firstFocused), isDirectOwnedSheet(secondFocused),
+			let firstFocused, let secondFocused, sameElement(firstFocused, secondFocused),
+			NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
+			report.ownedSheetWindowId = sheetId
+		}
 		return report
 	}
 

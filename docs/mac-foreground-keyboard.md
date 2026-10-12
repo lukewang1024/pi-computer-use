@@ -36,3 +36,11 @@ implied Shift, so `cmd+?` and `["cmd", "+"]` retain the
 requested Command modifier while pressing Shift with `/` or `=` respectively.
 Unmodified Unicode key input retains its existing
 behavior; use `typeText` for text insertion.
+
+If a chord opens a sheet, remaining key releases may pass a separate bounded
+release check: both fresh AX samples must identify the same sheet with the
+exact original AX window as its direct parent, the same uniquely mapped CG
+window and stable foreground PID. The original window must remain main. Only
+keys held by this transaction may be released, with precisely the remaining
+modifier flags. This does not authorize new key-down, mouse or text events,
+other same-process windows, or releasing keys from a previous failed action.

@@ -17,6 +17,13 @@ function defaultRange() {
 }
 
 const range = process.argv[2] ?? process.env.COMMIT_RANGE ?? defaultRange();
+if (process.env.GITHUB_EVENT_NAME === "pull_request") {
+	const title = process.env.GITHUB_PR_TITLE;
+	if (typeof title !== "string" || !pattern.test(title)) {
+		console.error("Invalid or missing pull request squash title. Expected a scoped commit subject (or ci: <summary>).");
+		process.exit(1);
+	}
+}
 let subjects;
 try {
 	subjects = git(["log", "--format=%s", range]).split("\n").filter(Boolean);

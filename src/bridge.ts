@@ -4,7 +4,7 @@ import { CdpNavigationFailure, ManagedLaunchNavigationFailure } from "./navigati
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
 import { serializeFocusContext } from "./focus-context.ts";
 import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
-import { ManagedBrowser } from "./managed-browser.ts";
+import { ManagedBrowser, managedBrowserOcclusionArgs } from "./managed-browser.ts";
 import { waitForBrowserStartup } from "./browser-startup.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -2684,6 +2684,7 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		`--remote-debugging-port=${port}`,
 		"--no-first-run",
 		"--no-default-browser-check",
+		...managedBrowserOcclusionArgs(process.platform, isHeadlessMode()),
 		downloadDirectory ? "about:blank" : url,
 	];
 	const managedBrowser = await measure("spawnMs", () => ManagedBrowser.launch(executable, browser, args, signal));

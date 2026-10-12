@@ -44,7 +44,9 @@ server.on('upgrade', (req, socket) => {
       const request=JSON.parse(data);calls.push(request);
       let result={};
       if(request.method==='Runtime.evaluate'){
-        if(request.params.expression===BROWSER_PERFORMANCE_SAMPLE){
+        if(request.params.expression.includes('requestAnimationFrame')){
+          result={result:{value:{complete:true,reason:null}}};
+        }else if(request.params.expression===BROWSER_PERFORMANCE_SAMPLE){
           if(failPerformance){socket.write(frame({id:request.id,error:{message:'metrics failed'}}));continue;}
           result={result:{value:{navigation:{timeOriginMs:1},observation:{supported:[],entries:{}},loadWait:{complete:true},documentIdentity:{consistent:true,url:"about:blank",timeOriginMs:1,title:"Owned page",heading:"Owned page"}}}};
         }else if(request.params.expression==='({url:location.href,title:document.title,timeOrigin:performance.timeOrigin})') {

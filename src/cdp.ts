@@ -221,6 +221,36 @@ export class CdpTab {
 
 	/** Captures this exact CDP page viewport; never uses the desktop foreground. */
 	async captureViewport(): Promise<CdpViewportImage> {
+		// DOM/load completion does not imply a fresh compositor surface. Wait on
+		// this exact page, without input, navigation or foreground changes.
+		const readiness = await this.evaluate(`new Promise(resolve => {
+			const origin = performance.timeOrigin;
+			const url = location.href;
+			let finished = false, first = 0, second = 0;
+			const finish = (complete, reason) => {
+				if (finished) return;
+				finished = true;
+				clearTimeout(timer);
+				cancelAnimationFrame(first); cancelAnimationFrame(second);
+				resolve({complete, reason});
+			};
+			const timer = setTimeout(() => finish(false, 'deadline'), 1200);
+			// Background tabs may suspend RAF. Preserve their existing CDP
+			// capture path; never activate a tab merely to satisfy this wait.
+			if (document.visibilityState !== 'visible') { finish(true, 'hidden'); return; }
+			first = requestAnimationFrame(() => {
+				second = requestAnimationFrame(() => {
+					const stable = performance.timeOrigin === origin && location.href === url
+						&& document.visibilityState === 'visible';
+					finish(stable, stable ? null : 'document-changed');
+				});
+			});
+		})`);
+		if (!readiness || typeof readiness !== "object" || (readiness as { complete?: unknown }).complete !== true) {
+			const reason = readiness && typeof readiness === "object" ? (readiness as { reason?: unknown }).reason : undefined;
+			const diagnostic = ["hidden", "deadline", "document-changed"].includes(String(reason)) ? String(reason) : "invalid-receipt";
+			throw new Error(`CDP viewport paint readiness unavailable (${diagnostic}); screenshot was not requested.`);
+		}
 		const [layout, deviceScale] = await Promise.all([
 			this.send("Page.getLayoutMetrics"),
 			this.evaluate("window.devicePixelRatio"),

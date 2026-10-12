@@ -40,23 +40,18 @@ final class AXRefStore {
 	}
 
 	private var nextId: UInt64 = 0
-	private var windows: [String: AXUIElement] = [:]
+	private var windows = RefreshedRootReferenceStore<AXUIElement>()
 	private var elements: [String: AXUIElement] = [:]
 	private var snapshots: [String: Snapshot] = [:]
 	private let lock = NSLock()
 
-	func storeWindow(_ window: AXUIElement) -> String {
+	func storeWindow(_ window: AXUIElement, binding: NativeRootBinding) -> String {
 		lock.lock()
 		defer { lock.unlock() }
-		for (ref, existing) in windows {
-			if CFEqual(existing, window) {
-				return ref
-			}
+		return windows.store(window, binding: binding, equivalent: { CFEqual($0, $1) }) {
+			self.nextId += 1
+			return "w\(self.nextId)"
 		}
-		nextId += 1
-		let ref = "w\(nextId)"
-		windows[ref] = window
-		return ref
 	}
 
 	func storeElement(_ element: AXUIElement, snapshot: Snapshot? = nil) -> String {
@@ -72,7 +67,12 @@ final class AXRefStore {
 	func window(for ref: String) -> AXUIElement? {
 		lock.lock()
 		defer { lock.unlock() }
-		return windows[ref]
+		return windows.record(for: ref)?.element
+	}
+
+	func windowBinding(for ref: String) -> NativeRootBinding? {
+		lock.lock(); defer { lock.unlock() }
+		return windows.record(for: ref)?.binding
 	}
 
 	func element(for ref: String) -> AXUIElement? {
@@ -1359,7 +1359,7 @@ final class Bridge {
 			let menuPairs = popupMenuPairIndices(menuFrames: menuElements.map { frameForWindow($0) }, candidateFrames: popupCandidates.map { $0.bounds })
 			for (index, candidate) in popupCandidates.enumerated() {
 				let menuElement = menuPairs[index].map { menuElements[$0] }
-				let menuRef = menuElement.map { refStore.storeWindow($0) } ?? "cgmenu:\(candidate.windowId)"
+				let menuRef = menuElement.map { refStore.storeWindow($0, binding: nativeRootBinding($0, pid: appPid, windowId: candidate.windowId)) } ?? "cgmenu:\(candidate.windowId)"
 				var menu: [String: Any] = [
 					"kind": "menu",
 					"rootRef": menuRef,
@@ -1410,7 +1410,7 @@ final class Bridge {
 			if effectiveFrame.width < 100 || effectiveFrame.height < 80 { continue }
 			let hasUsableAXFrame = axFrame.width > 1 && axFrame.height > 1
 			let title = hasUsableAXFrame && !axTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? axTitle : (candidate?.title.isEmpty == false ? candidate!.title : axTitle)
-			let windowRef = refStore.storeWindow(window)
+			let windowRef = refStore.storeWindow(window, binding: NativeRootBinding(pid: pid, windowId: candidate?.windowId, role: axRole, subrole: axSubrole))
 			let isMinimized = boolAttribute(window, attribute: kAXMinimizedAttribute as CFString) ?? false
 			let isMain = boolAttribute(window, attribute: kAXMainAttribute as CFString) ?? false
 			// AXFocused on an individual window is not equivalent to the
@@ -1449,17 +1449,18 @@ final class Bridge {
 			output.append(item)
 
 			for sheet in sheetElements(of: window) {
-				let sheetRef = refStore.storeWindow(sheet)
 				let sheetFrame = frameForWindow(sheet)
 				let sheetCandidate = bestCandidate(for: sheet, candidates: candidates.filter { $0.layer == 0 })
+				let sheetBinding = nativeRootBinding(sheet, pid: pid, windowId: sheetCandidate?.windowId)
+				let sheetRef = refStore.storeWindow(sheet, binding: sheetBinding)
 				var sheetItem: [String: Any] = [
 					"kind": "sheet",
 					"rootRef": sheetRef,
 					"windowRef": sheetRef,
 					"zOrder": sheetCandidate?.zOrder ?? candidate?.zOrder ?? zIndex,
 					"title": stringAttribute(sheet, attribute: kAXTitleAttribute as CFString) ?? title,
-					"role": stringAttribute(sheet, attribute: kAXRoleAttribute as CFString) ?? "AXSheet",
-					"subrole": stringAttribute(sheet, attribute: kAXSubroleAttribute as CFString) ?? "",
+					"role": sheetBinding.role,
+					"subrole": sheetBinding.subrole,
 					"isModal": true,
 					"framePoints": ["x": sheetFrame.origin.x, "y": sheetFrame.origin.y, "w": sheetFrame.width, "h": sheetFrame.height],
 					"scaleFactor": displayScaleFactor(for: sheetFrame),
@@ -1677,7 +1678,7 @@ final class Bridge {
 			"capturedAt": captureStart.timeIntervalSince1970,
 			"window": [
 				"windowId": Int(windowId ?? 0),
-				"rootRef": windowRef ?? refStore.storeWindow(window),
+				"rootRef": windowRef ?? refStore.storeWindow(window, binding: nativeRootBinding(window, pid: pid, windowId: windowId)),
 				"kind": rootKind(role: role, subrole: subrole),
 				"framePoints": ["x": (capture?.frame ?? rootFrame).origin.x, "y": (capture?.frame ?? rootFrame).origin.y, "w": (capture?.frame ?? rootFrame).width, "h": (capture?.frame ?? rootFrame).height],
 				"scaleFactor": scale,
@@ -3143,48 +3144,59 @@ final class Bridge {
 		return ["performed": false, "reason": "no_matching_action"]
 	}
 
+	private func nativeRootBinding(_ element: AXUIElement, pid: Int32, windowId: UInt32?) -> NativeRootBinding {
+		NativeRootBinding(pid: pid, windowId: windowId,
+			role: stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? "",
+			subrole: stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? "")
+	}
+
 	private func windowElement(pid: Int32, windowId: UInt32?, windowRef: String? = nil) -> AXUIElement? {
-		if let windowRef, let stored = refStore.window(for: windowRef) {
-			AXUIElementSetMessagingTimeout(stored, 1.0)
-			var ownerPid: pid_t = 0
-			if AXUIElementGetPid(stored, &ownerPid) == .success, ownerPid == pid {
-				if stringAttribute(stored, attribute: kAXRoleAttribute as CFString) == "AXMenu" {
-					guard let windowId, let activeMenu = visiblePopupMenuElement(pid: pid, windowId: windowId), sameElement(activeMenu, stored) else { return nil }
-				}
-				let role = stringAttribute(stored, attribute: kAXRoleAttribute as CFString) ?? ""
-				let subrole = stringAttribute(stored, attribute: kAXSubroleAttribute as CFString) ?? ""
-				if isDialogLikeRoot(role: role, subrole: subrole) {
-					guard let windowId else { return nil }
-					let app = AXUIElementCreateApplication(pid)
-					AXUIElementSetMessagingTimeout(app, 1.0)
-					let windows = Array(axElementArray(app, attribute: kAXWindowsAttribute as CFString).prefix(128))
-					let matches = windows.filter { sameElement($0, stored) }
-					guard matches.count == 1 else { return nil }
-					let pairings = windowPairings(windows: windows, candidates: cgWindowCandidates(pid: pid, includeFloating: true), pid: pid)
-					guard pairings[ObjectIdentifier(matches[0])]?.candidate?.windowId == windowId else { return nil }
-					return matches[0]
-				}
-				return stored
+		let expected = windowRef.flatMap { refStore.windowBinding(for: $0) }
+		let stored = windowRef.flatMap { refStore.window(for: $0) }
+		if windowRef != nil {
+			guard let expected, stored != nil, expected.pid == pid,
+				["AXWindow", "AXSheet", "AXMenu", "AXPopover", "AXDialog"].contains(expected.role),
+				windowId == nil || windowId == expected.windowId else { return nil }
+			if expected.role == "AXMenu" {
+				guard let windowId = expected.windowId,
+					let menu = visiblePopupMenuElement(pid: pid, windowId: windowId),
+					nativeRootBinding(menu, pid: pid, windowId: windowId) == expected,
+					sameElement(menu, stored!) else { return nil }
+				return menu
 			}
 		}
-
 		let appElement = AXUIElementCreateApplication(pid)
 		AXUIElementSetMessagingTimeout(appElement, 1.0)
 		let windows = Array(axElementArray(appElement, attribute: kAXWindowsAttribute as CFString).prefix(128))
-		guard !windows.isEmpty else { return windowId.flatMap { visiblePopupMenuElement(pid: pid, windowId: $0) } }
-		guard let windowId else {
-			return windows.first
-		}
 		let candidates = cgWindowCandidates(pid: pid, includeFloating: true)
 		let pairings = windowPairings(windows: windows, candidates: candidates, pid: pid)
-		for window in windows {
-			if pairings[ObjectIdentifier(window)]?.candidate?.windowId == windowId {
-				return window
-			}
-			for sheet in sheetElements(of: window) {
-				if bestCandidate(for: sheet, candidates: candidates.filter { $0.layer == 0 })?.windowId == windowId {
-					return sheet
+		if let expected, let stored {
+			var roots: [AXUIElement] = []
+			var bindings: [(binding: NativeRootBinding, equivalent: Bool)] = []
+			for window in windows {
+				let id = pairings[ObjectIdentifier(window)]?.candidate?.windowId
+				if id == expected.windowId && sameElement(window, stored) {
+					roots.append(window)
+					bindings.append((nativeRootBinding(window, pid: pid, windowId: id), true))
 				}
+				if expected.role == "AXSheet" || expected.subrole == "AXDialog" {
+					for sheet in sheetElements(of: window) {
+						let id = bestCandidate(for: sheet, candidates: candidates.filter { $0.layer == 0 })?.windowId
+						roots.append(sheet)
+						bindings.append((nativeRootBinding(sheet, pid: pid, windowId: id), sameElement(sheet, stored)))
+					}
+				}
+			}
+			guard let index = uniqueBoundRootIndex(expected: expected, candidates: bindings) else { return nil }
+			return roots[index]
+		}
+		guard !windows.isEmpty else { return windowId.flatMap { visiblePopupMenuElement(pid: pid, windowId: $0) } }
+		guard let windowId else { return windows.first }
+		for window in windows {
+			guard ["AXWindow", "AXSheet", "AXPopover", "AXDialog"].contains(stringAttribute(window, attribute: kAXRoleAttribute as CFString) ?? "") else { continue }
+			if pairings[ObjectIdentifier(window)]?.candidate?.windowId == windowId { return window }
+			for sheet in sheetElements(of: window) {
+				if bestCandidate(for: sheet, candidates: candidates.filter { $0.layer == 0 })?.windowId == windowId { return sheet }
 			}
 		}
 		return visiblePopupMenuElement(pid: pid, windowId: windowId)
@@ -4294,7 +4306,7 @@ final class Bridge {
 				diagnostics["mappingStage"] = "selected_cg_owner_mismatch"
 			}
 		}
-		return FocusedWindowResolution(element: matched, windowId: verifiedSelectedWindowId, windowRef: matched.map { refStore.storeWindow($0) }, diagnostics: diagnostics)
+		return FocusedWindowResolution(element: matched, windowId: verifiedSelectedWindowId, windowRef: matched.map { refStore.storeWindow($0, binding: nativeRootBinding($0, pid: pid, windowId: verifiedSelectedWindowId)) }, diagnostics: diagnostics)
 	}
 
 	private func windowIdForAXWindow(_ focused: AXUIElement, pid: Int32) -> UInt32? {

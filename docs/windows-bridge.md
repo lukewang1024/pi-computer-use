@@ -177,3 +177,5 @@ and post-action observation when those stages are received. Missing, late or
 last-received stages do not establish whether input occurred or completed.
 Unknown delivery still stops subsequent actions and requires reconciliation;
 diagnostics never authorize retry or automatic recovery.
+
+During read-only UIA extraction, a cached `IsValuePatternAvailable=false` suppresses an unnecessary live ValuePattern lookup. Missing or unsupported cached metadata preserves the original live lookup. The diagnostic `cachedUnavailableValuePatternSkips` counts actual skipped lookups for retained visible nodes. Values and read-only state for supported patterns still come from the live provider; action resolution and foreground guards are unchanged. This count alone does not establish an end-to-end speed improvement.

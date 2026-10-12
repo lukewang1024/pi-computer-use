@@ -154,7 +154,7 @@ try {
  globalThis.fetch = async () => ({ ok: true, json: async () => [{ id: 'owned-page', type: 'page', title: 'Owned fixture', url: 'about:blank',
   webSocketDebuggerUrl: `ws://127.0.0.1:${process.env.PI_COMPUTER_USE_CDP_PORT}/devtools/page/owned-page` }] });
  CdpTab.connect = async () => ({ isOpen: true, accessibilityCoverage: {},
-  evaluate: async () => '', accessibilityTree: async () => [], close() { this.isOpen = false; } });
+  bringToFront: async () => {}, evaluate: async () => '', accessibilityTree: async () => [], close() { this.isOpen = false; } });
  const observed = await tool();
  assert.deepEqual(observed.details.managedBrowser, { pid: owner.child.pid, profileDirectory: owner.profileDir });
  const timing = observed.details.diagnostics.launchTimings;
@@ -172,6 +172,18 @@ try {
  await access(owner.profileDir);
  await shutdownComputerUseSession(); await absent(owner.profileDir);
  assert.equal(process.env.PI_COMPUTER_USE_CDP_PORT, 'external-browser-port', 'Replacing an owned browser preserves the original external endpoint');
+ const activationConnect = CdpTab.connect;
+ let activationCalls = 0;
+ const beforeActivationFailure = launches;
+ CdpTab.connect = async () => ({ isOpen: true,
+  bringToFront: async () => { activationCalls++; throw new Error('owned page activation failed'); },
+  close() { this.isOpen = false; } });
+ await assert.rejects(tool(), /owned page activation failed/);
+ assert.equal(activationCalls, 1, 'Unknown activation must not be retried');
+ assert.equal(launches, beforeActivationFailure + 1, 'Activation failure must not relaunch');
+ await absent(owner.profileDir);
+ assert.equal(process.env.PI_COMPUTER_USE_CDP_PORT, 'external-browser-port', 'Failed activation releases only the confirmed closed owner');
+ CdpTab.connect = activationConnect;
  const downloadRoot = await mkdtemp(path.join(os.tmpdir(), 'cu-launch-failure-'));
  const savedDownloadRoot = process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;
  process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT = downloadRoot;

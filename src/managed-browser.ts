@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { lstat, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { ManagedBrowserKind } from "./config.ts";
 
 /** Own one child and one freshly allocated profile; never adopt old profiles. */
 export class ManagedBrowser {
@@ -20,7 +21,7 @@ export class ManagedBrowser {
 		child.unref();
 	}
 
-	static async launch(executable: string, browser: "chrome" | "helium", args: string[], signal?: AbortSignal): Promise<ManagedBrowser> {
+	static async launch(executable: string, browser: ManagedBrowserKind, args: string[], signal?: AbortSignal): Promise<ManagedBrowser> {
 		signal?.throwIfAborted();
 		const profileDir = await mkdtemp(path.join(os.tmpdir(), `pi-${browser}-cdp-`));
 		try {

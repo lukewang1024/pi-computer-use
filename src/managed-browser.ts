@@ -4,6 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import type { ManagedBrowserKind } from "./config.ts";
 
+/** Keep the newly owned interactive Windows page rendering behind other windows.
+ * This does not grant native foreground ownership or authorize physical input.
+ */
+export function managedBrowserOcclusionArgs(platform: string, headless: boolean): string[] {
+	return platform === "win32" && !headless
+		? ["--disable-backgrounding-occluded-windows", "--disable-features=CalculateNativeWinOcclusion"]
+		: [];
+}
+
 /** Own one child and one freshly allocated profile; never adopt old profiles. */
 export class ManagedBrowser {
 	private stopRequested = false;

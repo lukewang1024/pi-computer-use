@@ -17,7 +17,8 @@ assert(source.includes('uniqueVisibleWindowPairs(axNodes: snapshots'), 'Standard
 assert(source.includes('let floatingIds = Set(candidates.filter { $0.layer != 0 && $0.isOnscreen && !usedCandidateIds.contains($0.windowId) }'), 'The added path is limited to floating CG windows');
 assert(source.includes('strictFrameForWindow(window)'), 'Floating mapping must use readable finite AX geometry');
 const resolver = source.slice(source.indexOf('\tprivate func windowElement('), source.indexOf('\tprivate func findDescendant('));
-assert(resolver.includes('matches.count == 1'), 'Stored dialog must remain a unique current AX window');
+assert(resolver.includes('uniqueBoundRootIndex(expected: expected, candidates: bindings)'), 'Stored dialog must resolve through the tested unique process/window/type binding');
+assert(resolver.includes('windowId == nil || windowId == expected.windowId'), 'A caller cannot substitute another CG window for the retained reference');
 assert(resolver.includes('candidate?.windowId == windowId'), 'Stored dialog must retain its exact visible CG identity');
 const swift = `import Foundation
 import CoreGraphics

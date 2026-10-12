@@ -58,8 +58,28 @@ impl<T> ElementIdentityResolver<T> {
     }
 }
 
-// Preserve the extraction root and a few late document anchors without raising
+// Preserve the extraction root and a few late content anchors without raising
 // the property-cache/output budget. Each index is visited at most once.
+#[cfg(any(windows, test))]
+fn content_anchor_priority(control_type: u32) -> Option<u8> {
+    match control_type {
+        50030 => Some(0), // Document
+        50004 => Some(1), // Edit
+        50033 => Some(2), // Pane: an expandable boundary for omitted controls
+        50000 => Some(3), // Button
+        _ => None,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn content_anchor_indices(candidates: &[(usize, u32)]) -> Vec<usize> {
+    let mut ranked: Vec<_> = candidates.iter().filter_map(|&(index, control_type)|
+        content_anchor_priority(control_type).map(|priority| (priority, index))).collect();
+    ranked.sort_unstable();
+    ranked.dedup();
+    ranked.into_iter().take(8).map(|(_, index)| index).collect()
+}
+
 #[cfg(any(windows, test))]
 fn extraction_order(count: usize, limit: usize, anchors: &[usize]) -> Vec<usize> {
     let mut result = Vec::with_capacity(count.min(limit));
@@ -491,19 +511,22 @@ mod native {
         let limit = count.min(MAX_ELEMENTS);
         // The provider's depth-first order can put the actual document after
         // hundreds of ribbon/sidebar nodes. Inspect only a short omitted tail
-        // for document anchors, then reserve slots inside the existing limit.
+        // for content anchors, then reserve slots inside the existing limit.
         // No names/classes/PIDs are treated as input authority.
         let anchor_started = Instant::now();
         let mut anchor_scanned = 0usize;
-        let mut anchors = Vec::new();
+        let mut anchor_candidates = Vec::new();
         for index in limit..count.min(limit + 64) {
-            if budget_expired() || anchor_started.elapsed().as_millis() >= 500 || anchors.len() >= 8 { break; }
+            if budget_expired() || anchor_started.elapsed().as_millis() >= 500 { break; }
             let Some(element) = (unsafe { found.GetElement(index as _).ok() }) else { continue };
             anchor_scanned += 1;
-            if unsafe { element.CurrentControlType().ok() } == Some(UIA_DocumentControlTypeId) {
-                anchors.push(index);
+            if let Some(control_type) = unsafe { element.CurrentControlType().ok() } {
+                if super::content_anchor_priority(control_type.0 as u32).is_some() {
+                    anchor_candidates.push((index, control_type.0 as u32));
+                }
             }
         }
+        let anchors = super::content_anchor_indices(&anchor_candidates);
         let anchor_ms = anchor_started.elapsed().as_millis() as u64;
         let order = super::extraction_order(count, MAX_ELEMENTS, &anchors);
         let selected = order.iter().copied().collect::<HashSet<_>>();
@@ -618,9 +641,16 @@ mod native {
         diagnostics["cacheFailures"] = json!(cache_failures);
         diagnostics["cachedUnavailableValuePatternSkips"] = json!(cached_unavailable_value_pattern_skips);
         diagnostics["documentAnchors"] = json!({
-            "tailCandidatesScanned": anchor_scanned, "selected": anchors.len(),
+            "tailCandidatesScanned": anchor_scanned,
+            "selected": anchor_candidates.iter().filter(|&&(index, control_type)|
+                control_type == 50030 && anchors.contains(&index)).count(),
             "scanMs": anchor_ms,
             "candidateLimit": 64, "cooperativeBudgetMs": 500
+        });
+        diagnostics["contentAnchors"] = json!({
+            "selected": anchors.len(), "indices": anchors,
+            "controlTypes": anchor_candidates.iter().filter_map(|&(index, control_type)|
+                anchors.contains(&index).then_some(control_type)).collect::<Vec<_>>()
         });
         if budget_expired() || cache_failures > 0 {
             diagnostics["status"] = json!("incomplete");
@@ -1482,6 +1512,32 @@ mod unit_tests {
         assert_eq!(&order[..3], &[0, 220, 1]);
         assert!(!order.contains(&199));
         assert!(super::extraction_diagnostics(236, order.len(), 200)["rawTruncated"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn late_editors_and_expandable_panes_survive_ribbon_truncation() {
+        let candidates = [(200, 50000), (201, 50033), (220, 50030),
+            (225, 50004), (226, 50004), (227, 50020), (228, 50000)];
+        let anchors = super::content_anchor_indices(&candidates);
+        assert_eq!(anchors, vec![220, 225, 226, 201, 200, 228]);
+        let order = super::extraction_order(264, 200, &anchors);
+        assert_eq!(order.len(), 200);
+        assert_eq!(order[0], 0);
+        assert!(anchors.iter().all(|index| order.contains(index)));
+        assert!(!order.contains(&227));
+        assert_eq!(order.iter().collect::<std::collections::HashSet<_>>().len(), 200);
+    }
+
+    #[test]
+    fn many_late_buttons_cannot_displace_documents_or_editors() {
+        let mut candidates: Vec<_> = (200..230).map(|index| (index, 50000)).collect();
+        candidates.extend([(250, 50030), (251, 50004), (252, 50033)]);
+        candidates.push((251, 50004));
+        let anchors = super::content_anchor_indices(&candidates);
+        assert_eq!(anchors.len(), 8);
+        assert_eq!(&anchors[..3], &[250, 251, 252]);
+        assert_eq!(anchors.iter().collect::<std::collections::HashSet<_>>().len(), 8);
+        assert!(super::content_anchor_indices(&[(200, 50020)]).is_empty());
     }
 
     #[test]

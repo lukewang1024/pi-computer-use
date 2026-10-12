@@ -155,6 +155,7 @@ jobs:
       - name: Check commit messages
         env:
           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_PR_TITLE: ${{ github.event.pull_request.title }}
         run: npm run test:commits
       - name: Pack checked candidate and record source and hashes
         env:

@@ -14,12 +14,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  commit-policy:
+    name: Commit and squash title policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Validate source commits and proposed squash subject
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/check-commit-messages.mjs
+
   test:
     name: Typecheck and tests
+    needs: commit-policy
     uses: ./.github/workflows/candidate-package.yml
 
   linux-native:
     name: Linux native (${{ matrix.arch }})
+    needs: commit-policy
     strategy:
       fail-fast: false
       matrix:

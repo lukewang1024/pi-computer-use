@@ -126,6 +126,8 @@ struct ForegroundGateReport {
 	var firstActual: ForegroundActualIdentity?
 	var firstDiagnostics: [String: Any]?
 	var secondDiagnostics: [String: Any]?
+	// Only native AX parent checks may establish this identity.
+	var ownedSheetWindowId: UInt32?
 
 	var verified: Bool {
 		target.windowId > 0
@@ -154,6 +156,7 @@ struct ForegroundGateReport {
 				"windowId": firstActual.windowId.map { Int($0) } as Any? ?? NSNull(),
 			]
 		}
+		if let ownedSheetWindowId { output["ownedSheetReleaseWindowId"] = Int(ownedSheetWindowId) }
 		if let firstDiagnostics { output["firstMapping"] = firstDiagnostics }
 		if let secondDiagnostics { output["secondMapping"] = secondDiagnostics }
 		return output
@@ -266,7 +269,21 @@ func dispatchForegroundEventIfVerified(
 	dispatch: ForegroundInputDispatchState,
 	emit: () -> Void
 ) -> Bool {
-	guard report.verified else { return false }
+	let ownedRelease: Bool
+	if case let .keyUp(code, modifiers) = event,
+		let sheetId = report.ownedSheetWindowId,
+		sheetId > 0, sheetId != report.target.windowId,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: sheetId),
+		report.firstActual == report.actual,
+		dispatch.pressedKeys.contains(code),
+		Set(modifiers).count == modifiers.count,
+		Set(modifiers) == dispatch.pressedKeys.intersection(foregroundModifierKeyCodes).subtracting([code]) {
+		ownedRelease = true
+	} else {
+		ownedRelease = false
+	}
+	guard report.verified || ownedRelease else { return false }
 	emit()
 	dispatch.record(event)
 	return true

@@ -4327,24 +4327,25 @@ final class Bridge {
 			)
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
-		let report = foregroundReport(target: target)
+		let inputEvent = foregroundInputEvent(event)
+		let report = foregroundReport(target: target, releasingOwnedKey: isOwnedForegroundKeyRelease(inputEvent, dispatch: target.dispatchState))
 		// Never turn an ordinary click into Control-click or take ownership of
 		// a user's held modifier. Inspect both source tables before every event;
 		// modifiers pressed by this exact action are the only allowed exception.
 		try verifyModifierState(target: target)
 		// AppKit views can ignore pid-targeted events, so verified foreground
 		// input is posted globally only after the exact PID and window recheck.
-		guard dispatchForegroundEventIfVerified(report, event: foregroundInputEvent(event), dispatch: target.dispatchState, emit: {
+		guard dispatchForegroundEventIfVerified(report, event: inputEvent, dispatch: target.dispatchState, emit: {
 			event.post(tap: .cghidEventTap)
 		}) else {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState))
 		}
 	}
 
-	private func foregroundReport(target: PhysicalInputTarget) -> ForegroundGateReport {
+	private func foregroundReport(target: PhysicalInputTarget, releasingOwnedKey: Bool = false) -> ForegroundGateReport {
 		var report = readForegroundReport(target: target)
 		for _ in 0..<2 {
-			guard shouldReobserveForegroundRead(report) else { break }
+			guard shouldReobserveForegroundRead(report, releasingOwnedKey: releasingOwnedKey) else { break }
 			// Only repeat observation; this event has not been posted. A different
 			// foreground application or a resolved wrong window stops immediately.
 			usleep(20_000)
@@ -4371,7 +4372,7 @@ final class Bridge {
 		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
 		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
 		let emitPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
-		let report = ForegroundGateReport(
+		var report = ForegroundGateReport(
 			target: ForegroundTargetIdentity(pid: target.pid, windowId: target.windowId),
 			actual: secondActual,
 			focusedWindowMatches: firstFocusedMatches && firstWindowMatches && secondFocusedMatches,
@@ -4381,6 +4382,29 @@ final class Bridge {
 			firstDiagnostics: firstResolution?.diagnostics,
 			secondDiagnostics: secondResolution?.diagnostics
 		)
+		// A shortcut can open its own sheet before key-up. Only balance keys
+		// already owned by this transaction; never authorize new input to it.
+		func isDirectOwnedSheet(_ focused: AXUIElement?) -> Bool {
+			guard let focused, let parentWindow = target.axWindow,
+				stringAttribute(focused, attribute: kAXRoleAttribute as CFString) == "AXSheet",
+				let parent = copyAttribute(focused, attribute: kAXParentAttribute as CFString).flatMap(asAXElement)
+			else { return false }
+			return sameElement(parent, parentWindow)
+		}
+		if firstActual == secondActual, firstActual.pid == target.pid,
+			let sheetId = secondActual.windowId, sheetId > 0, sheetId != target.windowId,
+			report.frontmostPidStable, report.targetIsMain,
+			isDirectOwnedSheet(firstFocused), isDirectOwnedSheet(secondFocused),
+			let firstFocused, let secondFocused, sameElement(firstFocused, secondFocused),
+			NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
+			report.ownedSheetWindowId = sheetId
+		}
+		if firstFocusedMatches && firstWindowMatches, report.targetIsMain, report.frontmostPidStable,
+			secondActual.pid == target.pid, let sheetId = secondActual.windowId,
+			sheetId > 0, sheetId != target.windowId, isDirectOwnedSheet(secondFocused),
+			NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
+			report.ownedSheetTransitionObserved = true
+		}
 		return report
 	}
 

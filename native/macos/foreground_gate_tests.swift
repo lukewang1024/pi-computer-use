@@ -61,6 +61,52 @@ private func assertPartial(_ result: [String: Any]?, count: Int, keys: [Int], bu
 @main
 private struct ForegroundGateTests {
 	static func main() {
+
+		do {
+		// A proven direct child sheet may receive only the remaining releases
+		// of this transaction. Same PID alone still grants nothing.
+		let chord = foregroundKeyChordEvents(code: 1, modifiers: [55, 56])!
+		var sheet = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1), focused: false)
+		sheet.firstActual = sheet.actual
+		sheet.ownedSheetWindowId = target.windowId + 1
+		let original = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId))
+		let completed = sendSequence(chord, reports: [original, original, original, sheet, sheet, sheet])
+		precondition(completed.sink == chord && completed.result == nil)
+		let empty = ForegroundInputDispatchState()
+		precondition(!dispatchForegroundEventIfVerified(sheet, event: .keyUp(1, modifiers: []), dispatch: empty, emit: { preconditionFailure() }))
+		let held = ForegroundInputDispatchState()
+		for event in chord.prefix(3) { held.record(event) }
+		for event in [ForegroundInputEvent.keyDown(2, modifiers: [55,56]), .mouseUp(0), .other, .keyUp(2, modifiers: [55,56]), .keyUp(1, modifiers: [55])] {
+			precondition(!dispatchForegroundEventIfVerified(sheet, event: event, dispatch: held, emit: { preconditionFailure() }))
+		}
+		var transition = sheet
+		transition.ownedSheetWindowId = nil
+		transition.firstActual = original.actual
+		transition.ownedSheetTransitionObserved = true
+		precondition(!shouldReobserveForegroundRead(transition))
+		precondition(shouldReobserveForegroundRead(transition, releasingOwnedKey: true))
+		precondition(isOwnedForegroundKeyRelease(.keyUp(1, modifiers: [55,56]), dispatch: held))
+		precondition(!isOwnedForegroundKeyRelease(.keyDown(1, modifiers: [55,56]), dispatch: held))
+		precondition(!dispatchForegroundEventIfVerified(transition, event: .keyUp(1, modifiers: [55,56]), dispatch: held, emit: { preconditionFailure() }))
+		var foreignTransition = transition
+		foreignTransition.firstActual = ForegroundActualIdentity(pid: 99, windowId: target.windowId)
+		precondition(!shouldReobserveForegroundRead(foreignTransition, releasingOwnedKey: true))
+		var racingTransition = transition
+		racingTransition.frontmostPidStable = false
+		precondition(!shouldReobserveForegroundRead(racingTransition, releasingOwnedKey: true))
+		var missingProof = sheet
+		missingProof.ownedSheetWindowId = nil
+		var racing = sheet
+		racing.frontmostPidStable = false
+		var changed = sheet
+		changed.firstActual = original.actual
+		var notMain = gateReport(sheet.actual, focused: false, main: false)
+		notMain.firstActual = sheet.firstActual
+		notMain.ownedSheetWindowId = sheet.ownedSheetWindowId
+		for invalid in [missingProof, racing, changed, notMain] {
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: .keyUp(1, modifiers: [55,56]), dispatch: held, emit: { preconditionFailure() }))
+		}
+		}
 		let correct = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId)
 		precondition(dispatches(gateReport(correct)))
 

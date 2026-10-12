@@ -84,6 +84,10 @@ process.env.PI_COMPUTER_USE_BROWSER_USE='true';
 let launchCount=0;
 ManagedBrowser.launch=async (executable,browser,args,signal)=>{
   launchCount++;
+  const occlusionFlags=args.filter(arg=>arg.includes('occluded-windows') || arg.includes('CalculateNativeWinOcclusion'));
+  assert.deepEqual(occlusionFlags, process.platform === 'win32' && process.env.PI_COMPUTER_USE_HEADLESS !== 'true'
+    ? ['--disable-backgrounding-occluded-windows','--disable-features=CalculateNativeWinOcclusion'] : [],
+    'Only fresh interactive Windows browser launches change native occlusion policy');
   if(server.listening)await new Promise(resolve=>server.close(resolve));
   port=Number(args.find(arg=>arg.startsWith('--remote-debugging-port=')).split('=')[1]);
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{server.removeListener('error',reject);resolve()});});

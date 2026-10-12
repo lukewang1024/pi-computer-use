@@ -21,8 +21,8 @@ setInterval(() => {}, 1000);
 `;
 const canceled = new AbortController(); canceled.abort(new Error('canceled before launch'));
 await assert.rejects(ManagedBrowser.launch(process.execPath, 'chrome', [], canceled.signal), /canceled before launch/);
-async function launch(handler = '') {
- const browser = await ManagedBrowser.launch(process.execPath, 'chrome', ['-e', fixture.replace('HANDLER', handler), '--']);
+async function launch(handler = '', kind = 'chrome') {
+ const browser = await ManagedBrowser.launch(process.execPath, kind, ['-e', fixture.replace('HANDLER', handler), '--']);
  const deadline = Date.now() + 4000;
  while (Date.now() < deadline) {
   try { await access(path.join(browser.profileDir, 'ready')); return browser; }
@@ -37,6 +37,12 @@ async function ensureStopped(browser) {
   const ended = once(browser.child, 'exit'); browser.child.kill('SIGKILL'); await ended;
  }
 }
+
+const edge = await launch('', 'edge');
+try {
+ assert(path.basename(edge.profileDir).startsWith('pi-edge-cdp-'), 'Edge must own a distinct fresh profile');
+} finally { await edge.close(); }
+await absent(edge.profileDir);
 
 const first = await launch(), second = await launch();
 assert.notEqual(first.profileDir, second.profileDir, 'Each launch must allocate a fresh profile independently of port reuse');

@@ -62,6 +62,7 @@ private func assertPartial(_ result: [String: Any]?, count: Int, keys: [Int], bu
 private struct ForegroundGateTests {
 	static func main() {
 
+		do {
 		// A proven direct child sheet may receive only the remaining releases
 		// of this transaction. Same PID alone still grants nothing.
 		let chord = foregroundKeyChordEvents(code: 1, modifiers: [55, 56])!
@@ -84,10 +85,12 @@ private struct ForegroundGateTests {
 		racing.frontmostPidStable = false
 		var changed = sheet
 		changed.firstActual = original.actual
-		var notMain = sheet
-		notMain.targetIsMain = false
+		var notMain = gateReport(sheet.actual, focused: false, main: false)
+		notMain.firstActual = sheet.firstActual
+		notMain.ownedSheetWindowId = sheet.ownedSheetWindowId
 		for invalid in [missingProof, racing, changed, notMain] {
 			precondition(!dispatchForegroundEventIfVerified(invalid, event: .keyUp(1, modifiers: [55,56]), dispatch: held, emit: { preconditionFailure() }))
+		}
 		}
 		let correct = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId)
 		precondition(dispatches(gateReport(correct)))

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { executeLaunchBrowser, executeFind, executeNavigateBrowser, executeEvaluateBrowser, executeSearchUi, executeExpandUi,executeInspectUi, executeObserve, executeReadText, executeAct, executeWaitFor, shutdownComputerUseSession } from '../src/bridge.ts';
 import { ManagedBrowser } from "../src/managed-browser.ts";
 import { BROWSER_PERFORMANCE_SAMPLE } from '../src/browser-performance.ts';
@@ -59,8 +62,11 @@ server.on('upgrade', (req, socket) => {
       }
       if(request.method==='Page.getLayoutMetrics')result={cssVisualViewport:{clientWidth:1,clientHeight:1,pageX:0,pageY:0}};
       if(request.method==='Page.captureScreenshot')result={data:badImage?'invalid':pixel};
-      socket.write(frame({id:request.id,result}));
-      if(request.method==='Page.navigate')socket.write(frame({method:'Page.loadEventFired',params:{timestamp:1}}));
+      const reply = () => {
+        socket.write(frame({id:request.id,result}));
+        if(request.method==='Page.navigate')socket.write(frame({method:'Page.loadEventFired',params:{timestamp:1}}));
+      };
+      if(request.method==='Page.navigate')setTimeout(reply,40);else reply();
     }
   });
 });
@@ -69,6 +75,9 @@ const tool=(fn,params)=>fn('launch-projection',params,undefined,undefined,ctx);
 const originalLaunch=ManagedBrowser.launch;
 const originalExecutable=process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE;
 const originalBrowserUse=process.env.PI_COMPUTER_USE_BROWSER_USE;
+const originalDownloadRoot=process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;
+const downloadRoot=await mkdtemp(path.join(os.tmpdir(),'cu-launch-timing-'));
+delete process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;
 process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE=process.execPath;
 process.env.PI_COMPUTER_USE_BROWSER_USE='true';
 let launchCount=0;
@@ -95,6 +104,9 @@ try {
   assert(folded.details.outline.returnedNodeCount<=150);
   assert(folded.details.managedBrowser.pid>0);
   assert(folded.details.diagnostics.launchTimings.totalMs>=0);
+  assert.equal(folded.details.diagnostics.launchTimings.downloadPolicyMs,undefined);
+  assert.equal(folded.details.diagnostics.launchTimings.initialNavigationMs,undefined);
+  assert(folded.details.diagnostics.launchTimings.initialResultBuildMs>=0);
   assert.equal(calls.slice(start).filter(c=>c.method==='Accessibility.getFullAXTree').length,1);
   assert(!calls.slice(start).some(c=>c.method==='Page.navigate'||c.method.startsWith('Input.')));
   const count=calls.length;
@@ -110,13 +122,28 @@ try {
   const beforeStale=calls.length;
   await assert.rejects(tool(executeAct,{stateId:folded.details.stateId,actions:[{action:'click',x:1,y:1}]}),/stale|disappeared|no longer|unavailable|not found/i);
   assert.equal(calls.length,beforeStale,'Old launch state must never deliver input');
+  process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT=downloadRoot;
+  const navigationStart=calls.length;
+  const navigated=await tool(executeLaunchBrowser,{url:'https://owned.example/',outlineView:'folded'});
+  const timing=navigated.details.diagnostics.launchTimings;
+  assert(timing.downloadPolicyMs>=0);
+  assert(timing.initialNavigationMs>=20,'Navigation response delay must be charged to navigation');
+  assert(timing.initialResultBuildMs>=0);
+  const phaseSum=Object.entries(timing).filter(([key])=>key!=='totalMs').reduce((sum,[,value])=>sum+value,0);
+  assert(phaseSum<=timing.totalMs+1,'Disjoint launch phases must not double-count latency');
+  assert.equal(calls.slice(navigationStart).filter(c=>c.method==='Page.navigate').length,1);
+  assert.equal(calls.slice(navigationStart).filter(c=>c.method==='Browser.setDownloadBehavior').length,1);
+  assert.equal(calls.slice(navigationStart).filter(c=>c.method==='Accessibility.getFullAXTree').length,1);
+  assert(!calls.slice(navigationStart).some(c=>c.method.startsWith('Input.')));
   console.log('Browser launch projection: one startup/snapshot, full-cache lookup, default full, invalid preflight and stale input refusal passed.');
 } finally {
   await shutdownComputerUseSession();
   ManagedBrowser.launch=originalLaunch;
   if(originalExecutable===undefined)delete process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE;else process.env.PI_COMPUTER_USE_CHROME_EXECUTABLE=originalExecutable;
   if(originalBrowserUse===undefined)delete process.env.PI_COMPUTER_USE_BROWSER_USE;else process.env.PI_COMPUTER_USE_BROWSER_USE=originalBrowserUse;
+  if(originalDownloadRoot===undefined)delete process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT;else process.env.PI_COMPUTER_USE_DOWNLOAD_ROOT=originalDownloadRoot;
   Object.assign(currentPlatformBackend,original);
   for(const socket of sockets)socket.destroy();
   if(server.listening)await new Promise(resolve=>server.close(resolve));
+  await rm(downloadRoot,{recursive:true,force:true});
 }

@@ -87,7 +87,7 @@ fn content_anchor_indices(candidates: &[(usize, u32, bool)]) -> Vec<usize> {
         (priority, distance, index)
     });
     ranked.dedup();
-    ranked.into_iter().take(8).map(|(_, index)| index).collect()
+    ranked.into_iter().take(16).map(|(_, index)| index).collect()
 }
 
 #[cfg(any(windows, test))]
@@ -95,7 +95,7 @@ fn extraction_order(count: usize, limit: usize, anchors: &[usize]) -> Vec<usize>
     let mut result = Vec::with_capacity(count.min(limit));
     if count == 0 || limit == 0 { return result; }
     result.push(0);
-    for &index in anchors.iter().take(8) {
+    for &index in anchors.iter().take(16) {
         if result.len() == limit { break; }
         if index < count && !result.contains(&index) { result.push(index); }
     }
@@ -1547,10 +1547,10 @@ mod unit_tests {
         candidates.extend([(250, 50030, true), (251, 50004, true), (252, 50033, true)]);
         candidates.push((251, 50004, true));
         let anchors = super::content_anchor_indices(&candidates);
-        assert_eq!(anchors.len(), 8);
+        assert_eq!(anchors.len(), 16);
         assert_eq!(&anchors[..2], &[250, 251]);
         assert!(!anchors.contains(&252));
-        assert_eq!(anchors.iter().collect::<std::collections::HashSet<_>>().len(), 8);
+        assert_eq!(anchors.iter().collect::<std::collections::HashSet<_>>().len(), 16);
         assert!(super::content_anchor_indices(&[(200, 50020, true)]).is_empty());
     }
 
@@ -1561,7 +1561,7 @@ mod unit_tests {
             (242, 50000, true), (243, 50000, true), (244, 50000, true),
             (246, 50004, true), (247, 50000, true), (248, 50004, false)];
         let anchors = super::content_anchor_indices(&candidates);
-        assert_eq!(anchors, vec![230, 232, 233, 246, 247, 244, 243, 242]);
+        assert_eq!(&anchors[..8], &[230, 232, 233, 246, 247, 244, 243, 242]);
         assert!(!anchors.contains(&248));
         assert_eq!(super::extraction_order(263, 200, &anchors).len(), 200);
     }
@@ -1573,8 +1573,27 @@ mod unit_tests {
             (232, 50004, true), (233, 50004, true), (242, 50000, true),
             (243, 50000, true), (244, 50000, true), (246, 50004, true),
             (247, 50000, true), (248, 50004, false)];
-        assert_eq!(super::content_anchor_indices(&candidates),
-            vec![230, 232, 233, 246, 247, 244, 243, 242]);
+        let anchors = super::content_anchor_indices(&candidates);
+        assert_eq!(&anchors[..8], &[230, 232, 233, 246, 247, 244, 243, 242]);
+    }
+
+    #[test]
+    fn threaded_editors_and_neighboring_actions_fit_without_larger_output() {
+        let candidates = [(200, 50000, true), (203, 50000, true),
+            (212, 50000, true), (214, 50000, true), (230, 50030, true),
+            (232, 50004, true), (233, 50004, true), (242, 50000, true),
+            (243, 50000, true), (244, 50000, true), (246, 50004, true),
+            (249, 50000, true), (250, 50004, true), (251, 50000, true),
+            (252, 50004, false), (206, 50033, true), (208, 50033, true)];
+        let anchors = super::content_anchor_indices(&candidates);
+        for index in [230, 232, 233, 242, 243, 244, 246, 249, 250, 251] {
+            assert!(anchors.contains(&index));
+        }
+        assert!(!anchors.contains(&252));
+        assert!(anchors.len() <= 16);
+        let order = super::extraction_order(264, 200, &anchors);
+        assert_eq!(order.len(), 200);
+        assert_eq!(order.iter().collect::<std::collections::HashSet<_>>().len(), 200);
     }
 
     #[test]
@@ -1584,8 +1603,8 @@ mod unit_tests {
         assert!(super::extraction_order(10, 0, &[1]).is_empty());
         let order = super::extraction_order(500, 200, &(200..220).collect::<Vec<_>>());
         assert_eq!(order.len(), 200);
-        assert!(order.contains(&207));
-        assert!(!order.contains(&208));
+        assert!(order.contains(&215));
+        assert!(!order.contains(&216));
         assert_eq!(order.iter().copied().collect::<std::collections::HashSet<_>>().len(), 200);
         assert_eq!(super::extraction_order(236, 200, &[]), (0..200).collect::<Vec<_>>());
     }

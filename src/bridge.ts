@@ -2600,6 +2600,7 @@ function validateActionTarget(action: UiAction): void {
 }
 
 async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
+	if (params.includeImage !== undefined && typeof params.includeImage !== "boolean") throw new Error("act_ui.includeImage must be boolean.");
 	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
 	if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused") {
 		throw new Error("act_ui.observationMode must be semantic or fused.");
@@ -2882,9 +2883,13 @@ export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);
 export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>("act_ui", async (params, signal) => {
 	const query = validateOutlineQuery(params.outlineQuery);
-	const result = await performAct(params, signal);
+	let result = await performAct(params, signal);
 	// Project only after the original transaction has saved its complete successor.
 	// Terminal failures retain their original evidence and never trigger more input.
+	if (params.includeImage === false && !("execution" in result.details && result.details.execution?.error) && "outline" in result.details && result.details.outline && result.content.some(item => item.type === "image")) {
+		result = { ...result, content: [...result.content.filter(item => item.type !== "image"),
+			{ type: "text", text: "Successor screenshot retained; image omitted from this response." }] };
+	}
 	if ((params.outlineView !== "folded" && !query) || !("outline" in result.details) || !result.details.outline) return result;
 	const outline = restoreOutline(result.details.outline);
 	return { ...result, details: { ...result.details,

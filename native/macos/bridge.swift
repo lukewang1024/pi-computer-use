@@ -415,6 +415,14 @@ final class InputSuppressionGuard {
 
 }
 
+private struct PointerTextFocusSnapshot {
+    let element: AXUIElement
+    let role: String
+    let secure: Bool
+    let frame: CGRect?
+    let selection: NSRange?
+}
+
 final class Bridge {
 	private let protocolVersion = 6
 	// Eager startup snapshot: reading the file on each diagnostic would mistake
@@ -1727,6 +1735,64 @@ final class Bridge {
 	}
 
 	// Optional synchronous read: no capture, focus mutation, or ref allocation.
+    // Bounded read-only focus evidence for one already delivered image click.
+    // No text/value reads, native ref minting, setters or input permission here.
+    private func pointerTextFocusSnapshot(pid: Int32, window: AXUIElement) -> PointerTextFocusSnapshot? {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.100
+        func read(_ element: AXUIElement, _ attribute: CFString) -> AnyObject? {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0, AXUIElementSetMessagingTimeout(element, Float(min(0.010, remaining))) == .success else { return nil }
+            var value: AnyObject?
+            guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+            return value
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        guard let focusedWindow = read(app, kAXFocusedWindowAttribute as CFString).flatMap(asAXElement),
+              sameElement(focusedWindow, window),
+              let focused = read(app, kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement),
+              pidForElement(focused) == pid else { return nil }
+        var ancestor: AXUIElement? = focused
+        var withinWindow = false
+        for _ in 0..<20 {
+            guard let current = ancestor, ProcessInfo.processInfo.systemUptime < deadline else { break }
+            if sameElement(current, window) { withinWindow = true; break }
+            ancestor = read(current, kAXParentAttribute as CFString).flatMap(asAXElement)
+        }
+        guard withinWindow, let role = read(focused, kAXRoleAttribute as CFString) as? String else { return nil }
+        let subrole = read(focused, kAXSubroleAttribute as CFString) as? String
+        var frame: CGRect?
+        if let positionRaw = read(focused, kAXPositionAttribute as CFString),
+           let sizeRaw = read(focused, kAXSizeAttribute as CFString),
+           CFGetTypeID(positionRaw) == AXValueGetTypeID(), CFGetTypeID(sizeRaw) == AXValueGetTypeID() {
+            let positionValue = unsafeBitCast(positionRaw, to: AXValue.self)
+            let sizeValue = unsafeBitCast(sizeRaw, to: AXValue.self)
+            var position = CGPoint.zero; var size = CGSize.zero
+            if AXValueGetType(positionValue) == .cgPoint, AXValueGetType(sizeValue) == .cgSize,
+               AXValueGetValue(positionValue, .cgPoint, &position), AXValueGetValue(sizeValue, .cgSize, &size) {
+                frame = CGRect(origin: position, size: size)
+            }
+        }
+        var selection: NSRange?
+        if role == "AXTextArea", let raw = read(focused, kAXSelectedTextRangeAttribute as CFString),
+           CFGetTypeID(raw) == AXValueGetTypeID() {
+            let value = unsafeBitCast(raw, to: AXValue.self)
+            var range = CFRange(location: -1, length: -1)
+            if AXValueGetType(value) == .cfRange, AXValueGetValue(value, .cfRange, &range),
+               range.location >= 0, range.length >= 0, range.length <= 100_000,
+               range.location <= 100_000 - range.length {
+                selection = NSRange(location: range.location, length: range.length)
+            }
+        }
+        guard let current = read(app, kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement),
+              let currentWindow = read(app, kAXFocusedWindowAttribute as CFString).flatMap(asAXElement),
+              sameElement(current, focused), sameElement(currentWindow, window),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+        return PointerTextFocusSnapshot(element: focused, role: role,
+            secure: role == "AXSecureTextField" || subrole == "AXSecureTextField", frame: frame, selection: selection)
+    }
+
 	// AXFocused on individual nodes is not the application's unique focused element.
 	private func focusedContext(pid: Int32, window: AXUIElement, outline: LookNode, budgetMs: Double = 750) -> [String: Any] {
 		let started = ProcessInfo.processInfo.systemUptime
@@ -2274,6 +2340,8 @@ final class Bridge {
 		var isApplicationMenuElement = false
 		var rawPoint: CGPoint?
 		var preflightCapsUnknown = false
+		var pointerFocusBefore: PointerTextFocusSnapshot?
+		var pointerFocusPoint: CGPoint?
 		let rootPreparationStarted = ProcessInfo.processInfo.systemUptime
 		let eventsLive = !deferRootDelta && ensureRootObserver(pid: pid)
 		let eventCursor = eventsLive ? rootEventCursor(pid: pid) : 0
@@ -2428,6 +2496,13 @@ final class Bridge {
 			if delivery == "hid" { try preflight(point) }
 			switch action {
 			case "press", "click":
+                if action == "click", element == nil, delivery == "hid",
+                   (params["button"] as? String ?? "left") == "left",
+                   ((params["clickCount"] as? NSNumber)?.intValue ?? 1) == 1,
+                   let window = physicalTarget?.axWindow {
+                    pointerFocusPoint = point
+                    pointerFocusBefore = pointerTextFocusSnapshot(pid: pid, window: window)
+                }
 				animateCursor(at: point)
 				try postMouseClick(at: point, pid: pid, target: physicalTarget, button: mouseButton(params["button"] as? String ?? "left"), clickCount: max(1, min(3, (params["clickCount"] as? NSNumber)?.intValue ?? 1)), delivery: delivery)
 			case "moveMouse":
@@ -2783,6 +2858,18 @@ final class Bridge {
 		} else if windowChanged {
 			outcome = "worked"
 		}
+        if let before = pointerFocusBefore, let point = pointerFocusPoint,
+           let window = physicalTarget?.axWindow,
+           let after = pointerTextFocusSnapshot(pid: pid, window: window) {
+            let focusChanged = pointerTextFocusChanged(PointerTextFocusEvidence(
+                beforeScopeVerified: true, afterScopeVerified: true,
+                sameFocusedElement: sameElement(before.element, after.element),
+                afterRole: after.role, afterSecure: after.secure, afterFrame: after.frame,
+                point: point, beforeSelection: before.selection, afterSelection: after.selection))
+            evidence["pointerTextFocus"] = ["scopeVerified": true, "changed": focusChanged,
+                "role": after.role, "verification": "focused-element-or-selection-change"]
+            if focusChanged { outcome = "worked" }
+        }
 		if windowChanged { evidence["windowChanged"] = true }
 		var response: [String: Any] = ["outcome": outcome, "performed": performed]
 		if !evidence.isEmpty { response["evidence"] = evidence }

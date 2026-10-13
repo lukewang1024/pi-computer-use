@@ -399,6 +399,14 @@ pub fn annotation_can_set_text(signals: &ElementAnnotationSignals) -> bool {
     signals.value && !signals.value_read_only.unwrap_or(false) || signals.text
 }
 
+pub fn definite_toggle_state(state: Result<i32, String>) -> Result<bool, String> {
+    match state? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err("Toggle state is indeterminate after mutation; effect unverified".into()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Windows implementation  (windows crate)
 // ---------------------------------------------------------------------------
@@ -939,12 +947,12 @@ mod native {
                 pattern.Toggle().map_err(|e| format!("Toggle: {e}"))?;
                 crate::action_trace::phase("native_mutation_returned");
             }
-            let state = unsafe {
+            let state = super::definite_toggle_state(unsafe {
                 pattern
                     .CurrentToggleState()
-                    .map(|s| s.0 != 0)
-                    .unwrap_or(false)
-            };
+                    .map(|s| s.0)
+                    .map_err(|e| format!("Toggle state read after mutation: {e}"))
+            })?;
             return Ok(PressResult::Toggled(state));
         }
         if let Ok(pattern) = unsafe {
@@ -1643,6 +1651,24 @@ mod unit_tests {
     #[test]
     fn test_control_type_to_role_checkbox() {
         assert_eq!(control_type_to_role(50002), "checkbox");
+    }
+
+    #[test]
+    fn definite_toggle_states_preserve_checked_and_unchecked() {
+        assert_eq!(definite_toggle_state(Ok(0)), Ok(false));
+        assert_eq!(definite_toggle_state(Ok(1)), Ok(true));
+    }
+
+    #[test]
+    fn failed_toggle_state_read_never_becomes_verified_false() {
+        let result = definite_toggle_state(Err("Provider state read failed after mutation".into()));
+        assert_eq!(result, Err("Provider state read failed after mutation".into()));
+    }
+
+    #[test]
+    fn indeterminate_toggle_states_do_not_claim_a_boolean_effect() {
+        assert!(definite_toggle_state(Ok(2)).is_err());
+        assert!(definite_toggle_state(Ok(-1)).is_err());
     }
 
     #[test]

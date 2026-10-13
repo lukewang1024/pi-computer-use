@@ -46,6 +46,21 @@ func appMenuIdentityRefusal(_ identity: AppMenuIdentity) -> AppMenuRefusal? {
     return nil
 }
 
+// Serialize the already observed guard inputs; never re-read AX or include
+// window titles, menu labels, document text, or other application content.
+func appMenuRefusalDiagnostics(_ identity: AppMenuIdentity, refusal: AppMenuRefusal) -> String {
+    let menuOwner = identity.menuBarOwnerPid.map { String($0) } ?? "unavailable"
+    let windowOwner = identity.windowOwnerPid.map { String($0) } ?? "unavailable"
+    let foregroundPid = identity.frontmostPid.map { String($0) } ?? "unavailable"
+    let focusedWindow = identity.focusedWindowId.map { String($0) } ?? "unavailable"
+    let foregroundWindow = identity.frontmostWindowId.map { String($0) } ?? "unavailable"
+    let expectedMenuRole = identity.menuBarRole == "AXMenuBar"
+    return "refusal=\(refusal.rawValue); targetPid=\(identity.pid); targetWindowId=\(identity.windowId); "
+        + "menuOwnerPid=\(menuOwner); windowOwnerPid=\(windowOwner); foregroundPid=\(foregroundPid); "
+        + "focusedWindowId=\(focusedWindow); foregroundWindowId=\(foregroundWindow); "
+        + "expectedMenuRole=\(expectedMenuRole); sameMenuBar=\(identity.sameObservedMenuBar)"
+}
+
 func appMenuInvocationRefusal(_ identity: AppMenuIdentity, elementOwnerPid: Int32?,
                               descendantOfObservedMenuBar: Bool, enabled: Bool?,
                               declaredActions: [String]) -> AppMenuRefusal? {

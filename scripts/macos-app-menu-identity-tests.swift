@@ -46,6 +46,27 @@
         precondition(appMenuIdentityRefusal(changed) == .wrongWindow)
         changed = observed; changed.sameObservedMenuBar = false
         precondition(appMenuIdentityRefusal(changed) == .staleMenuBar)
+        let staleDiagnostics = appMenuRefusalDiagnostics(changed, refusal: .staleMenuBar)
+        precondition(staleDiagnostics.contains("refusal=staleMenuBar"))
+        precondition(staleDiagnostics.contains("sameMenuBar=false"))
+        precondition(staleDiagnostics.contains("targetWindowId=20"))
+        changed = observed; changed.frontmostPid = 101
+        let backgroundDiagnostics = appMenuRefusalDiagnostics(changed, refusal: .backgroundApplication)
+        precondition(backgroundDiagnostics.contains("foregroundPid=101"))
+        precondition(backgroundDiagnostics.contains("targetPid=100"))
+        precondition(appMenuIdentityRefusal(changed) == .backgroundApplication)
+        changed = observed; changed.frontmostWindowId = 21
+        let wrongWindowDiagnostics = appMenuRefusalDiagnostics(changed, refusal: .wrongWindow)
+        precondition(wrongWindowDiagnostics.contains("foregroundWindowId=21"))
+        precondition(wrongWindowDiagnostics.contains("targetWindowId=20"))
+        precondition(appMenuIdentityRefusal(changed) == .wrongWindow)
+        changed = observed; changed.windowOwnerPid = nil; changed.menuBarRole = "PRIVATE_PROVIDER_CONTENT"
+        let unavailableDiagnostics = appMenuRefusalDiagnostics(changed, refusal: .invalidTarget)
+        precondition(unavailableDiagnostics.contains("windowOwnerPid=unavailable"))
+        precondition(unavailableDiagnostics.contains("expectedMenuRole=false"))
+        precondition(!unavailableDiagnostics.contains("PRIVATE_PROVIDER_CONTENT"))
+        precondition(appMenuIdentityRefusal(observed) == nil)
+
         precondition(appMenuInvocationRefusal(observed, elementOwnerPid: 101,
             descendantOfObservedMenuBar: true, enabled: true, declaredActions: ["AXPress"]) == .foreignElement)
         precondition(appMenuInvocationRefusal(observed, elementOwnerPid: 100,

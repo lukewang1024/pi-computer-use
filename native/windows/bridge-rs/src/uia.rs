@@ -75,7 +75,17 @@ fn content_anchor_priority(control_type: u32) -> Option<u8> {
 fn content_anchor_indices(candidates: &[(usize, u32, bool)]) -> Vec<usize> {
     let mut ranked: Vec<_> = candidates.iter().filter_map(|&(index, control_type, visible)|
         visible.then(|| content_anchor_priority(control_type).map(|priority| (priority, index))).flatten()).collect();
-    ranked.sort_unstable();
+    // A ribbon can contribute many earlier buttons. Prefer controls next to
+    // visible document/edit anchors in the provider's depth-first order, so
+    // late content actions retain a bounded slot without application labels.
+    let content_indices: Vec<_> = ranked.iter()
+        .filter_map(|&(priority, index)| (priority <= 1).then_some(index)).collect();
+    ranked.sort_unstable_by_key(|&(priority, index)| {
+        let distance = if priority == 2 {
+            content_indices.iter().map(|other| index.abs_diff(*other)).min().unwrap_or(0)
+        } else { 0 };
+        (priority, distance, index)
+    });
     ranked.dedup();
     ranked.into_iter().take(8).map(|(_, index)| index).collect()
 }
@@ -1522,7 +1532,7 @@ mod unit_tests {
         let candidates = [(200, 50000, true), (201, 50033, true), (220, 50030, true),
             (225, 50004, true), (226, 50004, true), (227, 50020, true), (228, 50000, true)];
         let anchors = super::content_anchor_indices(&candidates);
-        assert_eq!(anchors, vec![220, 225, 226, 200, 228, 201]);
+        assert_eq!(anchors, vec![220, 225, 226, 228, 200, 201]);
         let order = super::extraction_order(264, 200, &anchors);
         assert_eq!(order.len(), 200);
         assert_eq!(order[0], 0);
@@ -1551,9 +1561,20 @@ mod unit_tests {
             (242, 50000, true), (243, 50000, true), (244, 50000, true),
             (246, 50004, true), (247, 50000, true), (248, 50004, false)];
         let anchors = super::content_anchor_indices(&candidates);
-        assert_eq!(anchors, vec![230, 232, 233, 246, 242, 243, 244, 247]);
+        assert_eq!(anchors, vec![230, 232, 233, 246, 247, 244, 243, 242]);
         assert!(!anchors.contains(&248));
         assert_eq!(super::extraction_order(263, 200, &anchors).len(), 200);
+    }
+
+    #[test]
+    fn earlier_ribbon_buttons_do_not_displace_adjacent_content_actions() {
+        let candidates = [(200, 50000, true), (203, 50000, true),
+            (212, 50000, true), (214, 50000, true), (230, 50030, true),
+            (232, 50004, true), (233, 50004, true), (242, 50000, true),
+            (243, 50000, true), (244, 50000, true), (246, 50004, true),
+            (247, 50000, true), (248, 50004, false)];
+        assert_eq!(super::content_anchor_indices(&candidates),
+            vec![230, 232, 233, 246, 247, 244, 243, 242]);
     }
 
     #[test]

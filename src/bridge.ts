@@ -1419,7 +1419,7 @@ async function helperAct(
 			return transport;
 		}
 		const code = (error as Error & { code?: string })?.code;
-		if (code !== "foreground_required" || headless || (action.action === "selectText" || action.action === "cancel")) throw error;
+		if (code !== "foreground_required" || headless || (action.action === "selectText" || action.action === "cancel" || action.action === "showMenu")) throw error;
 		let foreground: HelperActResult;
 		try {
 			foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
@@ -1450,6 +1450,7 @@ function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, 
 			case "selectText": return { ...base, action: action.action, params: { ...action.params, delivery } };
 			case "invoke":
 			case "cancel":
+			case "showMenu":
 			case "commit": return { ...base, action: action.action, params: { delivery } };
 			case "press":
 			case "click": return { ...base, action: action.action, params: { ...action.params, delivery } };
@@ -2592,7 +2593,7 @@ function validateActionTarget(action: UiAction): void {
 	if ((action.action === "click" || action.action === "moveMouse") && hasRef === hasPoint) {
 		throw new Error(`${action.action} requires exactly one target: ref or x/y coordinates.`);
 	}
-	if ((action.action === "selectText" || action.action === "commit" || action.action === "invoke" || action.action === "cancel") && (!hasRef || hasPoint)) throw new Error(`${action.action} requires only a native element ref.`);
+	if ((action.action === "selectText" || action.action === "commit" || action.action === "invoke" || action.action === "cancel" || action.action === "showMenu") && (!hasRef || hasPoint)) throw new Error(`${action.action} requires only a native element ref.`);
 	if (action.action === "press" && !hasRef) throw new Error("press requires an actionable ref.");
 	if (action.action === "scroll" && toFiniteNumber(action.scrollX, 0) === 0 && toFiniteNumber(action.scrollY, 0) === 0) throw new Error("scroll requires a non-zero scrollX or scrollY delta.");
 	if (action.clickCount !== undefined && (!Number.isInteger(action.clickCount) || action.clickCount < 1 || action.clickCount > 3)) throw new Error("clickCount must be an integer from 1 to 3.");

@@ -68,7 +68,7 @@ retries can refresh geometry but retain the original window owner. Uniform
 PrintWindow output still uses the guarded screen-pixel fallback or returns a
 capture error; it is not proof that the application itself has a white screen.
 
-Windows accessibility extraction reserves up to eight slots for late documents,
+Windows accessibility extraction reserves up to sixteen slots for late documents,
 visible editors, buttons and expandable panes within its existing 200-element budget.
 It examines at most 64 omitted candidates for 500ms and continues to report
 truncation. This keeps content controls from being displaced by large ribbons;

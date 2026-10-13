@@ -1549,9 +1549,12 @@ final class Bridge {
 			}
 			let app = AXUIElementCreateApplication(pid)
 			AXUIElementSetMessagingTimeout(app, 0.1)
-			guard let menuBar = copyAttribute(app, attribute: kAXMenuBarAttribute as CFString).flatMap(asAXElement),
-				appMenuIdentityRefusal(applicationMenuIdentity(pid: pid, windowId: windowId, menuBar: menuBar)) == nil else {
-				throw BridgeFailure(message: "Application menu ownership or exact foreground window is unverified", code: "stale_ref")
+			guard let menuBar = copyAttribute(app, attribute: kAXMenuBarAttribute as CFString).flatMap(asAXElement) else {
+				throw BridgeFailure(message: "Application menu ownership or exact foreground window is unverified; refusal=menuBarUnavailable; targetPid=\(pid); targetWindowId=\(windowId)", code: "stale_ref")
+			}
+			let identity = applicationMenuIdentity(pid: pid, windowId: windowId, menuBar: menuBar)
+			if let refusal = appMenuIdentityRefusal(identity) {
+				throw BridgeFailure(message: "Application menu ownership or exact foreground window is unverified; " + appMenuRefusalDiagnostics(identity, refusal: refusal), code: "stale_ref")
 			}
 			observedAppMenu = menuBar
 		}
@@ -1620,8 +1623,12 @@ final class Bridge {
 				menuNode.children.append(childNode)
 			}
 			if children.count > 64 { menuNode.truncated = true }
-			guard let windowId, appMenuIdentityRefusal(applicationMenuIdentity(pid: pid, windowId: windowId, menuBar: menuBar)) == nil else {
-				throw BridgeFailure(message: "Application menu ownership changed during observation", code: "stale_ref")
+			guard let windowId else {
+				throw BridgeFailure(message: "Application menu ownership changed during observation; refusal=missingWindowId; targetPid=\(pid)", code: "stale_ref")
+			}
+			let identity = applicationMenuIdentity(pid: pid, windowId: windowId, menuBar: menuBar)
+			if let refusal = appMenuIdentityRefusal(identity) {
+				throw BridgeFailure(message: "Application menu ownership changed during observation; " + appMenuRefusalDiagnostics(identity, refusal: refusal), code: "stale_ref")
 			}
 			outline.children.append(menuNode)
 		}

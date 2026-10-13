@@ -23,3 +23,22 @@ on macOS CI; non-macOS local runs explicitly skip native execution. Source
 wiring checks reject reintroduction of refresh/retry or coordinate fallback
 inside the already attempted native press branch. Live Word validation remains
 required before adopting a candidate helper.
+
+
+## Image click focus evidence
+
+A single left click grounded in a captured macOS window can move the editor
+focus or caret without changing the window inventory. For foreground coordinate
+clicks, the helper takes bounded, read-only focus samples before and after the
+one input. Both samples must belong to the exact bound window and current
+foreground application. A newly focused AXTextArea must contain the clicked
+screen point; an already focused area needs a changed, valid selection range.
+Missing, raced or expired reads and preexisting focus keep the effect unknown.
+The diagnostic records only scope, role and whether focus changed, never text.
+
+This proves a click effect, not editing permission or successful text entry.
+Direct references to disabled controls remain refused, and SetValue is not used
+for image-grounded keyboard transactions. Every physical event still passes the
+exact window foreground gate. A transaction stops after any unknown step; it
+never replays the click to obtain a positive result. Saved/reopened content is
+still required to establish a Word editing task's success.

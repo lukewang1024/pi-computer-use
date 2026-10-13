@@ -355,3 +355,37 @@ func performNativeActionOnce(invoke: () -> Int) -> [String: Any] {
         "evidence": ["nativeActionAttempted": true, "axStatus": status, "inputRetryProhibited": true],
     ]
 }
+
+// Evidence of a pointer click's effect, never permission to deliver input.
+// Direct AX refs retain their availability guards. The physical gate must
+// independently verify the exact window before every keyboard/mouse event.
+struct PointerTextFocusEvidence {
+    var beforeScopeVerified: Bool
+    var afterScopeVerified: Bool
+    var sameFocusedElement: Bool
+    var afterRole: String
+    var afterSecure: Bool
+    var afterFrame: CGRect?
+    var point: CGPoint
+    var beforeSelection: NSRange?
+    var afterSelection: NSRange?
+}
+
+func pointerTextFocusChanged(_ evidence: PointerTextFocusEvidence) -> Bool {
+    guard evidence.beforeScopeVerified, evidence.afterScopeVerified,
+          evidence.afterRole == "AXTextArea", !evidence.afterSecure,
+          let frame = evidence.afterFrame,
+          [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
+           evidence.point.x, evidence.point.y].allSatisfy({ $0.isFinite }),
+          frame.size.width > 0, frame.size.height > 0, evidence.point.x >= frame.origin.x, evidence.point.x < frame.origin.x + frame.size.width,
+          evidence.point.y >= frame.origin.y, evidence.point.y < frame.origin.y + frame.size.height else { return false }
+    if !evidence.sameFocusedElement { return true }
+    guard let before = evidence.beforeSelection, let after = evidence.afterSelection,
+          before.location != NSNotFound, after.location != NSNotFound,
+          before.location >= 0, after.location >= 0,
+          before.length >= 0, after.length >= 0,
+          before.length <= 100_000, after.length <= 100_000,
+          before.location <= 100_000 - before.length,
+          after.location <= 100_000 - after.length else { return false }
+    return before != after
+}

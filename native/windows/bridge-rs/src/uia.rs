@@ -58,14 +58,44 @@ impl<T> ElementIdentityResolver<T> {
     }
 }
 
-// Preserve the extraction root and a few late document anchors without raising
+// Preserve the extraction root and a few late content anchors without raising
 // the property-cache/output budget. Each index is visited at most once.
+#[cfg(any(windows, test))]
+fn content_anchor_priority(control_type: u32) -> Option<u8> {
+    match control_type {
+        50030 => Some(0), // Document
+        50004 => Some(1), // Edit
+        50000 => Some(2), // Button
+        50033 => Some(3), // Pane: an expandable boundary for omitted controls
+        _ => None,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn content_anchor_indices(candidates: &[(usize, u32, bool)]) -> Vec<usize> {
+    let mut ranked: Vec<_> = candidates.iter().filter_map(|&(index, control_type, visible)|
+        visible.then(|| content_anchor_priority(control_type).map(|priority| (priority, index))).flatten()).collect();
+    // A ribbon can contribute many earlier buttons. Prefer controls next to
+    // visible document/edit anchors in the provider's depth-first order, so
+    // late content actions retain a bounded slot without application labels.
+    let content_indices: Vec<_> = ranked.iter()
+        .filter_map(|&(priority, index)| (priority <= 1).then_some(index)).collect();
+    ranked.sort_unstable_by_key(|&(priority, index)| {
+        let distance = if priority == 2 {
+            content_indices.iter().map(|other| index.abs_diff(*other)).min().unwrap_or(0)
+        } else { 0 };
+        (priority, distance, index)
+    });
+    ranked.dedup();
+    ranked.into_iter().take(16).map(|(_, index)| index).collect()
+}
+
 #[cfg(any(windows, test))]
 fn extraction_order(count: usize, limit: usize, anchors: &[usize]) -> Vec<usize> {
     let mut result = Vec::with_capacity(count.min(limit));
     if count == 0 || limit == 0 { return result; }
     result.push(0);
-    for &index in anchors.iter().take(8) {
+    for &index in anchors.iter().take(16) {
         if result.len() == limit { break; }
         if index < count && !result.contains(&index) { result.push(index); }
     }
@@ -491,19 +521,25 @@ mod native {
         let limit = count.min(MAX_ELEMENTS);
         // The provider's depth-first order can put the actual document after
         // hundreds of ribbon/sidebar nodes. Inspect only a short omitted tail
-        // for document anchors, then reserve slots inside the existing limit.
+        // for content anchors, then reserve slots inside the existing limit.
         // No names/classes/PIDs are treated as input authority.
         let anchor_started = Instant::now();
         let mut anchor_scanned = 0usize;
-        let mut anchors = Vec::new();
+        let mut anchor_candidates = Vec::new();
         for index in limit..count.min(limit + 64) {
-            if budget_expired() || anchor_started.elapsed().as_millis() >= 500 || anchors.len() >= 8 { break; }
+            if budget_expired() || anchor_started.elapsed().as_millis() >= 500 { break; }
             let Some(element) = (unsafe { found.GetElement(index as _).ok() }) else { continue };
             anchor_scanned += 1;
-            if unsafe { element.CurrentControlType().ok() } == Some(UIA_DocumentControlTypeId) {
-                anchors.push(index);
+            if let Some(control_type) = unsafe { element.CurrentControlType().ok() } {
+                if super::content_anchor_priority(control_type.0 as u32).is_some() {
+                    if budget_expired() || anchor_started.elapsed().as_millis() >= 500 { break; }
+                    let visible = unsafe { element.CurrentIsOffscreen().ok() }
+                        .map(|value| !value.as_bool()).unwrap_or(false);
+                    anchor_candidates.push((index, control_type.0 as u32, visible));
+                }
             }
         }
+        let anchors = super::content_anchor_indices(&anchor_candidates);
         let anchor_ms = anchor_started.elapsed().as_millis() as u64;
         let order = super::extraction_order(count, MAX_ELEMENTS, &anchors);
         let selected = order.iter().copied().collect::<HashSet<_>>();
@@ -618,9 +654,16 @@ mod native {
         diagnostics["cacheFailures"] = json!(cache_failures);
         diagnostics["cachedUnavailableValuePatternSkips"] = json!(cached_unavailable_value_pattern_skips);
         diagnostics["documentAnchors"] = json!({
-            "tailCandidatesScanned": anchor_scanned, "selected": anchors.len(),
+            "tailCandidatesScanned": anchor_scanned,
+            "selected": anchor_candidates.iter().filter(|&&(index, control_type, _)|
+                control_type == 50030 && anchors.contains(&index)).count(),
             "scanMs": anchor_ms,
             "candidateLimit": 64, "cooperativeBudgetMs": 500
+        });
+        diagnostics["contentAnchors"] = json!({
+            "selected": anchors.len(), "indices": anchors,
+            "controlTypes": anchor_candidates.iter().filter_map(|&(index, control_type, _)|
+                anchors.contains(&index).then_some(control_type)).collect::<Vec<_>>()
         });
         if budget_expired() || cache_failures > 0 {
             diagnostics["status"] = json!("incomplete");
@@ -1485,14 +1528,83 @@ mod unit_tests {
     }
 
     #[test]
+    fn late_editors_and_expandable_panes_survive_ribbon_truncation() {
+        let candidates = [(200, 50000, true), (201, 50033, true), (220, 50030, true),
+            (225, 50004, true), (226, 50004, true), (227, 50020, true), (228, 50000, true)];
+        let anchors = super::content_anchor_indices(&candidates);
+        assert_eq!(anchors, vec![220, 225, 226, 228, 200, 201]);
+        let order = super::extraction_order(264, 200, &anchors);
+        assert_eq!(order.len(), 200);
+        assert_eq!(order[0], 0);
+        assert!(anchors.iter().all(|index| order.contains(index)));
+        assert!(!order.contains(&227));
+        assert_eq!(order.iter().collect::<std::collections::HashSet<_>>().len(), 200);
+    }
+
+    #[test]
+    fn many_late_buttons_cannot_displace_documents_or_editors() {
+        let mut candidates: Vec<_> = (200..230).map(|index| (index, 50000, true)).collect();
+        candidates.extend([(250, 50030, true), (251, 50004, true), (252, 50033, true)]);
+        candidates.push((251, 50004, true));
+        let anchors = super::content_anchor_indices(&candidates);
+        assert_eq!(anchors.len(), 16);
+        assert_eq!(&anchors[..2], &[250, 251]);
+        assert!(!anchors.contains(&252));
+        assert_eq!(anchors.iter().collect::<std::collections::HashSet<_>>().len(), 16);
+        assert!(super::content_anchor_indices(&[(200, 50020, true)]).is_empty());
+    }
+
+    #[test]
+    fn hidden_editors_and_docks_cannot_crowd_out_visible_content_actions() {
+        let candidates = [(206, 50033, true), (208, 50033, true), (209, 50033, true),
+            (230, 50030, true), (232, 50004, true), (233, 50004, true),
+            (242, 50000, true), (243, 50000, true), (244, 50000, true),
+            (246, 50004, true), (247, 50000, true), (248, 50004, false)];
+        let anchors = super::content_anchor_indices(&candidates);
+        assert_eq!(&anchors[..8], &[230, 232, 233, 246, 247, 244, 243, 242]);
+        assert!(!anchors.contains(&248));
+        assert_eq!(super::extraction_order(263, 200, &anchors).len(), 200);
+    }
+
+    #[test]
+    fn earlier_ribbon_buttons_do_not_displace_adjacent_content_actions() {
+        let candidates = [(200, 50000, true), (203, 50000, true),
+            (212, 50000, true), (214, 50000, true), (230, 50030, true),
+            (232, 50004, true), (233, 50004, true), (242, 50000, true),
+            (243, 50000, true), (244, 50000, true), (246, 50004, true),
+            (247, 50000, true), (248, 50004, false)];
+        let anchors = super::content_anchor_indices(&candidates);
+        assert_eq!(&anchors[..8], &[230, 232, 233, 246, 247, 244, 243, 242]);
+    }
+
+    #[test]
+    fn threaded_editors_and_neighboring_actions_fit_without_larger_output() {
+        let candidates = [(200, 50000, true), (203, 50000, true),
+            (212, 50000, true), (214, 50000, true), (230, 50030, true),
+            (232, 50004, true), (233, 50004, true), (242, 50000, true),
+            (243, 50000, true), (244, 50000, true), (246, 50004, true),
+            (249, 50000, true), (250, 50004, true), (251, 50000, true),
+            (252, 50004, false), (206, 50033, true), (208, 50033, true)];
+        let anchors = super::content_anchor_indices(&candidates);
+        for index in [230, 232, 233, 242, 243, 244, 246, 249, 250, 251] {
+            assert!(anchors.contains(&index));
+        }
+        assert!(!anchors.contains(&252));
+        assert!(anchors.len() <= 16);
+        let order = super::extraction_order(264, 200, &anchors);
+        assert_eq!(order.len(), 200);
+        assert_eq!(order.iter().collect::<std::collections::HashSet<_>>().len(), 200);
+    }
+
+    #[test]
     fn anchor_order_is_unique_bounded_and_keeps_small_trees_complete() {
         assert_eq!(super::extraction_order(4, 200, &[0, 3, 3, 999]), vec![0, 3, 1, 2]);
         assert!(super::extraction_order(0, 200, &[1]).is_empty());
         assert!(super::extraction_order(10, 0, &[1]).is_empty());
         let order = super::extraction_order(500, 200, &(200..220).collect::<Vec<_>>());
         assert_eq!(order.len(), 200);
-        assert!(order.contains(&207));
-        assert!(!order.contains(&208));
+        assert!(order.contains(&215));
+        assert!(!order.contains(&216));
         assert_eq!(order.iter().copied().collect::<std::collections::HashSet<_>>().len(), 200);
         assert_eq!(super::extraction_order(236, 200, &[]), (0..200).collect::<Vec<_>>());
     }

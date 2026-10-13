@@ -2636,8 +2636,8 @@ final class Bridge {
 					"apiSucceeded": status == .success, "inputRetryProhibited": true]])
 		}
 
-		if action == "commit" || action == "invoke" {
-			let nativeAction = action == "commit" ? "AXConfirm" : "AXPress"
+		if action == "commit" || action == "invoke" || action == "showMenu" {
+			let nativeAction = action == "commit" ? "AXConfirm" : action == "showMenu" ? "AXShowMenu" : "AXPress"
 			var elementPID: pid_t = 0
 			guard let element, target["ref"] is String,
 				AXUIElementGetPid(element, &elementPID) == .success, elementPID == pid, record.windowId > 0,
@@ -2666,8 +2666,13 @@ final class Bridge {
 			performed["apiStatus"] = status.rawValue
 			// Returned AX success proves dispatch, not that an application saved
 			// its value. Never retry or substitute keyboard/pointer input.
-			return finish(["outcome": "unknown", "performed": performed,
-				"evidence": ["actionReturned": true, "apiSucceeded": status == .success]])
+			var nativeEvidence: [String: Any] = ["actionReturned": true, "apiSucceeded": status == .success]
+			if action == "showMenu" {
+				nativeEvidence["nativeActionAttempted"] = true
+				nativeEvidence["axStatus"] = status.rawValue
+				nativeEvidence["inputRetryProhibited"] = true
+			}
+			return finish(["outcome": "unknown", "performed": performed, "evidence": nativeEvidence])
 		}
 
 		if let element, action == "press" || action == "click" {

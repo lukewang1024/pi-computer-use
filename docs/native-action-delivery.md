@@ -42,3 +42,19 @@ for image-grounded keyboard transactions. Every physical event still passes the
 exact window foreground gate. A transaction stops after any unknown step; it
 never replays the click to obtain a positive result. Saved/reopened content is
 still required to establish a Word editing task's success.
+
+
+### Explicit native menu opening
+
+`showMenu` requires a current macOS native element ref declaring `AXShowMenu`.
+It preserves the observed exact window binding and invokes that action once.
+Disabled, stale, web-backed or capability-missing elements fail before dispatch;
+there is no AXPress substitution, pointer click, foreground retry or keyboard
+fallback. Returned AX status is evidence of dispatch only. Observe and identify
+the resulting menu before choosing a command; an unknown result is never replayed.
+
+This operation is intended for split buttons whose AXPress applies a command
+while AXShowMenu opens its alternatives. Physical clicks can open a new popup
+between mouse-down and mouse-up; existing exact foreground guards remain in place.
+Explicit AXShowMenu does not authorize broad same-PID physical input or claim to
+resolve every partially dispatched physical event.

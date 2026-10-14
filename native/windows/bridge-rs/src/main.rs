@@ -1462,7 +1462,12 @@ fn is_web_backed(element: &ElementRecord) -> bool {
 }
 
 fn stale_ref_from_uia(message: String) -> ProtocolError {
-    if message.contains("stale") || message.contains("Element reference") {
+    if matches!(message.as_str(),
+        "Element reference is stale" | "Element reference has no identity" | "Element reference is ambiguous") {
+        // Preserve known bounded resolver reasons, while retaining the same
+        // rejecting error code. None of these errors authorizes input or retry.
+        ProtocolError::new(message, ErrorCode::StaleRef)
+    } else if message.contains("stale") || message.contains("Element reference") {
         ProtocolError::new("Element reference is stale", ErrorCode::StaleRef)
     } else {
         ProtocolError::new(message, ErrorCode::InternalError)
@@ -1897,6 +1902,21 @@ fn emit_response(response: &Response) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uia_identity_failures_preserve_reason_and_rejecting_code() {
+        for reason in ["Element reference is stale", "Element reference has no identity", "Element reference is ambiguous"] {
+            let error = super::stale_ref_from_uia(reason.to_owned());
+            assert_eq!(error.code, windows_bridge::ErrorCode::StaleRef);
+            assert_eq!(error.message, reason);
+        }
+        let provider = super::stale_ref_from_uia("provider says stale: private payload".to_owned());
+        assert_eq!(provider.code, windows_bridge::ErrorCode::StaleRef);
+        assert_eq!(provider.message, "Element reference is stale");
+        let ordinary = super::stale_ref_from_uia("ElementFromHandle: provider unavailable".to_owned());
+        assert_eq!(ordinary.code, windows_bridge::ErrorCode::InternalError);
+        assert_eq!(ordinary.message, "ElementFromHandle: provider unavailable");
+    }
+
     #[test]
     fn pixel_only_policy_requires_capture_without_scope_or_semantic_fallback() {
         use serde_json::json;

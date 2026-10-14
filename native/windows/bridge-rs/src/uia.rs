@@ -578,6 +578,11 @@ mod native {
                 .and_then(|parent| runtime_id(&parent))
                 .unwrap_or_default();
             if budget_expired() { break; }
+            // Keep identity from the original live element across property-cache
+            // reconstruction. The cached object remains a fallback, never an
+            // excuse to substitute a name, position, or same-process element.
+            let original_runtime_id = runtime_id(&element);
+            if budget_expired() { break; }
             // A failed cache must not fan out into many live property requests.
             // Keep already observed nodes and explicitly report the missing ones.
             let Some(observed) = property_cache.as_ref()
@@ -585,7 +590,7 @@ mod native {
                     cache_failures += 1;
                     continue;
                 };
-            if let Some(json_val) = element_to_json(store, &observed, parent_runtime_id, &mut cached_unavailable_value_pattern_skips) {
+            if let Some(json_val) = element_to_json(store, &observed, original_runtime_id, parent_runtime_id, &mut cached_unavailable_value_pattern_skips) {
                 elements.push(json_val);
             }
         }
@@ -729,6 +734,7 @@ mod native {
     fn element_to_json(
         store: &mut RefStore,
         element: &IUIAutomationElement,
+        original_runtime_id: Option<Vec<i32>>,
         parent_runtime_id: Vec<i32>,
         cached_unavailable_value_pattern_skips: &mut usize,
     ) -> Option<Value> {
@@ -742,7 +748,8 @@ mod native {
                 .unwrap_or_default()
                 .to_string()
         };
-        let runtime_id = runtime_id(element).unwrap_or_default();
+        let runtime_id = original_runtime_id.filter(|id| !id.is_empty())
+            .or_else(|| runtime_id(element)).unwrap_or_default();
         let class_name = unsafe { element.CachedClassName().or_else(|_| element.CurrentClassName()).unwrap_or_default().to_string() };
 
         // Bounding rectangle.

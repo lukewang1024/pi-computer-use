@@ -26,7 +26,9 @@ The helper declares per-monitor-v2 DPI awareness at startup and reports `scaleFa
 
 ## Refs, actions, and deltas
 
-Observed `@e` refs store UIA RuntimeId and AutomationId metadata. Ref-targeted actions resolve a live `IUIAutomationElement` first:
+Observed `@e` refs retain RuntimeId from the original live UIA element before property-cache reconstruction, with the cached element as a fallback. If both RuntimeId and AutomationId are unavailable, the outline still exposes readable text and control semantics, but `canPress`, `canSetValue`, `canScroll`, and `canFocus` are false: the reference cannot safely resolve an action target. No name, position, or same-process substitution is permitted.
+
+Ref-targeted actions resolve a live `IUIAutomationElement` first:
 
 - `press`/`click`: `InvokePattern`, then `TogglePattern`, then `SelectionItemPattern`, then `ExpandCollapsePattern`, then LegacyIAccessible default action; successful pattern grounding reports `grounding: "description"`, `delivery: "ax"`. Coordinate fallback is blocked by `ax_only` and preflights occlusion with `ElementFromPoint`.
 - `setText`: `ValuePattern.SetValue`, then `CurrentValue` read-back. `evidence.value` is the value actually read.

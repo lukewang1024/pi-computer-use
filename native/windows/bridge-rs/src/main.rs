@@ -706,9 +706,10 @@ fn outline_from_elements(
         let hwnd = root.get("windowId").and_then(Value::as_i64).unwrap_or(0) as isize;
         let caps = raw.get("capabilities").unwrap_or(&Value::Null);
         let is_enabled = caps.get("isEnabled").and_then(Value::as_bool).unwrap_or(false);
-        let can_press = is_enabled && caps.get("canPress").or_else(|| caps.get("canInvoke")).and_then(Value::as_bool).unwrap_or(false);
-        let can_set_value = is_enabled && caps.get("canSetValue").or_else(|| caps.get("canEditText")).and_then(Value::as_bool).unwrap_or(false);
-        let can_scroll = caps.get("canScroll").and_then(Value::as_bool).unwrap_or(false);
+        let addressable = !runtime_id.is_empty() || !automation_id.is_empty();
+        let can_press = addressable && is_enabled && caps.get("canPress").or_else(|| caps.get("canInvoke")).and_then(Value::as_bool).unwrap_or(false);
+        let can_set_value = addressable && is_enabled && caps.get("canSetValue").or_else(|| caps.get("canEditText")).and_then(Value::as_bool).unwrap_or(false);
+        let can_scroll = addressable && caps.get("canScroll").and_then(Value::as_bool).unwrap_or(false);
         if !reference.is_empty() { records.insert(reference.clone(), ElementRecord { hwnd, x: screen_x, y: screen_y, w: screen_w, h: screen_h, automation_id: automation_id.clone(), class_name, is_secure, can_press, can_set_value, can_scroll, runtime_id: runtime_id.clone() }); }
         let node = json!({
             "ref": reference,
@@ -721,7 +722,7 @@ fn outline_from_elements(
             "actions": [],
             "isEnabled": is_enabled,
             "canPress": can_press,
-            "canFocus": is_enabled && caps.get("isKeyboardFocusable").and_then(Value::as_bool).unwrap_or(false),
+            "canFocus": addressable && is_enabled && caps.get("isKeyboardFocusable").and_then(Value::as_bool).unwrap_or(false),
             "canSetValue": can_set_value,
             "canScroll": can_scroll,
             "canIncrement": false,
@@ -1910,6 +1911,33 @@ fn emit_response(response: &Response) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_reference_capabilities_require_an_observed_identity() {
+        for (runtime, automation, addressable) in [
+            (vec![], "", false), (vec![42, -1, 7], "", true), (vec![], "owned-control", true),
+        ] {
+            let root = json!({"windowId":1,"title":"owned"});
+            let elements = vec![json!({"ref":"@e1","role":"edit","label":"owned",
+                "runtimeId":runtime,"automationId":automation,"value":"visible text",
+                "bounds":{"x":1,"y":1,"width":20,"height":10},
+                "capabilities":{"isEnabled":true,"canPress":true,"canSetValue":true,
+                    "canScroll":true,"isKeyboardFocusable":true}})];
+            let (outline, records) = outline_from_elements(
+                "@w1","identity-capabilities","window",&root,&elements,
+                0.0,0.0,100.0,100.0,100.0,100.0);
+            let node = &outline["children"][0];
+            for key in ["canPress","canSetValue","canScroll","canFocus"] {
+                assert_eq!(node[key], addressable, "{key}");
+            }
+            assert_eq!(node["value"], "visible text");
+            assert_eq!(node["isTextInput"], true);
+            let record = records.values().next().unwrap();
+            assert_eq!(record.can_press,addressable);
+            assert_eq!(record.can_set_value,addressable);
+            assert_eq!(record.can_scroll,addressable);
+        }
+    }
+
+    #[test]
     fn scoped_wait_rejects_empty_runtime_identity_before_window_lookup() {
         let look_id = "missing-runtime-scope-regression";
         let mut look = look_with_element(0.0);
@@ -1961,7 +1989,7 @@ mod tests {
     fn disabled_control_does_not_advertise_input_capabilities() {
         for enabled in [false, true] {
             let root = serde_json::json!({"windowId": 1, "title": "owned"});
-            let elements = vec![serde_json::json!({"ref": "@e1", "role": "button",
+            let elements = vec![serde_json::json!({"ref": "@e1", "role": "button", "runtimeId": [42, 1],
                 "capabilities": {"isEnabled": enabled, "canPress": true,
                     "canSetValue": true, "isKeyboardFocusable": true}})];
             let (outline, records) = super::outline_from_elements(

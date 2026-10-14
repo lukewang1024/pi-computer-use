@@ -23,6 +23,9 @@ The normal loop is:
 | `launch_browser` | Start a managed CDP browser and return its observed page state. |
 | `navigate_browser` | Navigate the browser page owned by a state. |
 | `evaluate_browser` | Evaluate JavaScript in the browser page owned by a state. |
+| `start_recording` | Start continuous desktop/screen capture on Windows, macOS or Linux X11. |
+| `recording_status` | Read recording progress or the finalized receipt by recording ID. |
+| `stop_recording` | Stop capture and wait for the MP4 to finalize. |
 
 ## Refs and state
 
@@ -262,3 +265,90 @@ menu immediately before one AX call, without refinding, raising, Escape, key
 releases or retries. Returned API success is dispatch evidence: verify menu
 closure from a fresh observation before continuing. This does not cancel an
 invisible or unobservable historical menu by PID.
+
+## Virtual agent pointer
+
+The agent pointer is rendered live during computer use; recording is optional.
+macOS uses a nonactivating, mouse-transparent desktop window, Windows uses a
+layered window that cannot activate, and Linux X11 uses a shaped window with an
+empty input region. Browser CDP actions draw the indicator in a closed shadow
+root with hit testing and accessibility disabled. These indicators do not move
+the operating-system pointer or take keyboard focus.
+
+```ts
+act_ui({
+  stateId: "S12",
+  actions: [{ action: "moveMouse", x: 400, y: 300, durationMs: 600 }],
+})
+```
+
+All platforms use the same fixed northwest rounded arrow, violet fill, white
+border and dark violet outer edge. Its orientation does not follow movement.
+
+`moveMouse` uses `pointerMode: "virtual"` by default. Its coordinates are grounded
+in the current observation, and `path` can supply 2–600 intermediate points.
+Duration is bounded to 0–30,000ms. A newer movement replaces the earlier
+animation; the pointer hides after inactivity and is cleaned up on session
+shutdown. Virtual movement is presentation only: it does not trigger native
+hover or establish keyboard focus. Use `pointerMode: "physical"` for an actual
+hover operation. Physical native movement retains the existing foreground,
+window-ownership, geometry and interruption checks.
+
+Click, press and scroll delivery retains its existing semantics and can also
+show the agent indicator. Prefer browser or accessibility actions to keep the
+system mouse independent. Native coordinate clicks and drags may still require
+the real mouse. `cursor_overlay: false` or
+`PI_COMPUTER_USE_CURSOR_OVERLAY=0` hides presentation without changing a virtual
+movement into physical input; headless sessions also suppress the indicator.
+
+Rebuild or update native helpers together with the SDK. Older helpers are
+rejected before virtual input dispatch instead of silently interpreting the
+request as a system-pointer movement. Desktop overlays currently require X11
+on Linux; native Wayland overlay rendering is not supported.
+
+## Native screen recording
+
+Recording runs independently of UI actions and continuously encodes H.264 MP4
+with the pointer and no audio. Install FFmpeg with `libx264` and the capture device
+for your platform, on the host's PATH, or set `PI_COMPUTER_USE_FFMPEG` before starting
+the host.
+
+| Platform | Capture | Host setup |
+| --- | --- | --- |
+| Windows | `gdigrab`, entire desktop | Run on the interactive desktop. |
+| macOS | `avfoundation`, selected screen | Grant Screen Recording permission to the recording process/launching application. Screen 0 is selected by name, never camera index 0. Set `PI_COMPUTER_USE_RECORDING_SCREEN` to another screen number if needed. |
+| Linux X11 | `x11grab`, entire X screen | Inherit `DISPLAY` and, when needed, `XAUTHORITY`. Install `xdpyinfo` for automatic full-screen dimensions, or set `PI_COMPUTER_USE_RECORDING_SIZE=WIDTHxHEIGHT`. |
+
+macOS and Linux use their native capture inputs, not repeated CU screenshots.
+On Linux, native Wayland capture is not supported by the current CU stack:
+Wayland sessions are rejected explicitly, including when Xwayland also provides
+`DISPLAY`, because that would not record the complete desktop. An absent or
+inaccessible desktop, denied macOS permission, or unavailable FFmpeg device
+produces an explicit failure instead of a fabricated recording.
+
+No executable
+or shell command can be supplied through the model-facing tools. Recordings use
+`$XDG_STATE_HOME/pi-computer-use/recordings`, falling back to
+`~/.local/state/pi-computer-use/recordings`. Files are retained for explicit transfer
+or upload; the tools return local paths, not video bytes or cloud links.
+
+1. Call `start_recording({ fps: 30, maxDurationSeconds: 60 })`. It waits for the
+   first encoded frame before returning `recordingId`.
+2. Use `find_roots`, `observe_ui`, and `act_ui` normally while recording continues.
+3. Call `stop_recording({ recordingId })`. It waits for the encoder to finalize
+   the MP4 and returns `state: "completed"`, `path`, `bytes`, `frames`, and
+   `durationSeconds`. Only a completed result is ready to upload.
+
+`recording_status({ recordingId })` reports progress and automatic completion.
+`fps` accepts integers 1–60; `maxDurationSeconds` accepts integers 1–600 and defaults
+to 60. This is a limit starting at encoder startup, not a wait command. For a short
+demo, begin recording, perform the operation, then stop it. Capture uses real timing;
+it does not retime the video to fit a requested length. Frame rate is a capture
+target, and actual throughput depends on the desktop and encoder.
+
+Only one recording runs per CU session. Repeated stops return the same receipt.
+Session shutdown stops and finalizes the encoder; startup cancellation, stalled
+encoders and failed capture produce explicit errors. Failed files may be incomplete.
+Recording does not move the pointer, activate windows, acquire the UI input lock,
+or invalidate existing observation refs. A restarted session does not adopt earlier
+recording IDs. Recent status receipts are bounded to 16 entries.

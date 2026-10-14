@@ -69,7 +69,14 @@ function helperAction(request: PlatformActRequest): Record<string, unknown> {
 	return { ...request, target: request.target.focus, params: { ...request.params, preserveFocus: true } };
 }
 
-export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
+let cursorMayBeVisible = false;
+
+export const macosBackend: Pick<ComputerUsePlatformBackend, "shutdown" | "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
+	async shutdown() {
+		if (!cursorMayBeVisible) return;
+		await macosHelper.command("hideCursor", {}, {timeoutMs:2000});
+		cursorMayBeVisible = false;
+	},
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return parseApps(await macosHelper.command<unknown>("listApps", {}, { signal }));
 	},
@@ -119,11 +126,21 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 	},
 
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		return await macosHelper.command<HelperActResult>("act", { ...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay }, options);
+		if (request.action === "moveMouse" && request.params.pointerMode !== "physical") {
+			const capability = await macosHelper.command<{virtualMotion?: boolean}>("cursorCapabilities", {}, options);
+			if (capability.virtualMotion !== true) throw new Error("Installed helper does not support the virtual cursor; no input was dispatched. Rebuild or update the native helper.");
+		}
+		cursorMayBeVisible ||= getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless;
+		return await macosHelper.command<HelperActResult>("act", { ...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless }, options);
 	},
 
 	async actBatch(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		const cursorOverlay = getComputerUseConfig().cursor_overlay;
+		if (requests.some(request => request.action === "moveMouse" && request.params.pointerMode !== "physical")) {
+			const capability = await macosHelper.command<{virtualMotion?: boolean}>("cursorCapabilities", {}, options);
+			if (capability.virtualMotion !== true) throw new Error("Installed helper does not support the virtual cursor; no input was dispatched.");
+		}
+		const cursorOverlay = getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless;
+		cursorMayBeVisible ||= cursorOverlay;
 		return await macosHelper.command<HelperActResult>("actBatch", { actions: requests.map((request) => ({ ...helperAction(request), cursorOverlay })) }, options);
 	},
 

@@ -140,7 +140,9 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--read-only-uia") {
         set_dpi_awareness();
         let args: Vec<String> = std::env::args().collect();
-        if args.len() != 3 { std::process::exit(2); }
+        if args.len() != 3 {
+            std::process::exit(2);
+        }
         println!("{}", windows_bridge::uia::read_only_worker(&args[2]));
         return;
     }
@@ -148,10 +150,16 @@ fn main() {
     #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("--foreground-uia") {
         let args: Vec<String> = std::env::args().collect();
-        if args.len() != 5 { std::process::exit(2); }
-        let parsed = (args[2].parse::<isize>(),args[3].parse::<u32>(),args[4].parse::<u32>());
-        if let (Ok(hwnd),Ok(pid),Ok(tid)) = parsed {
-            println!("{}", windows_bridge::foreground::uia_worker(hwnd,pid,tid));
+        if args.len() != 5 {
+            std::process::exit(2);
+        }
+        let parsed = (
+            args[2].parse::<isize>(),
+            args[3].parse::<u32>(),
+            args[4].parse::<u32>(),
+        );
+        if let (Ok(hwnd), Ok(pid), Ok(tid)) = parsed {
+            println!("{}", windows_bridge::foreground::uia_worker(hwnd, pid, tid));
             return;
         }
         std::process::exit(2);
@@ -245,6 +253,9 @@ fn handle_request(request: &Request) -> Response {
     let _trace = matches!(request.cmd.as_str(), "act" | "actBatch")
         .then(|| windows_bridge::action_trace::begin(&request.id));
     let result = match request.cmd.as_str() {
+        "cursorStatus" => Ok(windows_bridge::agent_cursor::status()),
+        "getMousePosition" => window::pointer_state(),
+        "cursorCapabilities" => Ok(json!({"virtualMotion":true,"version":1})),
         "diagnostics" => Ok(diagnostics()),
         "listRoots" | "listWindows" => handle_list_roots(&request.args),
         "look" | "screenshot" => handle_look(&request.args),
@@ -316,15 +327,25 @@ fn handle_focus_window(args: &Value) -> Result<Value, ProtocolError> {
     let wref = windows_bridge::refs::WindowRef::parse(root_ref)
         .ok_or_else(|| invalid(format!("Invalid root ref '{root_ref}'")))?;
     let (store, expected_pid) = {
-        let state = helper_state().lock().map_err(|_| internal("helper state lock poisoned"))?;
-        let expected_pid = state.roots.values()
-            .find(|root| root["rootRef"].as_str() == Some(root_ref) || root["windowRef"].as_str() == Some(root_ref))
+        let state = helper_state()
+            .lock()
+            .map_err(|_| internal("helper state lock poisoned"))?;
+        let expected_pid = state
+            .roots
+            .values()
+            .find(|root| {
+                root["rootRef"].as_str() == Some(root_ref)
+                    || root["windowRef"].as_str() == Some(root_ref)
+            })
             .and_then(|root| root["pid"].as_u64())
             .ok_or_else(|| ProtocolError::new("Window reference is stale", ErrorCode::StaleRef))?;
         (state.store.clone(), expected_pid)
     };
     if args["pid"].as_u64().is_some_and(|pid| pid != expected_pid) {
-        return Err(ProtocolError::new("Window reference process ownership changed", ErrorCode::StaleRef));
+        return Err(ProtocolError::new(
+            "Window reference process ownership changed",
+            ErrorCode::StaleRef,
+        ));
     }
     with_physical_input(|| window::focus_window(&store, &wref, expected_pid))
 }
@@ -339,10 +360,14 @@ fn include_look_elements(args: &Value) -> Result<bool, ProtocolError> {
         Some(Value::Bool(value)) => *value,
         Some(_) => return Err(invalid("includeElements must be boolean")),
     };
-    if !include && (args.get("includeImage") == Some(&json!(false))
-        || args.get("scopeRef").is_some_and(|value| !value.is_null())
-        || args.get("allowImageFailure") == Some(&json!(true))) {
-        return Err(invalid("Pixel-only look requires an image, no scope, and no semantic fallback"));
+    if !include
+        && (args.get("includeImage") == Some(&json!(false))
+            || args.get("scopeRef").is_some_and(|value| !value.is_null())
+            || args.get("allowImageFailure") == Some(&json!(true)))
+    {
+        return Err(invalid(
+            "Pixel-only look requires an image, no scope, and no semantic fallback",
+        ));
     }
     Ok(include)
 }
@@ -424,7 +449,10 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     let mut fw = number_at(&frame, "w", number_at(&frame, "width", 1.0)).max(1.0);
     let mut fh = number_at(&frame, "h", number_at(&frame, "height", 1.0)).max(1.0);
 
-    let allow_image_failure = args.get("allowImageFailure").and_then(Value::as_bool).unwrap_or(false);
+    let allow_image_failure = args
+        .get("allowImageFailure")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut image_error = None;
     let mut image_payload = None;
     let mut capture_stage_timings = None;
@@ -437,7 +465,12 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     if !is_outline_only {
         let wref = windows_bridge::refs::WindowRef::parse(&root_ref)
             .ok_or_else(|| invalid(format!("Invalid root ref '{root_ref}'")))?;
-        let shot = match capture::screenshot(&mut store, &wref, scope_ref.is_none() && include_elements, max_dimension) {
+        let shot = match capture::screenshot(
+            &mut store,
+            &wref,
+            scope_ref.is_none() && include_elements,
+            max_dimension,
+        ) {
             Ok(shot) => shot,
             Err(error) if optional_capture_failure(allow_image_failure, error.code) => {
                 image_error = Some(error.to_string());
@@ -482,8 +515,10 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     // the same request. Invalid/stale roots and all other errors remain fatal.
     if image_error.is_some() && scope_ref.is_none() && include_elements {
         #[cfg(windows)]
-        if let Some(native) = store.get_window(&windows_bridge::refs::WindowRef::parse(&root_ref)
-            .ok_or_else(|| invalid("Invalid root ref"))?) {
+        if let Some(native) = store.get_window(
+            &windows_bridge::refs::WindowRef::parse(&root_ref)
+                .ok_or_else(|| invalid("Invalid root ref"))?,
+        ) {
             elements = windows_bridge::uia::extract_elements(&mut store, native.raw());
         }
     }
@@ -529,8 +564,13 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
         fw,
         fh,
     );
-    if elements.first().and_then(|raw| raw.get("extractionDiagnostics"))
-        .and_then(|diagnostics| diagnostics.get("status")).and_then(Value::as_str) == Some("incomplete") {
+    if elements
+        .first()
+        .and_then(|raw| raw.get("extractionDiagnostics"))
+        .and_then(|diagnostics| diagnostics.get("status"))
+        .and_then(Value::as_str)
+        == Some("incomplete")
+    {
         outline["truncated"] = json!(true);
     }
     if !include_elements {
@@ -601,7 +641,10 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     if !include_elements {
         response["uiaDiagnostics"] = json!({"status":"skipped", "reason":"pixel_only_observation"});
     }
-    if let Some(diagnostics) = elements.first().and_then(|raw| raw.get("extractionDiagnostics")) {
+    if let Some(diagnostics) = elements
+        .first()
+        .and_then(|raw| raw.get("extractionDiagnostics"))
+    {
         response["uiaDiagnostics"] = diagnostics.clone();
     }
     if let Some(metadata) = root.get("metadata") {
@@ -841,6 +884,15 @@ fn scoped_outline_root(mut outline: Value, scope_ref: &str) -> Value {
 
 fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
     let parsed = input::parse_act_request(args)?;
+    if parsed.action == "moveMouse"
+        && parsed.params.get("pointerMode").is_some()
+        && !matches!(
+            parsed.params.get("pointerMode").and_then(Value::as_str),
+            Some("virtual" | "physical")
+        )
+    {
+        return Err(invalid("pointerMode must be virtual or physical"));
+    }
     let record = {
         let state = helper_state()
             .lock()
@@ -852,6 +904,18 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
             )
         })?
     };
+    if parsed.action == "moveMouse"
+        && parsed
+            .params
+            .get("pointerMode")
+            .and_then(Value::as_str)
+            .unwrap_or("virtual")
+            == "virtual"
+    {
+        if !matches!(parsed.target, input::ActTarget::Point { .. }) {
+            return Err(invalid("Virtual moveMouse requires image x/y coordinates"));
+        }
+    }
     let target_pid = parsed
         .pid
         .or((record.pid != 0).then_some(record.pid))
@@ -876,9 +940,51 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
                     ErrorCode::CoordinateUnavailableForRoot,
                 ));
             }
+            if parsed.action == "moveMouse"
+                && (!x.is_finite()
+                    || !y.is_finite()
+                    || *x < 0.0
+                    || *y < 0.0
+                    || *x >= record.image_w
+                    || *y >= record.image_h)
+            {
+                return Err(invalid("Motion endpoint is outside the captured image"));
+            }
             let mut executable = args.clone();
             executable["resolvedPoint"] = json!(screen_point(&record, *x, *y));
             executable["pointerGuard"] = json!({"hwnd": record.hwnd, "pid": record.pid});
+            if parsed.action == "moveMouse" {
+                if let Some(raw) = parsed.params.get("path") {
+                    let path = raw
+                        .as_array()
+                        .ok_or_else(|| invalid("moveMouse.path must be an array"))?;
+                    if path.len() < 2 || path.len() > 600 {
+                        return Err(invalid("moveMouse.path requires 2 to 600 points"));
+                    }
+                    let mut resolved = Vec::new();
+                    for point in path {
+                        let x = point
+                            .get("x")
+                            .and_then(Value::as_f64)
+                            .ok_or_else(|| invalid("motion point requires x"))?;
+                        let y = point
+                            .get("y")
+                            .and_then(Value::as_f64)
+                            .ok_or_else(|| invalid("motion point requires y"))?;
+                        if !x.is_finite()
+                            || !y.is_finite()
+                            || x < 0.0
+                            || y < 0.0
+                            || x >= record.image_w
+                            || y >= record.image_h
+                        {
+                            return Err(invalid("motion point is outside the captured image"));
+                        }
+                        resolved.push(screen_point(&record, x, y));
+                    }
+                    executable["resolvedPath"] = Value::Array(resolved);
+                }
+            }
             if parsed.action == "drag" {
                 if let Some(path) = parsed.params.get("path").and_then(Value::as_array) {
                     executable["resolvedPath"] = Value::Array(
@@ -893,6 +999,78 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
                             .collect(),
                     );
                 }
+            }
+            if parsed.action == "moveMouse"
+                && parsed
+                    .params
+                    .get("pointerMode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("virtual")
+                    == "virtual"
+            {
+                let duration = match parsed.params.get("durationMs") {
+                    None => 350,
+                    Some(value) => value.as_u64().filter(|n| *n <= 30000).ok_or_else(|| {
+                        invalid("durationMs must be an integer between 0 and 30000")
+                    })?,
+                };
+                let endpoint = executable
+                    .get("resolvedPoint")
+                    .ok_or_else(|| invalid("Motion endpoint is unavailable"))?;
+                let decode = |p: &Value| -> Result<(i32, i32), ProtocolError> {
+                    let x = p
+                        .get("x")
+                        .and_then(Value::as_f64)
+                        .ok_or_else(|| invalid("Motion point requires x"))?;
+                    let y = p
+                        .get("y")
+                        .and_then(Value::as_f64)
+                        .ok_or_else(|| invalid("Motion point requires y"))?;
+                    if !x.is_finite()
+                        || !y.is_finite()
+                        || x < i32::MIN as f64
+                        || x > i32::MAX as f64
+                        || y < i32::MIN as f64
+                        || y > i32::MAX as f64
+                    {
+                        return Err(invalid("Motion point is outside desktop coordinate range"));
+                    }
+                    Ok((x.round() as i32, y.round() as i32))
+                };
+                let endpoint = decode(endpoint)?;
+                let mut points =
+                    if let Some(path) = executable.get("resolvedPath").and_then(Value::as_array) {
+                        path.iter().map(decode).collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        vec![endpoint, endpoint]
+                    };
+                if points.last() != Some(&endpoint) {
+                    points.push(endpoint);
+                }
+                window::require_visual_bounds(
+                    record.hwnd,
+                    record.pid,
+                    (
+                        record.frame_x,
+                        record.frame_y,
+                        record.frame_w,
+                        record.frame_h,
+                    ),
+                )?;
+                let visible = args
+                    .get("cursorOverlay")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                if visible {
+                    windows_bridge::agent_cursor::animate(points, duration)
+                        .map_err(|e| ProtocolError::new(e, ErrorCode::CapabilityDeferred))?;
+                    if duration > 0 {
+                        sleep(Duration::from_millis(duration));
+                    }
+                }
+                return Ok(
+                    json!({"outcome":"worked","performed":{"delivery":"virtual","pointerMotion":{"durationMs":duration,"systemPointerMoved":false,"inputDispatched":false,"visible":visible,"samples":windows_bridge::agent_cursor::status()["samples"]}}}),
+                );
             }
             with_physical_input(|| {
                 let preserve_focus = parsed
@@ -909,13 +1087,48 @@ fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
                     window::require_capture_bounds(
                         record.hwnd,
                         record.pid,
-                        (record.frame_x, record.frame_y, record.frame_w, record.frame_h),
+                        (
+                            record.frame_x,
+                            record.frame_y,
+                            record.frame_w,
+                            record.frame_h,
+                        ),
                     )?;
                 }
                 input::act(&executable)
             })?
         }
     };
+
+    if args
+        .get("cursorOverlay")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        && matches!(
+            parsed.action.as_str(),
+            "press" | "click" | "scroll" | "drag"
+        )
+        && response.get("outcome").and_then(Value::as_str) != Some("didnt")
+    {
+        let point = match &parsed.target {
+            input::ActTarget::Point { x, y } => {
+                let point = screen_point(&record, *x, *y);
+                Some((
+                    point["x"].as_f64().unwrap_or(0.0).round() as i32,
+                    point["y"].as_f64().unwrap_or(0.0).round() as i32,
+                ))
+            }
+            input::ActTarget::Ref(reference) => record.elements.get(reference).map(|element| {
+                (
+                    (element.x + element.w / 2.0).round() as i32,
+                    (element.y + element.h / 2.0).round() as i32,
+                )
+            }),
+        };
+        if let Some(point) = point {
+            let _ = windows_bridge::agent_cursor::animate(vec![point, point], 350);
+        }
+    }
 
     if let Some(before) = before {
         windows_bridge::action_trace::phase("post_action_observation_started");
@@ -1079,10 +1292,16 @@ fn act_on_ref(
         .get(reference)
         .cloned()
         .ok_or_else(|| ProtocolError::new("Element reference is stale", ErrorCode::StaleRef))?;
-    if parsed.policy != "ax_only" && is_web_backed(&element)
-        && matches!(parsed.action.as_str(), "press" | "click") {
-        windows_bridge::uia::ensure_enabled(element.hwnd, &element.runtime_id, &element.automation_id)
-            .map_err(stale_ref_from_uia)?;
+    if parsed.policy != "ax_only"
+        && is_web_backed(&element)
+        && matches!(parsed.action.as_str(), "press" | "click")
+    {
+        windows_bridge::uia::ensure_enabled(
+            element.hwnd,
+            &element.runtime_id,
+            &element.automation_id,
+        )
+        .map_err(stale_ref_from_uia)?;
     }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
@@ -1459,7 +1678,10 @@ fn handle_wait_for(args: &Value) -> Result<Value, ProtocolError> {
         .and_then(Value::as_str)
         .map(|s| s.trim().to_lowercase());
     let gone = args.get("gone").and_then(Value::as_bool).unwrap_or(false);
-    let scope_exact = args.get("scopeExact").and_then(Value::as_bool).unwrap_or(false);
+    let scope_exact = args
+        .get("scopeExact")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let scope_runtime_id = match (
         args.get("lookId").and_then(Value::as_str),
         args.get("scopeRef").and_then(Value::as_str),
@@ -1488,22 +1710,44 @@ fn handle_wait_for(args: &Value) -> Result<Value, ProtocolError> {
             .filter_map(|element| {
                 let runtime = element.get("runtimeId")?.as_array()?;
                 let parent = element.get("parentRuntimeId")?.as_array()?;
-                Some((serde_json::to_string(runtime).ok()?, serde_json::to_string(parent).ok()?))
+                Some((
+                    serde_json::to_string(runtime).ok()?,
+                    serde_json::to_string(parent).ok()?,
+                ))
             })
             .collect();
-        let scope_key = scope_runtime_id.as_ref().and_then(|id| serde_json::to_string(id).ok());
+        let scope_key = scope_runtime_id
+            .as_ref()
+            .and_then(|id| serde_json::to_string(id).ok());
         let found = elements.iter().any(|element| {
             if let Some(scope_key) = &scope_key {
-                let Some(mut current) = element.get("runtimeId").and_then(Value::as_array).and_then(|id| serde_json::to_string(id).ok()) else { return false; };
+                let Some(mut current) = element
+                    .get("runtimeId")
+                    .and_then(Value::as_array)
+                    .and_then(|id| serde_json::to_string(id).ok())
+                else {
+                    return false;
+                };
                 let mut within_scope = false;
                 for _ in 0..64 {
-                    if &current == scope_key { within_scope = true; break; }
-                    if scope_exact { break; }
-                    let Some(parent) = parents.get(&current) else { break; };
-                    if parent == &current { break; }
+                    if &current == scope_key {
+                        within_scope = true;
+                        break;
+                    }
+                    if scope_exact {
+                        break;
+                    }
+                    let Some(parent) = parents.get(&current) else {
+                        break;
+                    };
+                    if parent == &current {
+                        break;
+                    }
                     current = parent.clone();
                 }
-                if !within_scope { return false; }
+                if !within_scope {
+                    return false;
+                }
             }
             let candidate_text = ["value", "label", "name", "title"]
                 .iter()
@@ -1653,11 +1897,16 @@ mod tests {
         use serde_json::json;
         assert!(super::include_look_elements(&json!({})).unwrap());
         assert!(super::include_look_elements(&json!({"includeImage":false})).unwrap());
-        assert!(!super::include_look_elements(&json!({"includeElements":false,"includeImage":true})).unwrap());
-        for value in [json!({"includeElements":"false"}),
+        assert!(!super::include_look_elements(
+            &json!({"includeElements":false,"includeImage":true})
+        )
+        .unwrap());
+        for value in [
+            json!({"includeElements":"false"}),
             json!({"includeElements":false,"includeImage":false}),
             json!({"includeElements":false,"scopeRef":"@e1"}),
-            json!({"includeElements":false,"allowImageFailure":true})] {
+            json!({"includeElements":false,"allowImageFailure":true}),
+        ] {
             assert!(super::include_look_elements(&value).is_err());
         }
     }
@@ -1668,8 +1917,9 @@ mod tests {
             let elements = vec![serde_json::json!({"ref": "@e1", "role": "button",
                 "capabilities": {"isEnabled": enabled, "canPress": true,
                     "canSetValue": true, "isKeyboardFocusable": true}})];
-            let (outline, records) = super::outline_from_elements("@w1", "test", "window",
-                &root, &elements, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0);
+            let (outline, records) = super::outline_from_elements(
+                "@w1", "test", "window", &root, &elements, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0,
+            );
             let child = &outline["children"][0];
             assert_eq!(child["canPress"], enabled);
             assert_eq!(child["canSetValue"], enabled);
@@ -1683,18 +1933,31 @@ mod tests {
         let root = serde_json::json!({"windowId": 1, "title": "owned"});
         let elements = vec![serde_json::json!({"diagnosticOnly": true,
             "extractionDiagnostics": {"status": "incomplete", "rawTruncated": true}})];
-        let (outline, records) = super::outline_from_elements("@w1", "test", "window",
-            &root, &elements, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0);
+        let (outline, records) = super::outline_from_elements(
+            "@w1", "test", "window", &root, &elements, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0,
+        );
         assert!(records.is_empty());
         assert!(outline["children"].as_array().unwrap().is_empty());
     }
 
     #[test]
     fn optional_image_failure_only_degrades_confirmed_capture_errors() {
-        assert!(super::optional_capture_failure(true, ErrorCode::CaptureFailed));
-        assert!(!super::optional_capture_failure(false, ErrorCode::CaptureFailed));
-        for code in [ErrorCode::TargetNotFound, ErrorCode::StaleRef, ErrorCode::StaleLook,
-            ErrorCode::InternalError, ErrorCode::UnsupportedPlatform, ErrorCode::ForegroundRequired] {
+        assert!(super::optional_capture_failure(
+            true,
+            ErrorCode::CaptureFailed
+        ));
+        assert!(!super::optional_capture_failure(
+            false,
+            ErrorCode::CaptureFailed
+        ));
+        for code in [
+            ErrorCode::TargetNotFound,
+            ErrorCode::StaleRef,
+            ErrorCode::StaleLook,
+            ErrorCode::InternalError,
+            ErrorCode::UnsupportedPlatform,
+            ErrorCode::ForegroundRequired,
+        ] {
             assert!(!super::optional_capture_failure(true, code));
         }
     }
@@ -1703,9 +1966,21 @@ mod tests {
         let cached = (10.0, 20.0, 700.0, 350.0);
         let capture = serde_json::json!({"width":1200,"height":600,
             "sourceBounds":{"x":100,"y":200,"width":1600,"height":800}});
-        assert_eq!(super::capture_frame(&capture, cached), (100.0,200.0,1600.0,800.0));
-        assert_eq!(super::capture_frame(&serde_json::json!({"width":1200,"height":600}), cached), cached);
-        assert_eq!(super::capture_frame(&serde_json::json!({"sourceBounds":{"width":0,"height":0}}), cached), cached);
+        assert_eq!(
+            super::capture_frame(&capture, cached),
+            (100.0, 200.0, 1600.0, 800.0)
+        );
+        assert_eq!(
+            super::capture_frame(&serde_json::json!({"width":1200,"height":600}), cached),
+            cached
+        );
+        assert_eq!(
+            super::capture_frame(
+                &serde_json::json!({"sourceBounds":{"width":0,"height":0}}),
+                cached
+            ),
+            cached
+        );
     }
 
     use super::*;
@@ -1873,7 +2148,12 @@ mod tests {
         }
         let mut click = action.clone();
         click["action"] = json!("click");
-        assert_eq!(validate_window_action(&input::parse_act_request(&click).unwrap()).unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            validate_window_action(&input::parse_act_request(&click).unwrap())
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]
@@ -1881,7 +2161,12 @@ mod tests {
         let record = look_with_element(1.0);
         let action = json!({"lookId":"look-a","action":"keypress","policy":"foreground","target":{"ref":"@w999"},"params":{"keys":["ESC"]}});
         let parsed = input::parse_act_request(&action).unwrap();
-        assert_eq!(act_on_ref(&action, &parsed, &record, "@w999").unwrap_err().code, ErrorCode::StaleRef);
+        assert_eq!(
+            act_on_ref(&action, &parsed, &record, "@w999")
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleRef
+        );
     }
 
     #[test]

@@ -14,6 +14,9 @@ import {
 	executeReadText,
 	executeSearchUi,
 	executeWaitFor,
+	executeStartRecording,
+	executeRecordingStatus,
+	executeStopRecording,
 	reconstructStateFromBranch,
 	shutdownComputerUseSession,
 } from "../src/bridge.ts";
@@ -39,7 +42,7 @@ const uiAction = Type.Union([
 	Type.Object({ action: Type.Literal("keypress"), ref: Type.Optional(Type.String({ description: "Exact grounded ref receiving this keypress. Omit only after a click (image point or editable @e ref) or editable @e press earlier in this same act_ui batch, in foreground mode." })), keys: Type.Array(Type.String(), { minItems: 1 }) }),
 	Type.Object({ action: Type.Literal("scroll"), ref: Type.Optional(Type.String()), scrollX: Type.Optional(Type.Number()), scrollY: Type.Optional(Type.Number()) }),
 	Type.Object({ action: Type.Literal("drag"), path: Type.Array(Type.Object(point), { minItems: 2 }) }),
-	Type.Object({ action: Type.Literal("moveMouse"), ...point }),
+	Type.Object({ action: Type.Literal("moveMouse"), ...point, pointerMode: Type.Optional(Type.Union([Type.Literal("virtual"), Type.Literal("physical")], { description: "Default virtual: visible agent cursor without moving the system mouse or triggering native hover. Physical explicitly requests native mouse movement." })), durationMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000, description: "Smooth pointer trajectory duration, default 350ms." })), path: Type.Optional(Type.Array(Type.Object(point), { minItems: 2, maxItems: 600, description: "Intermediate screenshot points for one continuous trajectory; x/y is the final endpoint. No mouse button is pressed." })) }),
 ]);
 
 const outlineQuerySchema = Type.Optional(Type.Object({
@@ -205,6 +208,32 @@ const evaluateBrowserTool = defineTool({
 	execute: executeEvaluateBrowser,
 });
 
+const startRecordingTool = defineTool({
+	name: "start_recording",
+	label: "Start Recording",
+	description: "Start continuous desktop recording on Windows, macOS or Linux X11, including the mouse pointer, to a local MP4. Requires FFmpeg with the platform capture device and libx264. macOS requires Screen Recording permission; Linux requires DISPLAY. Captures the selected screen/desktop without audio.",
+	promptSnippet: "Start before act_ui; recording continues independently while you operate. Retain recordingId and stop_recording to finalize the MP4.",
+	parameters: Type.Object({
+		fps: Type.Optional(Type.Integer({ minimum: 1, maximum: 60, description: "Capture frame rate, default 30" })),
+		maxDurationSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600, description: "Automatic stop limit, default 60 seconds" })),
+	}),
+	execute: executeStartRecording,
+});
+const recordingStatusTool = defineTool({
+	name: "recording_status",
+	label: "Recording Status",
+	description: "Return recording state, encoded frame count, duration and local path. Only completed videos are ready to upload; failed videos may be incomplete.",
+	parameters: Type.Object({ recordingId: Type.String() }),
+	execute: executeRecordingStatus,
+});
+const stopRecordingTool = defineTool({
+	name: "stop_recording",
+	label: "Stop Recording",
+	description: "Stop a recording and wait for MP4 finalization. Returns the local path and byte size on completion. Repeated stops return the same receipt.",
+	parameters: Type.Object({ recordingId: Type.String() }),
+	execute: executeStopRecording,
+});
+
 function formatConfigStatus(): string {
 	const loaded = getLoadedComputerUseConfig();
 	return [
@@ -221,7 +250,7 @@ function formatConfigStatus(): string {
 }
 
 export default function computerUseExtension(pi: ExtensionAPI): void {
-	for (const tool of [findTool, focusWindowTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
+	for (const tool of [findTool, focusWindowTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool, startRecordingTool, recordingStatusTool, stopRecordingTool]) pi.registerTool(tool);
 
 	pi.registerCommand("computer-use", {
 		description: "Show configuration or explicitly manage macOS permissions",

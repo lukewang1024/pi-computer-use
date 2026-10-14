@@ -98,6 +98,20 @@ Use `/computer-use` inside Pi to show the active configuration and where it came
 - `act_ui`
 - `read_text`
 - `wait_for`
+- `start_recording`, `recording_status`, `stop_recording` (Windows, macOS, Linux X11)
+
+Continuous recording captures the desktop/screen and cursor at 30 fps by default
+while the agent operates UI tools. Install FFmpeg with `libx264` and the platform
+capture device (`gdigrab`, `avfoundation`, or `x11grab`), or set
+`PI_COMPUTER_USE_FFMPEG` to its executable path. macOS needs Screen Recording
+permission; Linux needs an X11 session. See [recording usage](./docs/usage.md#native-screen-recording).
+
+A visible agent cursor is enabled by default on macOS, Windows, Linux X11, and
+controlled browser pages. It is an independent, click-through indicator during
+computer use, including when no recording is running. `moveMouse` defaults to
+virtual animation; use `pointerMode: "physical"` when native hover is needed.
+Set `cursor_overlay: false` or `PI_COMPUTER_USE_CURSOR_OVERLAY=0` to hide the
+indicator. See [virtual pointer usage](./docs/usage.md#virtual-agent-pointer).
 
 See [docs/usage.md](./docs/usage.md) for the full tool reference.
 

@@ -145,6 +145,16 @@ private struct ForegroundGateTests {
 		} else {
 			preconditionFailure("valid origin and size must produce a frame")
 		}
+		// Chromium title normalization is owner-specific and retains geometry/PID/uniqueness guards.
+		precondition(focusedWindowTitlesAgree("Demo - Google Chrome", "Demo", ownerBundleIdentifier: "com.google.Chrome"))
+		precondition(focusedWindowTitlesAgree("Demo - Microsoft Edge", "Demo", ownerBundleIdentifier: "com.microsoft.edgemac"))
+		precondition(!focusedWindowTitlesAgree("Demo - Google Chrome", "Demo", ownerBundleIdentifier: nil))
+		precondition(!focusedWindowTitlesAgree("Different - Google Chrome", "Demo", ownerBundleIdentifier: "com.google.Chrome"))
+		precondition(!focusedWindowTitlesAgree("Demo - Google Chrome", "Demo", ownerBundleIdentifier: "com.microsoft.edgemac"))
+		let chromiumAX = [FocusedAXNodeSnapshot(token: "chromium", frame: frame, title: "Demo - Google Chrome", isSheet: false)]
+		let chromiumCG = [FocusedCGCandidateSnapshot(windowId: 710, ownerPid: target.pid, frame: frame, title: "Demo", isOnscreen: true)]
+		precondition(decideFocusedMapping(focusedToken: "chromium", axNodes: chromiumAX, candidates: chromiumCG, targetPid: target.pid, ownerBundleIdentifier: "com.google.Chrome").selectedWindowId == 710)
+		precondition(decideFocusedMapping(focusedToken: "chromium", axNodes: chromiumAX, candidates: chromiumCG + chromiumCG, targetPid: target.pid, ownerBundleIdentifier: "com.google.Chrome").selectedWindowId == nil)
 		let axWindow = [FocusedAXNodeSnapshot(token: "window-0", frame: frame, title: "Doc", isSheet: false)]
 		let exactCandidate = [FocusedCGCandidateSnapshot(windowId: 700, ownerPid: target.pid, frame: frame, title: "Doc", isOnscreen: true)]
 		precondition(decideFocusedMapping(focusedToken: "window-0", axNodes: axWindow, candidates: exactCandidate, targetPid: target.pid).selectedWindowId == 700)

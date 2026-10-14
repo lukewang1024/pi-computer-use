@@ -110,8 +110,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindow, IsWindowVisible, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
     EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWL_EXSTYLE, GW_OWNER, MSG, WINEVENT_OUTOFCONTEXT,
     WS_EX_DLGMODALFRAME,
 };
@@ -407,7 +407,7 @@ fn list_windows_impl(
         }
 
         let class_name = unsafe { get_window_class(hwnd) };
-        if is_presentation_window(&class_name) {
+        if is_presentation_window(&class_name) || class_name == "PiComputerUseAgentCursor" {
             continue;
         }
 
@@ -537,13 +537,36 @@ pub fn require_capture_bounds(
     expected: (f64, f64, f64, f64),
 ) -> Result<(), ProtocolError> {
     require_foreground(hwnd, expected_pid)?;
+    require_visual_bounds(hwnd, expected_pid, expected)
+}
+
+/// Validate the captured root without activating it or changing keyboard focus.
+pub fn require_visual_bounds(
+    hwnd: isize,
+    expected_pid: u64,
+    expected: (f64, f64, f64, f64),
+) -> Result<(), ProtocolError> {
     #[cfg(not(windows))]
     {
-        let _ = expected;
+        let _ = (hwnd, expected_pid, expected);
         Ok(())
     }
     #[cfg(windows)]
     {
+        let handle = HWND(hwnd as *mut _);
+        let mut owner = 0;
+        unsafe {
+            GetWindowThreadProcessId(handle, Some(&mut owner));
+        }
+        if owner as u64 != expected_pid
+            || !unsafe { IsWindow(handle).as_bool() }
+            || !unsafe { IsWindowVisible(handle).as_bool() }
+        {
+            return Err(ProtocolError::new(
+                "Observed root no longer belongs to the captured process",
+                ErrorCode::TargetNotFound,
+            ));
+        }
         let mut rect = windows::Win32::Foundation::RECT::default();
         unsafe { GetWindowRect(HWND(hwnd as *mut _), &mut rect) }.map_err(|_| {
             ProtocolError::new(
@@ -625,11 +648,19 @@ unsafe fn observe_pointer_hit(x: i32, y: i32) -> (isize, isize, u64) {
 /// A foreground window can still be covered by another top-level window,
 /// including a same-process owned popup. Child controls of the exact target
 /// are allowed; PID or owner-chain equality alone never authorizes a click.
-pub fn require_pointer_target(hwnd: isize, expected_pid: u64, x: i32, y: i32) -> Result<(), ProtocolError> {
+pub fn require_pointer_target(
+    hwnd: isize,
+    expected_pid: u64,
+    x: i32,
+    y: i32,
+) -> Result<(), ProtocolError> {
     #[cfg(not(windows))]
     {
         let _ = (hwnd, expected_pid, x, y);
-        Err(ProtocolError::new("Pointer hit testing requires Windows", ErrorCode::UnsupportedPlatform))
+        Err(ProtocolError::new(
+            "Pointer hit testing requires Windows",
+            ErrorCode::UnsupportedPlatform,
+        ))
     }
     #[cfg(windows)]
     unsafe {
@@ -648,6 +679,26 @@ pub fn require_pointer_target(hwnd: isize, expected_pid: u64, x: i32, y: i32) ->
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Read-only pointer and foreground diagnostics on the helper's actual desktop.
+pub fn pointer_state() -> Result<Value, ProtocolError> {
+    #[cfg(windows)]
+    {
+        let mut point = windows::Win32::Foundation::POINT::default();
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point) }
+            .map_err(|e| ProtocolError::new(e.to_string(), ErrorCode::InternalError))?;
+        return Ok(
+            serde_json::json!({"x":point.x,"y":point.y,"focusWindow":unsafe {GetForegroundWindow()}.0 as isize}),
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        Err(ProtocolError::new(
+            "Windows pointer unavailable",
+            ErrorCode::UnsupportedPlatform,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -660,15 +711,54 @@ mod unit_tests {
         use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::*;
         unsafe {
-            let target = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, w!("BUTTON"), w!("CU pointer test"), WS_POPUP | WS_VISIBLE,
-                100, 100, 120, 120, None, None, None, None).unwrap();
-            let child = CreateWindowExW(WINDOW_EX_STYLE(0), w!("BUTTON"), w!("child"), WS_CHILD | WS_VISIBLE,
-                10, 10, 60, 60, target, None, None, None).unwrap();
+            let target = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                w!("BUTTON"),
+                w!("CU pointer test"),
+                WS_POPUP | WS_VISIBLE,
+                100,
+                100,
+                120,
+                120,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let child = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("BUTTON"),
+                w!("child"),
+                WS_CHILD | WS_VISIBLE,
+                10,
+                10,
+                60,
+                60,
+                target,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             let (hit, root, pid) = observe_pointer_hit(120, 120);
             assert_eq!(hit, child.0 as isize);
             assert_eq!(root, target.0 as isize);
-            let overlay = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, w!("BUTTON"), w!("same PID popup"), WS_POPUP | WS_VISIBLE,
-                110, 110, 80, 80, None, None, None, None).unwrap();
+            let overlay = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                w!("BUTTON"),
+                w!("same PID popup"),
+                WS_POPUP | WS_VISIBLE,
+                110,
+                110,
+                80,
+                80,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             let (_, covered_root, covered_pid) = observe_pointer_hit(120, 120);
             assert_eq!(covered_pid, pid);
             assert_eq!(covered_root, overlay.0 as isize);

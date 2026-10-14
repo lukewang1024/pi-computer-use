@@ -77,6 +77,13 @@ The adapter uses Cubench only for the instruction and final oracle; UI observati
 
 ## Native platform helpers
 
+Recording lifecycle and subprocess failures are covered by `npm run test:recording`
+using controlled child processes. On an interactive Windows, macOS or Linux X11 host with FFmpeg on
+PATH, explicitly run `PI_CU_LIVE=1 npm run test:recording-live` to capture three
+seconds and verify automatic MP4 finalization, early stop, session shutdown,
+full decoding and encoder exit. This intentionally records the
+desktop and retains the resulting file for review. It is excluded from `npm test`.
+
 On macOS, the helper installed for permissions is normally:
 
 ```text
@@ -158,3 +165,14 @@ npm run test:linux-live
 The harness creates its own D-Bus and Xvfb session. It fails rather than
 silently passing when the live flag, helper, accessibility bridge, or required
 X11 applications are unavailable.
+
+### Virtual pointer verification
+
+Run `npm run test:agent-cursor` for animation, replacement, cleanup, no-input
+and three-platform compatibility checks. On macOS compile and run
+`native/macos/agent_cursor_tests.swift` with the cursor sources.
+The Linux `check_agent_cursor` example is an opt-in live test for a disposable
+X server (`PI_CU_CURSOR_TEST=1`). It checks actual composed pixels, animation
+positions, both pointer hit-test paths, keyboard focus, real click-through and
+idle hiding. Never point that test at a user's desktop: it prepares a test
+window and sends one real test click.

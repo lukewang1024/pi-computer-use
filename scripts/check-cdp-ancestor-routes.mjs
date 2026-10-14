@@ -91,6 +91,9 @@ for(const mode of ['success','middle-overlay','outer-overlay','middle-moved','un
  assert.equal(inputs.length,['success','scrolled'].includes(mode)?2:mode==='unknown-input'?1:0);
  if(mode==='success')assert(inputs.every(c=>c.params.x===160&&c.params.y===160),'Two ancestor transforms compose to top page coordinates');
  assert.equal(trace.filter(c=>c.method==='Runtime.releaseObjectGroup').length,1);
- assert(checks>0||['render-timeout','render-exception'].includes(mode));const renderChecks=trace.filter(c=>c.method==='Runtime.evaluate'&&c.params.awaitPromise);assert.deepEqual(renderChecks.map(c=>c.sessionId),[undefined,'outer-session','inner-session']);assert(renderChecks.every(c=>trace.indexOf(c)<trace.findIndex(v=>v.method==='Input.dispatchMouseEvent')||inputs.length===0));
+ const presentations=trace.filter(c=>c.method==='Runtime.evaluate'&&c.params.expression?.includes('pi-computer-use.cursor.'));
+ if(['success','scrolled'].includes(mode)){assert.equal(presentations.length,1);assert(trace.indexOf(presentations[0])>trace.findIndex(c=>c.method==='Input.dispatchMouseEvent'),'visual failure must occur after dispatch and never replay the click');}
+
+ assert(checks>0||['render-timeout','render-exception'].includes(mode));const renderChecks=trace.filter(c=>c.method==='Runtime.evaluate'&&c.params.awaitPromise&&!c.params.expression.includes('pi-computer-use.cursor.'));assert.deepEqual(renderChecks.map(c=>c.sessionId),[undefined,'outer-session','inner-session']);assert(renderChecks.every(c=>trace.indexOf(c)<trace.findIndex(v=>v.method==='Input.dispatchMouseEvent')||inputs.length===0));
 }
 console.log('Nested pointer transform composition, intermediate overlays, movement and no-replay guards passed');

@@ -12,9 +12,10 @@ import { access } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { screenRecorder, type StartRecordingParams, type RecordingParams, type RecordingReceipt } from "./recording.ts";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, describeActionExecution, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, preflightActionSequence, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpBringOwnedPageToFront, cdpSetManagedDownloadDirectory, validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpBringOwnedPageToFront, cdpSetManagedDownloadDirectory, validateCdpKeypressKeys, cdpClickForContext, cdpPointerClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpVirtualMouseForContext, clearAgentCursors, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpRemoteFrameRoute, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig, type ManagedBrowserKind } from "./config.ts";
 import { managedBrowserExecutableCandidates, managedBrowserOverrideName } from "./managed-browser-executable.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
@@ -421,8 +422,11 @@ function restoreManagedBrowserPort(): void {
 }
 
 export async function shutdownComputerUseSession(): Promise<void> {
+	await screenRecorder.shutdown();
 	await resourceScheduler.close();
 	resourceScheduler = new ResourceScheduler();
+	let cursorCleanupError: unknown;
+	try { await clearAgentCursors(); } catch (error) { cursorCleanupError = error; }
 	disconnectCdp();
 
 	const managedBrowser = runtimeState.managedBrowser;
@@ -444,7 +448,9 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	runtimeState.helperDiagnostics = undefined;
 	runtimeState.lastPermissionCheckAt = 0;
 	await currentPlatformBackend.shutdown?.();
+	if (browserCleanupError && cursorCleanupError) throw new AggregateError([browserCleanupError,cursorCleanupError], "Computer-use cleanup failed.");
 	if (browserCleanupError) throw browserCleanupError;
+	if (cursorCleanupError) throw cursorCleanupError;
 }
 
 function currentRuntimeMode(): ExecutionVariant {
@@ -1372,7 +1378,7 @@ async function helperAct(
 		return candidate;
 	};
 	const textTimeout = action.action !== "selectText" && "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
-	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
+	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout, action.action === "moveMouse" ? action.params.durationMs + 4000 : 0);
 	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
 		try {
 			const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
@@ -1458,7 +1464,7 @@ function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, 
 			case "keypress": return { ...base, action: action.action, params: { keys: action.params.keys, delivery } };
 			case "scroll": return { ...base, action: action.action, params: { scrollX: action.params.scrollX, scrollY: action.params.scrollY, delivery } };
 			case "drag": return { ...base, action: action.action, params: { path: action.params.path, delivery } };
-			case "moveMouse": return { ...base, action: action.action, params: { delivery } };
+			case "moveMouse": return { ...base, action: action.action, params: { ...action.params, delivery } };
 		}
 	})();
 }
@@ -2528,6 +2534,16 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 	const prepared = actions.map((action) => {
 		if (!BROWSER_TRANSACTION_ACTIONS.has(action.action)) throw new Error(`Browser transactions do not support '${action.action}'.`);
 		if (action.action === "keypress") validateCdpKeypressKeys(action.keys);
+		if (action.action === "moveMouse") {
+			const duration = action.durationMs ?? 350;
+			if (!Number.isInteger(duration) || duration < 0 || duration > 30000) throw new Error("moveMouse.durationMs must be an integer between 0 and 30000.");
+			if (action.pointerMode !== undefined && !["virtual","physical"].includes(action.pointerMode)) throw new Error("moveMouse.pointerMode must be virtual or physical.");
+			if (![action.x,action.y].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) throw new Error("Virtual pointer requires finite nonnegative x/y.");
+			if (action.path !== undefined) {
+				const path = normalizeActionPath(action.path);
+				if (path.length > 600 || path.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y) || p.x < 0 || p.y < 0)) throw new Error("moveMouse.path requires 2 to 600 finite nonnegative points.");
+			}
+		}
 		const target = browserSnapshotTarget(params.stateId, trimOrUndefined(action.ref));
 		if (target?.frameRoute && !["press", "click", "keypress", "setText", "typeText", "scroll"].includes(action.action)) throw new Error("Remote frame references do not support this action.");
 		if ((action.action === "press" || action.action === "setText" || action.action === "keypress" || (action.action === "click" && action.ref) || (action.action === "typeText" && action.ref)) && !Number.isFinite(target?.backendNodeId)) {
@@ -2558,7 +2574,18 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 			else if (action.action === "keypress") worked = await cdpKeypressForContext(contextId, action.keys ?? [], target!.backendNodeId!, target!.frameRoute);
 			else if (action.action === "scroll") worked = await cdpScrollForContext(contextId, toFiniteNumber(action.scrollX, 0), toFiniteNumber(action.scrollY, 0), target?.backendNodeId, target?.frameRoute);
 			else if (action.action === "drag") worked = await cdpDragForContext(contextId, normalizeActionPath(action.path));
-			else if (action.action === "moveMouse") worked = await cdpMouseForContext(contextId, action.x!, action.y!, "mouseMoved");
+			else if (action.action === "moveMouse") {
+				const duration = action.durationMs ?? 350;
+				if (!Number.isInteger(duration) || duration < 0 || duration > 30000) throw new Error("moveMouse.durationMs must be an integer between 0 and 30000.");
+				if (action.pointerMode === "physical") worked = await cdpMouseForContext(contextId, action.x!, action.y!, "mouseMoved");
+				else {
+					const points = action.path === undefined ? [{x:action.x!,y:action.y!}] : normalizeActionPath(action.path);
+					if (points.length > 600) throw new Error("moveMouse.path requires at most 600 points.");
+					const endpoint = {x:action.x!,y:action.y!};
+					if (points.length > 1 && (points.at(-1)!.x !== endpoint.x || points.at(-1)!.y !== endpoint.y)) points.push(endpoint);
+					worked = await cdpVirtualMouseForContext(contextId, points, duration);
+				}
+			}
 			if (!worked) throw new Error("The browser root became unavailable during the action transaction. Observe it again.");
 		}
 		if (condition) {
@@ -2834,6 +2861,20 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 
 export const executeFind = makeToolExecutor("find_roots", performListWindows);
 export const executeFocusWindow = makeToolExecutor<FocusWindowParams, ComputerUseDetails | FocusOnlyDetails>("focus_window", performFocusWindow);
+function recordingResult(tool: string, receipt: RecordingReceipt): AgentToolResult<RecordingReceipt & { tool: string }> {
+	return { content: [{ type: "text", text: JSON.stringify(receipt) }], details: { tool, ...receipt } };
+}
+export const executeStartRecording = makeToolExecutor("start_recording", async (params: StartRecordingParams, signal?: AbortSignal) =>
+	recordingResult("start_recording", await screenRecorder.start(params, signal)));
+// Finalization and status must remain available even if the UI helper has failed.
+function makeRecordingExecutor(tool: string, run: (id: string) => RecordingReceipt | Promise<RecordingReceipt>) {
+	return async (_toolCallId: string, params: RecordingParams) => {
+		try { return applyOutputEnvelope(tool, recordingResult(tool, await run(params.recordingId))); }
+		catch (error) { throw boundToolError(tool, error); }
+	};
+}
+export const executeRecordingStatus = makeRecordingExecutor("recording_status", (id) => screenRecorder.status(id));
+export const executeStopRecording = makeRecordingExecutor("stop_recording", (id) => screenRecorder.stop(id));
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
 function validateOutlineQuery(raw: OutlineQuery | undefined): OutlineQuery | undefined {

@@ -192,7 +192,7 @@ check("INV-10 resource-keyed scheduling", () => {
 check("INV-11 unified agent contract", () => {
 	const extension = fs.readFileSync(path.join(root, "extensions/computer-use.ts"), "utf8");
 	const tools = [...extension.matchAll(/\bname:\s*"([^"]+)"/g)].map((match) => match[1]);
-	const expected = ["find_roots", "focus_window", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "read_text", "wait_for", "launch_browser", "navigate_browser", "evaluate_browser"];
+	const expected = ["find_roots", "focus_window", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "read_text", "wait_for", "launch_browser", "navigate_browser", "evaluate_browser", "start_recording", "recording_status", "stop_recording"];
 	assert(JSON.stringify(tools) === JSON.stringify(expected), `unexpected public tool surface: ${tools.join(", ")}`);
 	assert(!extension.includes('executionMode: "sequential"'), "computer-use tools remain globally sequential");
 	assert(extension.includes("Required state id owning every @e ref"), "state-scoped ref contract is missing");
@@ -241,7 +241,8 @@ check("INV-17 macOS agent cursor stays native, configurable, and background-only
 	assert(swift.includes("app.processIdentifier != getpid()"), "helper overlay can leak into root discovery");
 	assert(swift.includes("AgentCursor.shared.animate(to:"), "native grounded actions do not drive the agent cursor");
 	assert(!swift.includes("completed.wait()") && !swift.includes("agentCursorLock"), "agent cursor can delay action delivery");
-	assert(agentCursorSwift.includes("paused: !renderer.isAnimating"), "agent cursor timeline continues rendering while idle");
+	assert(agentCursorSwift.includes("while !Task.isCancelled, renderer.isAnimating") && agentCursorSwift.includes("frameTask?.cancel()"), "agent cursor frame loop does not stop when idle or hidden");
+	assert(!agentCursorSwift.slice(agentCursorSwift.indexOf("return Canvas")).includes("renderer.tick("), "agent cursor drawing feeds back into animation updates");
 });
 
 check("INV-18 consolidated actions and diff-first resulting views", () => {

@@ -1,3 +1,4 @@
+import { getComputerUseConfig } from "../../config.ts";
 import { parseLookResponse, type LookResponse } from "../../outline.ts";
 import { assertPlatformArchitecture } from "../architecture.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
@@ -162,10 +163,18 @@ export const linuxBackend: ComputerUsePlatformBackend = {
 		}, options));
 	},
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		return await linuxHelper.command("act", helperAction(request), options);
+		if (request.action === "moveMouse" && request.params.pointerMode !== "physical") {
+			const capability = await linuxHelper.command<{virtualMotion?: boolean}>("cursorCapabilities", {}, options);
+			if (capability.virtualMotion !== true) throw new Error("Installed helper does not support the virtual cursor; no input was dispatched. Rebuild or update the native helper.");
+		}
+		return await linuxHelper.command("act", {...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless}, options);
 	},
 	async actBatch(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		return await linuxHelper.command("actBatch", { actions: requests.map(helperAction) }, options);
+		if (requests.some(request => request.action === "moveMouse" && request.params.pointerMode !== "physical")) {
+			const capability = await linuxHelper.command<{virtualMotion?: boolean}>("cursorCapabilities", {}, options);
+			if (capability.virtualMotion !== true) throw new Error("Installed helper does not support the virtual cursor; no input was dispatched.");
+		}
+		return await linuxHelper.command("actBatch", { actions: requests.map(request => ({...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless})) }, options);
 	},
 	async readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse> {
 		return await linuxHelper.command("atspiReadText", { ...args }, options);

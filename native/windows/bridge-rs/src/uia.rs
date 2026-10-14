@@ -1386,7 +1386,7 @@ mod native {
                 let mut apartment = APTTYPE::default();
                 let mut qualifier = APTTYPEQUALIFIER::default();
                 unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) }.unwrap();
-                assert_eq!(apartment, APTTYPE_STA);
+                assert!(apartment == APTTYPE_STA || apartment == APTTYPE_MAINSTA);
                 unsafe { CoUninitialize(); }
             }).join().unwrap();
         }

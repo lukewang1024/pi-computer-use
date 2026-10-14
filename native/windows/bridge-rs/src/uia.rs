@@ -1337,7 +1337,11 @@ mod native {
             // SAFETY: COM must be initialised for the calling thread before
             // any UIA calls.  S_OK (0) and S_FALSE (1) are both success
             // indicators; only a negative HRESULT means failure.
-            let hr = unsafe { CoInitializeEx(Some(std::ptr::null()), COINIT_APARTMENTTHREADED) };
+            // UIA runs on non-UI request workers (and extraction subprocesses),
+            // neither of which pumps STA window messages. Microsoft requires
+            // an MTA client thread for this topology to avoid blocked provider
+            // calls. All interfaces remain local to the initializing thread.
+            let hr = unsafe { CoInitializeEx(Some(std::ptr::null()), COINIT_MULTITHREADED) };
             if hr.0 < 0 {
                 return Err(format!("CoInitializeEx failed: {:#010x}", hr.0));
             }
@@ -1352,6 +1356,39 @@ mod native {
             unsafe {
                 CoUninitialize();
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod apartment_tests {
+        use super::*;
+
+        #[test]
+        fn uia_worker_uses_mta_and_balances_nested_initialization() {
+            std::thread::spawn(|| {
+                let first = ComGuard::new().unwrap();
+                let second = ComGuard::new().unwrap();
+                let assert_mta = || {
+                    let mut apartment = APTTYPE::default();
+                    let mut qualifier = APTTYPEQUALIFIER::default();
+                    unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) }.unwrap();
+                    assert_eq!(apartment, APTTYPE_MTA);
+                };
+                assert_mta();
+                drop(second);
+                assert_mta();
+                drop(first);
+                // Reinitialization as STA would fail with RPC_E_CHANGED_MODE
+                // if either explicit MTA initialization were left unbalanced.
+                // Other test threads may still keep the process MTA alive.
+                let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+                assert!(hr.0 >= 0, "MTA initialization leaked: {:#010x}", hr.0);
+                let mut apartment = APTTYPE::default();
+                let mut qualifier = APTTYPEQUALIFIER::default();
+                unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) }.unwrap();
+                assert_eq!(apartment, APTTYPE_STA);
+                unsafe { CoUninitialize(); }
+            }).join().unwrap();
         }
     }
 }

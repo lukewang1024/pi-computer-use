@@ -24,6 +24,20 @@ controlled backend: unrelated foreground modal, focused document, deliberate
 dialog action, two window remappings, and invalid references. It dispatches no
 real native input. Desktop application acceptance is a separate requirement.
 
+## Windows roots opened by an action
+
+Windows `rootDelta` entries retain the actual HWND as `windowId`, including
+dialogs, menus and popovers. Snapshot refs come from a temporary native store;
+the public root ref binds to PID and HWND so a later enumeration can remap the
+native ref without selecting a same-title window. Observe that returned root
+to obtain its own state and element refs before acting. A disappeared root or
+replacement HWND/PID is refused; discovery never replays the opening action.
+
+`scripts/check-windows-root-delta-identity.mjs` covers native ref churn and
+collisions with a document ref, plus same-title replacements, another PID and
+closed roots. It uses a controlled backend; live desktop acceptance remains
+separate.
+
 ## Bounded root inventory pages
 
 `find_roots` defaults to 12 roots per page. Set `pageSize` to an integer from

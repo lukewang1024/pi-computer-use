@@ -1270,8 +1270,13 @@ function ensurePointIsInLookImage(x: number, y: number, look: LookResponse, erro
 function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[number]): string | undefined {
 	if (!delta.ref) return undefined;
 	if (delta.ref.startsWith("@r")) return delta.ref;
+	// Every enumerated Windows root, including a dialog/menu/popover, has an
+	// exact HWND. Its snapshot ref is temporary and must not be the identity.
+	const exactWindowId = (delta.kind === "window" || currentPlatformBackend.name === "windows")
+		&& Number.isSafeInteger(delta.windowId) && delta.windowId! > 0 ? delta.windowId : undefined;
 	for (const record of runtimeState.windowRefs.values()) {
-		if ((!record.rootKind || record.rootKind === delta.kind) && record.pid === delta.pid && (record.nativeWindowRef === delta.ref || record.ref === delta.ref)
+		if ((!record.rootKind || record.rootKind === delta.kind) && record.pid === delta.pid
+			&& (exactWindowId !== undefined ? record.windowId === exactWindowId : (record.nativeWindowRef === delta.ref || record.ref === delta.ref))
 			&& (delta.windowId === undefined || record.windowId === delta.windowId)) return record.ref;
 	}
 	const ref = `@r${runtimeState.nextRootRefIndex++}`;
@@ -1284,7 +1289,7 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 		windowTitle: delta.title ?? "(untitled)",
 		rootKind: delta.kind,
 		appearedAt: delta.change === "appeared" ? Date.now() : undefined,
-		windowId: delta.kind === "window" && Number.isInteger(delta.windowId) && delta.windowId! > 0 ? delta.windowId : undefined,
+		windowId: exactWindowId,
 		nativeWindowRef: delta.ref,
 		framePoints: { x: 0, y: 0, w: 1, h: 1 },
 		scaleFactor: 1,

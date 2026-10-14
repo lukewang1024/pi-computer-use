@@ -121,6 +121,8 @@ export interface UiAction {
 
 export interface ActParams extends StateTargetParams {
 	actions: UiAction[];
+	/** Response projection only: retain the original complete successor and screenshot. */
+	includeImage?: boolean;
 	expect?: UiCondition;
 	/** Desktop successor observation only; input delivery and focus guards are unchanged. */
 	observationMode?: "semantic" | "fused";

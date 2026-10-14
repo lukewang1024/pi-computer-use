@@ -176,3 +176,9 @@ X server (`PI_CU_CURSOR_TEST=1`). It checks actual composed pixels, animation
 positions, both pointer hit-test paths, keyboard focus, real click-through and
 idle hiding. Never point that test at a user's desktop: it prepares a test
 window and sends one real test click.
+
+## macOS application-menu refusal diagnostics
+
+A refused application-menu observation retains `stale_ref` and reports the exact guard reason plus the target, foreground, focused-window and ownership PID/window IDs. `unavailable` denotes unreadable metadata. These fields serialize the same observations used by the existing guard; they add no AX reads and contain no window titles, menu labels or document content. The guard runs before and after the menu observation.
+
+Per-application focused-window metadata alone does not establish global foreground ownership. Use the explicit foreground PID/window checks when diagnosing a refusal; do not authorize input from a same-process match or replay a failed action.

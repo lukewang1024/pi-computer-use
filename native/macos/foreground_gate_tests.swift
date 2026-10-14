@@ -334,6 +334,37 @@ private struct ForegroundGateTests {
             precondition(evidence["nativeActionAttempted"] as? Bool == true)
             precondition(evidence["inputRetryProhibited"] as? Bool == true)
         }
+        let pointerFocus = PointerTextFocusEvidence(beforeScopeVerified: true,
+            afterScopeVerified: true, sameFocusedElement: false, afterRole: "AXTextArea",
+            afterSecure: false, afterFrame: CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 800, height: 600)),
+            point: CGPoint(x: 150, y: 200), beforeSelection: nil, afterSelection: nil)
+        precondition(pointerTextFocusChanged(pointerFocus))
+        var preexisting = pointerFocus; preexisting.sameFocusedElement = true
+        precondition(!pointerTextFocusChanged(preexisting), "preexisting focus is not click evidence")
+        preexisting.beforeSelection = NSRange(location: 3, length: 0)
+        preexisting.afterSelection = NSRange(location: 3, length: 0)
+        precondition(!pointerTextFocusChanged(preexisting))
+        preexisting.afterSelection = NSRange(location: 4, length: 0)
+        precondition(pointerTextFocusChanged(preexisting))
+        preexisting.afterSelection = NSRange(location: NSNotFound, length: 0)
+        precondition(!pointerTextFocusChanged(preexisting))
+        preexisting.afterSelection = NSRange(location: 100_001, length: 0)
+        precondition(!pointerTextFocusChanged(preexisting))
+        for invalid in 0..<9 {
+            var e = pointerFocus
+            switch invalid {
+            case 0: e.beforeScopeVerified = false
+            case 1: e.afterScopeVerified = false
+            case 2: e.afterRole = "AXButton"
+            case 3: e.afterRole = "AXSecureTextField"
+            case 4: e.afterSecure = true
+            case 5: e.afterFrame = nil
+            case 6: e.afterFrame = CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 0, height: 600))
+            case 7: e.point = CGPoint(x: 99, y: 200)
+            default: e.point = CGPoint(x: CGFloat.nan, y: 200)
+            }
+            precondition(!pointerTextFocusChanged(e), "invalid focus/geometry cannot establish effect")
+        }
 		print("native foreground gate tests passed")
 	}
 }

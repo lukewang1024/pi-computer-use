@@ -1425,7 +1425,7 @@ async function helperAct(
 			return transport;
 		}
 		const code = (error as Error & { code?: string })?.code;
-		if (code !== "foreground_required" || headless || (action.action === "selectText" || action.action === "cancel")) throw error;
+		if (code !== "foreground_required" || headless || (action.action === "selectText" || action.action === "cancel" || action.action === "showMenu")) throw error;
 		let foreground: HelperActResult;
 		try {
 			foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
@@ -1456,6 +1456,7 @@ function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, 
 			case "selectText": return { ...base, action: action.action, params: { ...action.params, delivery } };
 			case "invoke":
 			case "cancel":
+			case "showMenu":
 			case "commit": return { ...base, action: action.action, params: { delivery } };
 			case "press":
 			case "click": return { ...base, action: action.action, params: { ...action.params, delivery } };
@@ -2619,13 +2620,14 @@ function validateActionTarget(action: UiAction): void {
 	if ((action.action === "click" || action.action === "moveMouse") && hasRef === hasPoint) {
 		throw new Error(`${action.action} requires exactly one target: ref or x/y coordinates.`);
 	}
-	if ((action.action === "selectText" || action.action === "commit" || action.action === "invoke" || action.action === "cancel") && (!hasRef || hasPoint)) throw new Error(`${action.action} requires only a native element ref.`);
+	if ((action.action === "selectText" || action.action === "commit" || action.action === "invoke" || action.action === "cancel" || action.action === "showMenu") && (!hasRef || hasPoint)) throw new Error(`${action.action} requires only a native element ref.`);
 	if (action.action === "press" && !hasRef) throw new Error("press requires an actionable ref.");
 	if (action.action === "scroll" && toFiniteNumber(action.scrollX, 0) === 0 && toFiniteNumber(action.scrollY, 0) === 0) throw new Error("scroll requires a non-zero scrollX or scrollY delta.");
 	if (action.clickCount !== undefined && (!Number.isInteger(action.clickCount) || action.clickCount < 1 || action.clickCount > 3)) throw new Error("clickCount must be an integer from 1 to 3.");
 }
 
 async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
+	if (params.includeImage !== undefined && typeof params.includeImage !== "boolean") throw new Error("act_ui.includeImage must be boolean.");
 	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
 	if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused") {
 		throw new Error("act_ui.observationMode must be semantic or fused.");
@@ -2922,9 +2924,13 @@ export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);
 export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>("act_ui", async (params, signal) => {
 	const query = validateOutlineQuery(params.outlineQuery);
-	const result = await performAct(params, signal);
+	let result = await performAct(params, signal);
 	// Project only after the original transaction has saved its complete successor.
 	// Terminal failures retain their original evidence and never trigger more input.
+	if (params.includeImage === false && !("execution" in result.details && result.details.execution?.error) && "outline" in result.details && result.details.outline && result.content.some(item => item.type === "image")) {
+		result = { ...result, content: [...result.content.filter(item => item.type !== "image"),
+			{ type: "text", text: "Successor screenshot retained; image omitted from this response." }] };
+	}
 	if ((params.outlineView !== "folded" && !query) || !("outline" in result.details) || !result.details.outline) return result;
 	const outline = restoreOutline(result.details.outline);
 	return { ...result, details: { ...result.details,

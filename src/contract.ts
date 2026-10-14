@@ -103,7 +103,7 @@ export interface UiCondition {
 }
 
 export interface UiAction {
-	action: "selectText" | "invoke" | "commit" | "cancel" | "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
+	action: "selectText" | "invoke" | "commit" | "cancel" | "showMenu" | "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
 	ref?: string;
 	x?: number;
 	y?: number;
@@ -125,6 +125,8 @@ export interface UiAction {
 
 export interface ActParams extends StateTargetParams {
 	actions: UiAction[];
+	/** Response projection only: retain the original complete successor and screenshot. */
+	includeImage?: boolean;
 	expect?: UiCondition;
 	/** Desktop successor observation only; input delivery and focus guards are unchanged. */
 	observationMode?: "semantic" | "fused";

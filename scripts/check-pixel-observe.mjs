@@ -40,6 +40,18 @@ try{
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'semantic',actions:[{action:'click',x:0,y:0}]}),/semantic successor/);assert.equal(acts,0);
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'invalid',actions:[{action:'click',x:0,y:0}]}),/must be semantic or fused/);assert.equal(acts,0);
  const acted=await call(executeAct,{stateId:pixels.details.capture.stateId,actions:[{action:'click',x:0,y:0}]});assert.equal(acted.details.execution.outcome,'unknown');assert.equal(acted.details.uiaDiagnostics.status,'skipped');assert.equal(requests.length,1);assert.equal(requests[0].includeElements,false);assert.equal(acts,1,'controlled input completion remains unverified; no batch replay');
+ requests=[];
+ const omitted=await call(executeAct,{stateId:acted.details.capture.stateId,includeImage:false,actions:[{action:'click',x:0,y:0}]});
+ assert(!omitted.content.some(item=>item.type==='image'));
+ assert(omitted.content.some(item=>item.type==='text'&&item.text.includes('screenshot retained')));
+ assert.equal(acts,2,'Projection must not replay unknown input');
+ assert.equal(requests.length,1,'Projection must not recapture');
+ assert.equal(requests[0].includeImage,true,'Original screenshot retained');
+ const kept=await call(executeAct,{stateId:omitted.details.capture.stateId,actions:[{action:'click',x:0,y:0}]});
+ assert(kept.content.some(item=>item.type==='image'),'Default includes image');
+ assert.equal(acts,3,'Retained pixel state actionable without observing again');
+ await assert.rejects(()=>call(executeAct,{stateId:kept.details.capture.stateId,includeImage:'false',actions:[{action:'click',x:0,y:0}]}),/boolean/);
+ assert.equal(acts,3,'Invalid projection rejects before dispatch');
  requests=[];await assert.rejects(()=>call(executeObserve,{mode:'pixels'}),/exact Windows or macOS native/);assert.equal(requests.length,0);
  currentPlatformBackend.name='macos';
  const actsBeforeMac=acts;

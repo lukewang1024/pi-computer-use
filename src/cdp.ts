@@ -124,7 +124,9 @@ export function validateCdpKeypressKeys(value: unknown): asserts value is string
 // modifier bits alone. Attach the intended command to the original keydown,
 // never as a second dispatch or a fallback after an uncertain input result.
 export function cdpHistoryCommands(platform: string, modifiers: number, key: string): string[] | undefined {
-	if (platform !== "darwin" || key.toLowerCase() !== "z") return undefined;
+	if (platform !== "darwin") return undefined;
+	if (modifiers === 4 && key.toLowerCase() === "a") return ["SelectAll"];
+	if (key.toLowerCase() !== "z") return undefined;
 	if (modifiers === 4) return ["Undo"];
 	if (modifiers === 12) return ["Redo"];
 	return undefined;

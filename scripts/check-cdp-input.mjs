@@ -7,7 +7,12 @@ assert.deepEqual(cdpHistoryCommands('darwin',12,'Z'), ['Redo']);
 for (const platform of ['linux','win32']) for (const modifiers of [4,12])
  assert.equal(cdpHistoryCommands(platform,modifiers,'z'), undefined);
 for (const modifiers of [0,2,6,5,14]) assert.equal(cdpHistoryCommands('darwin',modifiers,'z'), undefined);
-assert.equal(cdpHistoryCommands('darwin',4,'a'),undefined);
+assert.deepEqual(cdpHistoryCommands('darwin',4,'a'),['SelectAll']);
+assert.deepEqual(cdpHistoryCommands('darwin',4,'A'),['SelectAll']);
+for (const platform of ['linux','win32']) for (const modifiers of [2,4,12])
+ assert.equal(cdpHistoryCommands(platform,modifiers,'a'),undefined);
+for (const modifiers of [0,2,5,6,8,12,14]) assert.equal(cdpHistoryCommands('darwin',modifiers,'a'),undefined);
+for (const key of ['c','v','x']) assert.equal(cdpHistoryCommands('darwin',4,key),undefined);
 
 const tab = Object.create(CdpTab.prototype), events = [];
 tab.send = async (method, params) => { events.push({method, params});return {}; };
@@ -40,18 +45,21 @@ assert.equal(events[0].params.text,undefined,'shortcut modifiers must suppress t
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 try {
  Object.defineProperty(process, 'platform', {...platformDescriptor, value:'darwin'});
- for (const [keys, command] of [[['Meta','z'],'Undo'], [['Command','Shift','z'],'Redo']]) {
+ for (const [keys, command] of [[['Meta','z'],'Undo'], [['Command','Shift','z'],'Redo'], [['Meta','a'],'SelectAll'], [['Command','A'],'SelectAll']]) {
   events.length=0;
   await tab.keypress(keys);
   assert.equal(events.length,2,'command must use the original key pair');
   assert.deepEqual(events[0].params.commands,[command]);
-  assert.equal(events[1].params.commands,undefined,'keyup must not execute history again');
+  assert.equal(events[1].params.commands,undefined,'keyup must not execute an editing command again');
   assert.equal(events[0].params.text,undefined);
  }
  const failing=Object.create(CdpTab.prototype);let attempts=0;
  failing.send=async()=>{attempts++;throw Error('Unknown keydown outcome');};
  await assert.rejects(()=>failing.keypress(['Meta','z']),/Unknown keydown outcome/);
  assert.equal(attempts,1,'unknown input must never dispatch a fallback command');
+ attempts=0;
+ await assert.rejects(()=>failing.keypress(['Meta','a']),/Unknown keydown outcome/);
+ assert.equal(attempts,1,'unknown select-all input must not dispatch a second command or keyup');
 } finally { Object.defineProperty(process,'platform',platformDescriptor); }
 
 for(const invalid of [[],['ctrl'],['no-such-key'],[3]]){

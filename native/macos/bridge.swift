@@ -740,10 +740,10 @@ final class Bridge {
 		case "axReadText":
 			return try axReadText(request)
 		case "cursorStatus":
-			if supportsAgentCursor { return DispatchQueue.main.sync { AgentCursor.shared.status() } }
+			if supportsAgentCursor { return DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.status() } } }
 			return ["visible": false]
 		case "hideCursor":
-			if supportsAgentCursor { DispatchQueue.main.sync { AgentCursor.shared.hide() } }
+			if supportsAgentCursor { DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.hide() } } }
 			return ["hidden": true]
 		case "cursorCapabilities":
 			return ["virtualMotion": true, "version": 1]
@@ -2568,9 +2568,9 @@ final class Bridge {
 					guard supportsAgentCursor else { throw BridgeFailure(message: "Virtual cursor requires the desktop helper server", code: "capability_deferred") }
 					let trajectory = points
 					let postsBeforeAnimation = postedInputEvents()
-					DispatchQueue.main.sync { AgentCursor.shared.animate(points: trajectory, durationMs: rawDuration, above: record.windowId) }
+					DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.animate(points: trajectory, durationMs: rawDuration, above: record.windowId) } }
 					if rawDuration > 0 { usleep(UInt32(rawDuration * 1000)) }
-					let status = DispatchQueue.main.sync { AgentCursor.shared.status() }
+					let status = DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.status() } }
 					performed["delivery"] = "virtual"
 					performed["pointerMotion"] = ["durationMs": rawDuration, "systemPointerMoved": false, "inputDispatched": false, "visible": status["visible"] ?? false, "samples": status["samples"] ?? 0, "eventsPosted": postedInputEvents() - postsBeforeAnimation]
 					return

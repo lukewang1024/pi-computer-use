@@ -51,12 +51,24 @@ func strictFocusedFrame(origin: CGPoint?, size: CGSize?) -> CGRect? {
 	return CGRect(origin: origin, size: size)
 }
 
+// Chromium exposes the app suffix in AXTitle but omits it from CGWindowName.
+// Normalize only the exact suffix for the independently identified owner bundle.
+func focusedWindowTitlesAgree(_ ax: String, _ cg: String, ownerBundleIdentifier: String?) -> Bool {
+	let a = ax.trimmingCharacters(in: .whitespacesAndNewlines)
+	let c = cg.trimmingCharacters(in: .whitespacesAndNewlines)
+	if a.lowercased() == c.lowercased() { return true }
+	let products = ["com.google.Chrome": "Google Chrome", "com.microsoft.edgemac": "Microsoft Edge"]
+	guard let bundle = ownerBundleIdentifier, let product = products[bundle] else { return false }
+	return a.lowercased() == (c + " - " + product).lowercased()
+}
+
 func decideFocusedMapping(
 	focusedToken: String?,
 	axNodes: [FocusedAXNodeSnapshot],
 	candidates: [FocusedCGCandidateSnapshot],
 	targetPid: Int32,
-	geometryTolerance: CGFloat = 2
+	geometryTolerance: CGFloat = 2,
+	ownerBundleIdentifier: String? = nil
 ) -> FocusedMappingDecision {
 	guard let focusedToken else {
 		return FocusedMappingDecision(stage: "focused_element_missing", selectedWindowId: nil, candidateCount: candidates.count, validCandidateIds: [], ambiguous: false)
@@ -82,7 +94,7 @@ func decideFocusedMapping(
 		if let title = focused.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
 			let candidateTitle = candidate.title?.trimmingCharacters(in: .whitespacesAndNewlines), !candidateTitle.isEmpty
 		{
-			guard title.lowercased() == candidateTitle.lowercased() else { continue }
+			guard focusedWindowTitlesAgree(title, candidateTitle, ownerBundleIdentifier: ownerBundleIdentifier) else { continue }
 		}
 		valid.append(candidate)
 	}
@@ -185,12 +197,12 @@ func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwne
 
 func decideBoundFocusedMapping(
 	focusMatchesTarget: Bool, focusedRole: String, target: ForegroundTargetIdentity,
-	frame: CGRect?, title: String?, candidates: [FocusedCGCandidateSnapshot]
+	frame: CGRect?, title: String?, candidates: [FocusedCGCandidateSnapshot], ownerBundleIdentifier: String? = nil
 ) -> FocusedMappingDecision? {
 	guard focusMatchesTarget, ["AXWindow", "AXSheet"].contains(focusedRole) else { return nil }
 	let decision = decideFocusedMapping(focusedToken: "bound-target",
 		axNodes: [FocusedAXNodeSnapshot(token: "bound-target", frame: frame, title: title, isSheet: focusedRole == "AXSheet")],
-		candidates: candidates, targetPid: target.pid)
+		candidates: candidates, targetPid: target.pid, ownerBundleIdentifier: ownerBundleIdentifier)
 	guard decision.selectedWindowId == nil || decision.selectedWindowId == target.windowId else {
 		return FocusedMappingDecision(stage: "bound_target_cg_mismatch", selectedWindowId: nil, candidateCount: candidates.count, validCandidateIds: decision.validCandidateIds, ambiguous: false)
 	}

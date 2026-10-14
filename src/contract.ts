@@ -115,6 +115,10 @@ export interface UiAction {
 	scrollX?: number;
 	scrollY?: number;
 	path?: Array<{ x: number; y: number } | [number, number]>;
+	/** Total native pointer trajectory duration, bounded to 30 seconds. */
+	durationMs?: number;
+	/** Virtual animation by default; physical explicitly requests native hover/input. */
+	pointerMode?: "virtual" | "physical";
 	button?: MouseButtonName;
 	clickCount?: number;
 }
@@ -155,4 +159,7 @@ export const AGENT_TOOL_NAMES = new Set([
 	"navigate_browser",
 	"evaluate_browser",
 	"launch_browser",
+	"start_recording",
+	"recording_status",
+	"stop_recording",
 ]);

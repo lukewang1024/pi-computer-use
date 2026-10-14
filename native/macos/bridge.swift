@@ -439,6 +439,18 @@ final class Bridge {
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
 	private let physicalInputLock = NSRecursiveLock()
+	private let inputPostCountLock = NSLock()
+	private var inputPostCount: UInt64 = 0
+	private func postedInputEvents() -> UInt64 {
+		inputPostCountLock.lock()
+		defer { inputPostCountLock.unlock() }
+		return inputPostCount
+	}
+	private func recordPostedInputEvent() {
+		inputPostCountLock.lock()
+		inputPostCount &+= 1
+		inputPostCountLock.unlock()
+	}
 	private let supportsAgentCursor = CommandLine.arguments.contains("serve")
 	private let browserBundleIds: Set<String> = [
 		"com.apple.Safari", "com.google.Chrome", "org.chromium.Chromium", "company.thebrowser.Browser", "com.brave.Browser", "com.microsoft.edgemac", "com.vivaldi.Vivaldi", "net.imput.helium", "org.mozilla.firefox",
@@ -727,6 +739,14 @@ final class Bridge {
 			return try focusedElement(request)
 		case "axReadText":
 			return try axReadText(request)
+		case "cursorStatus":
+			if supportsAgentCursor { return DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.status() } } }
+			return ["visible": false]
+		case "hideCursor":
+			if supportsAgentCursor { DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.hide() } } }
+			return ["hidden": true]
+		case "cursorCapabilities":
+			return ["virtualMotion": true, "version": 1]
 		case "getMousePosition":
 			return getMousePosition()
 		default:
@@ -2398,6 +2418,12 @@ final class Bridge {
 			guard record.hasImage else {
 				throw BridgeFailure(message: "Coordinate targeting is unavailable for this outline-only root", code: "coordinate_unavailable_for_root")
 			}
+			if action == "moveMouse" {
+				let x = xNumber.doubleValue, y = yNumber.doubleValue
+				guard x.isFinite, y.isFinite, x >= 0, y >= 0, x < Double(record.imageWidth), y < Double(record.imageHeight) else {
+					throw BridgeFailure(message: "Motion endpoint is outside the captured image", code: "invalid_args")
+				}
+			}
 			rawPoint = lookPoint(record: record, x: xNumber.doubleValue, y: yNumber.doubleValue)
 			beforeValue = nil
 			beforeSelected = nil
@@ -2491,9 +2517,15 @@ final class Bridge {
 				performed["pointerDiagnostics"] = pointerDiagnostics
 			}
 			if delivery == "pid" { performed["verification"] = "caller_required" }
-			acquirePhysicalInputIfNeeded()
-			focusTargetForPhysicalInput()
-			if delivery == "hid" { try preflight(point) }
+			if action == "moveMouse", let mode = params["pointerMode"], !(mode is String && ["virtual", "physical"].contains(mode as! String)) {
+				throw BridgeFailure(message: "pointerMode must be virtual or physical", code: "invalid_args")
+			}
+			let virtualMotion = action == "moveMouse" && (params["pointerMode"] as? String ?? "virtual") == "virtual"
+			if !virtualMotion {
+				acquirePhysicalInputIfNeeded()
+				focusTargetForPhysicalInput()
+				if delivery == "hid" { try preflight(point) }
+			}
 			switch action {
 			case "press", "click":
                 if action == "click", element == nil, delivery == "hid",
@@ -2506,8 +2538,60 @@ final class Bridge {
 				animateCursor(at: point)
 				try postMouseClick(at: point, pid: pid, target: physicalTarget, button: mouseButton(params["button"] as? String ?? "left"), clickCount: max(1, min(3, (params["clickCount"] as? NSNumber)?.intValue ?? 1)), delivery: delivery)
 			case "moveMouse":
+				let rawDuration = (params["durationMs"] as? NSNumber)?.doubleValue ?? 350
+				guard rawDuration.isFinite, rawDuration >= 0, rawDuration <= 30000, rawDuration.rounded() == rawDuration else {
+					throw BridgeFailure(message: "durationMs must be an integer between 0 and 30000", code: "invalid_args")
+				}
+				var points: [CGPoint]
+				if let rawPath = params["path"] {
+					guard let path = rawPath as? [[String: Any]], path.count >= 2, path.count <= 600 else {
+						throw BridgeFailure(message: "moveMouse.path requires 2 to 600 points", code: "invalid_args")
+					}
+					points = try path.map { raw in
+						guard let x = (raw["x"] as? NSNumber)?.doubleValue, let y = (raw["y"] as? NSNumber)?.doubleValue,
+							x.isFinite, y.isFinite, x >= 0, y >= 0, x < Double(record.imageWidth), y < Double(record.imageHeight) else {
+							throw BridgeFailure(message: "Motion point is outside the captured image", code: "invalid_args")
+						}
+						return lookPoint(record: record, x: x, y: y)
+					}
+				} else {
+					let current = virtualMotion ? point : (CGEvent(source: nil)?.location ?? point)
+					points = [record.windowFrame.contains(current) ? current : point, point]
+				}
+				if points.last != point { points.append(point) }
+				if virtualMotion {
+					if !(request["cursorOverlay"] as? Bool ?? true) {
+						performed["delivery"] = "virtual"
+						performed["pointerMotion"] = ["durationMs": rawDuration, "systemPointerMoved": false, "inputDispatched": false, "visible": false]
+						return
+					}
+					guard supportsAgentCursor else { throw BridgeFailure(message: "Virtual cursor requires the desktop helper server", code: "capability_deferred") }
+					let trajectory = points
+					let postsBeforeAnimation = postedInputEvents()
+					DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.animate(points: trajectory, durationMs: rawDuration, above: record.windowId) } }
+					if rawDuration > 0 { usleep(UInt32(rawDuration * 1000)) }
+					let status = DispatchQueue.main.sync { MainActor.assumeIsolated { AgentCursor.shared.status() } }
+					performed["delivery"] = "virtual"
+					performed["pointerMotion"] = ["durationMs": rawDuration, "systemPointerMoved": false, "inputDispatched": false, "visible": status["visible"] ?? false, "samples": status["samples"] ?? 0, "eventsPosted": postedInputEvents() - postsBeforeAnimation]
+					return
+				}
+				let began = DispatchTime.now().uptimeNanoseconds
+				var samples = 0
+				repeat {
+					let elapsed = elapsedMilliseconds(since: began)
+					let position = rawDuration == 0 ? Double(points.count - 1) : min(1, elapsed / rawDuration) * Double(points.count - 1)
+					let index = min(Int(position), points.count - 2)
+					let fraction = CGFloat(position - Double(index))
+					let sample = CGPoint(x: points[index].x + (points[index + 1].x - points[index].x) * fraction,
+						y: points[index].y + (points[index + 1].y - points[index].y) * fraction)
+					if delivery == "hid" { try preflight(sample) }
+					try postMouseMove(to: sample, pid: pid, target: physicalTarget, delivery: delivery)
+					samples += 1
+					if elapsed >= rawDuration { break }
+					usleep(UInt32(min(16, rawDuration - elapsed) * 1000))
+				} while true
+				performed["pointerMotion"] = ["durationMs": rawDuration, "elapsedMs": elapsedMilliseconds(since: began), "samples": samples]
 				animateCursor(at: point)
-				try postMouseMove(to: point, pid: pid, target: physicalTarget, delivery: delivery)
 			case "scroll":
 				animateCursor(at: point)
 				try postScrollWheel(at: point, deltaX: (params["scrollX"] as? NSNumber)?.intValue ?? 0, deltaY: (params["scrollY"] as? NSNumber)?.intValue ?? 0, pid: pid, target: physicalTarget, delivery: delivery)
@@ -4336,7 +4420,7 @@ final class Bridge {
 			if let decision = decideBoundFocusedMapping(focusMatchesTarget: sameElement(focused, bound),
 				focusedRole: stringAttribute(focused, attribute: kAXRoleAttribute as CFString) ?? "",
 				target: ForegroundTargetIdentity(pid: pid, windowId: physicalTarget.windowId),
-				frame: strictFrameForWindow(focused), title: stringAttribute(focused, attribute: kAXTitleAttribute as CFString), candidates: candidates) {
+				frame: strictFrameForWindow(focused), title: stringAttribute(focused, attribute: kAXTitleAttribute as CFString), candidates: candidates, ownerBundleIdentifier: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier) {
 				let verifiedId = decision.selectedWindowId.flatMap { windowInfo(windowId: $0)?.pid == pid ? $0 : nil }
 				var diagnostics = decision.diagnostics
 				diagnostics["boundTarget"] = true
@@ -4372,7 +4456,7 @@ final class Bridge {
 			FocusedCGCandidateSnapshot(windowId: candidate.windowId, ownerPid: pid, frame: candidate.bounds, title: candidate.title, isOnscreen: candidate.isOnscreen)
 		}
 		let decision = axReadUsable
-			? decideFocusedMapping(focusedToken: focusedToken, axNodes: nodes, candidates: candidateSnapshots, targetPid: pid)
+			? decideFocusedMapping(focusedToken: focusedToken, axNodes: nodes, candidates: candidateSnapshots, targetPid: pid, ownerBundleIdentifier: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier)
 			: FocusedMappingDecision(stage: "ax_read_failed", selectedWindowId: nil, candidateCount: candidates.count, validCandidateIds: [], ambiguous: false)
 		let matched = axReadUsable ? focusedToken.flatMap { elements[$0] } : nil
 		var diagnostics: [String: Any] = [
@@ -4415,6 +4499,7 @@ final class Bridge {
 	private func postEvent(_ event: CGEvent, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "pid" {
 			event.postToPid(pid)
+			recordPostedInputEvent()
 			return
 		}
 		guard let target else {
@@ -4436,6 +4521,7 @@ final class Bridge {
 		// input is posted globally only after the exact PID and window recheck.
 		guard dispatchForegroundEventIfVerified(report, event: inputEvent, dispatch: target.dispatchState, emit: {
 			event.post(tap: .cghidEventTap)
+			recordPostedInputEvent()
 		}) else {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState))
 		}

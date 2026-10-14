@@ -576,6 +576,44 @@ impl Input {
     pub fn failure_result(&self, error: ProtocolError) -> Result<Value, ProtocolError> {
         self.dispatch.borrow().failed(error, self.target)
     }
+    pub fn smooth_move_pointer(
+        &self,
+        x: i32,
+        y: i32,
+        path: Option<Vec<(i32, i32)>>,
+        duration_ms: u64,
+    ) -> Result<crate::pointer_motion::MotionReport, ProtocolError> {
+        let mut points = if let Some(path) = path {
+            path
+        } else {
+            let cursor = self
+                .conn
+                .query_pointer(self.root)
+                .map_err(xerr)?
+                .reply()
+                .map_err(xerr)?;
+            let current = (i32::from(cursor.root_x), i32::from(cursor.root_y));
+            vec![
+                if self.preflight_point(current.0, current.1).is_ok() {
+                    current
+                } else {
+                    (x, y)
+                },
+                (x, y),
+            ]
+        };
+        if points.last() != Some(&(x, y)) {
+            points.push((x, y));
+        }
+        let motion = crate::pointer_motion::PointerMotion::new(points.clone(), duration_ms)
+            .map_err(invalid)?;
+        for &(px, py) in &points {
+            self.preflight_point(px, py)?;
+        }
+        motion
+            .run(|px, py| self.move_pointer(px, py))
+            .map_err(|failure| failure.error)
+    }
     pub fn move_pointer(&self, x: i32, y: i32) -> Result<(), ProtocolError> {
         self.preflight_point(x, y)?;
         self.fake(MOTION_NOTIFY_EVENT, 0, x, y)
@@ -1123,6 +1161,29 @@ fn capture_err(e: impl std::fmt::Display) -> ProtocolError {
         format!("PNG encoding failed: {e}"),
         ErrorCode::CaptureFailed,
     )
+}
+
+/// Read-only ownership validation for a visual overlay; never activates the target.
+pub fn validate_visual_target(target: Window, expected_pid: u64) -> Result<(), ProtocolError> {
+    let (conn, screen) = connect()?;
+    validate_target(&conn, conn.setup().roots[screen].root, target, expected_pid)
+}
+
+/// Read-only diagnostics used to verify virtual animation leaves user input alone.
+pub fn pointer_state() -> Result<Value, ProtocolError> {
+    let (conn, screen) = connect()?;
+    let root = conn.setup().roots[screen].root;
+    let pointer = conn
+        .query_pointer(root)
+        .map_err(xerr)?
+        .reply()
+        .map_err(xerr)?;
+    let focus = conn
+        .get_input_focus()
+        .map_err(xerr)?
+        .reply()
+        .map_err(xerr)?;
+    Ok(json!({"x":pointer.root_x,"y":pointer.root_y,"focusWindow":focus.focus}))
 }
 
 #[cfg(test)]

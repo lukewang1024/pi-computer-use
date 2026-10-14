@@ -10,7 +10,13 @@ final class AgentCursorRenderer {
 
     private(set) var position = CGPoint(x: -200, y: -200)
     private(set) var heading: Double = .pi / 4
+    private(set) var hotspotIsPosition = false
     private(set) var isAnimating = false
+    @ObservationIgnored private(set) var renderedSamples = 0
+
+    private var timedPoints: [CGPoint]?
+    private var timedDuration: Double = 0
+    private var timedStart: CFTimeInterval?
 
     private var path: PlannedPath?
     private var spring: Spring?
@@ -19,6 +25,9 @@ final class AgentCursorRenderer {
     private var springTarget: (point: CGPoint, heading: Double)?
 
     func moveTo(point clickPoint: CGPoint) {
+        hotspotIsPosition = false
+        timedPoints = nil
+        timedStart = nil
         let endAngle = Double.pi / 4
         let targetPoint = CGPoint(
             x: clickPoint.x + CGFloat(cos(endAngle) * 16),
@@ -35,12 +44,28 @@ final class AgentCursorRenderer {
         isAnimating = true
     }
 
+    /// Animation only: never posts input events or reads the system cursor.
+    func moveAlong(points: [CGPoint], durationMs: Double) {
+        guard points.count >= 2, points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
+              durationMs.isFinite, durationMs >= 0, durationMs <= 30000 else { return }
+        cancelAnimation()
+        renderedSamples = 0
+        hotspotIsPosition = true
+        position = points[0]
+        timedPoints = points
+        timedDuration = durationMs / 1000
+        timedStart = nil
+        isAnimating = true
+    }
+
     func setInitialPosition(_ point: CGPoint) {
         position = point
         cancelAnimation()
     }
 
     func cancelAnimation() {
+        timedPoints = nil
+        timedStart = nil
         path = nil
         spring = nil
         springTarget = nil
@@ -51,6 +76,20 @@ final class AgentCursorRenderer {
 
     func tick(now: CFTimeInterval) {
         guard isAnimating else { return }
+        renderedSamples += 1
+        if let points = timedPoints {
+            let start = timedStart ?? now
+            timedStart = start
+            let progress = timedDuration == 0 ? 1 : min(1, max(0, (now - start) / timedDuration))
+            let scaled = progress * Double(points.count - 1)
+            let index = min(Int(scaled), points.count - 2)
+            let fraction = CGFloat(scaled - Double(index))
+            let a = points[index], b = points[index + 1]
+            position = CGPoint(x: a.x + (b.x - a.x) * fraction, y: a.y + (b.y - a.y) * fraction)
+            if a != b { heading = atan2(Double(b.y - a.y), Double(b.x - a.x)) + .pi }
+            if progress >= 1 { cancelAnimation() }
+            return
+        }
         let previous = lastFrameTime ?? now
         let dt = min(0.05, now - previous)
         lastFrameTime = now

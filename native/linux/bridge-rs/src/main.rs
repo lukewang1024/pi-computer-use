@@ -92,6 +92,9 @@ async fn handle_request(state: &Arc<Mutex<HelperState>>, request: &Request) -> R
         );
     }
     let result = match request.cmd.as_str() {
+        "cursorStatus" => Ok(linux_bridge::agent_cursor::status()),
+        "getMousePosition" => x11::pointer_state(),
+        "cursorCapabilities" => Ok(json!({"virtualMotion":true,"version":1})),
         "diagnostics" => Ok(diagnostics().await),
         "listRoots" | "listWindows" => list_roots(state, &request.args).await,
         "look" | "screenshot" => look(state, &request.args).await,
@@ -414,7 +417,20 @@ async fn act(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pro
     let target = args
         .get("target")
         .ok_or_else(|| invalid("act requires target"))?;
-    let params = args.get("params").cloned().unwrap_or_else(|| json!({}));
+    let mut params = args.get("params").cloned().unwrap_or_else(|| json!({}));
+    if !params.is_object() {
+        return Err(invalid("Action params must be an object"));
+    }
+    params["cursorOverlay"] = args.get("cursorOverlay").cloned().unwrap_or(json!(true));
+    if action == "moveMouse"
+        && params.get("pointerMode").is_some()
+        && !matches!(
+            params.get("pointerMode").and_then(Value::as_str),
+            Some("virtual" | "physical")
+        )
+    {
+        return Err(invalid("pointerMode must be virtual or physical"));
+    }
     let policy = PhysicalPolicy::parse(args.get("policy").and_then(Value::as_str))?;
     let record = lock(state)?.look(look_id)?;
     let client = AtspiClient::connect().await?;
@@ -424,6 +440,18 @@ async fn act(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Value, Pro
         match action {
             "press" | "click" => {
                 if let Some(worked) = semantic_attempt(client.press(&node).await)? {
+                    if worked
+                        && params
+                            .get("cursorOverlay")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true)
+                        && x11::SessionKind::detect() == x11::SessionKind::X11
+                    {
+                        if let Some(bounds) = &node.bounds {
+                            let point = (bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+                            let _ = linux_bridge::agent_cursor::animate(vec![point, point], 350);
+                        }
+                    }
                     return Ok(
                         json!({"outcome":if worked{"worked"}else{"didnt"},"performed":semantic_performed()}),
                     );
@@ -572,11 +600,72 @@ fn physical_act(
     geometry: ActionGeometry,
 ) -> Result<Value, ProtocolError> {
     let (x, y) = point;
+    if action == "moveMouse"
+        && params
+            .get("pointerMode")
+            .and_then(Value::as_str)
+            .unwrap_or("virtual")
+            == "virtual"
+    {
+        if x11::SessionKind::detect() != x11::SessionKind::X11 {
+            return Err(capability("Virtual cursor rendering requires an X11 desktop; Wayland overlay support is not available"));
+        }
+        let duration = match params.get("durationMs") {
+            None => 350,
+            Some(value) => value
+                .as_u64()
+                .filter(|n| *n <= 30000)
+                .ok_or_else(|| invalid("durationMs must be an integer between 0 and 30000"))?,
+        };
+        let mut points = if let Some(raw) = params.get("path") {
+            let raw = raw
+                .as_array()
+                .ok_or_else(|| invalid("moveMouse.path must be an array"))?;
+            if raw.len() < 2 || raw.len() > 600 {
+                return Err(invalid("moveMouse.path requires 2 to 600 points"));
+            }
+            raw.iter()
+                .map(|p| {
+                    image_point_to_screen(
+                        &geometry.frame,
+                        geometry.image_width,
+                        geometry.image_height,
+                        p.get("x")
+                            .and_then(Value::as_f64)
+                            .ok_or_else(|| invalid("Motion point requires x"))?,
+                        p.get("y")
+                            .and_then(Value::as_f64)
+                            .ok_or_else(|| invalid("Motion point requires y"))?,
+                    )
+                })
+                .collect::<Result<Vec<_>, ProtocolError>>()?
+        } else {
+            vec![point, point]
+        };
+        if points.last() != Some(&point) {
+            points.push(point);
+        }
+        x11::validate_visual_target(owning_window, expected_pid)?;
+        let visible = params
+            .get("cursorOverlay")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if visible {
+            linux_bridge::agent_cursor::animate(points, duration).map_err(capability)?;
+            if duration > 0 {
+                std::thread::sleep(Duration::from_millis(duration));
+            }
+        }
+        return Ok(
+            json!({"outcome":"worked", "performed":{"delivery":"virtual", "pointerMotion":{"durationMs":duration,"systemPointerMoved":false,"inputDispatched":false,"visible":visible,"samples":linux_bridge::agent_cursor::status()["samples"]}}}),
+        );
+    }
     let input = x11::Input::connect(policy, owning_window, expected_pid)?;
     let button = params
         .get("button")
         .and_then(Value::as_str)
         .unwrap_or("left");
+    let mut pointer_motion = None;
     let dispatched = (|| -> Result<(), ProtocolError> {
         match action {
             "press" | "click" => input.click(
@@ -588,7 +677,45 @@ fn physical_act(
                     .and_then(Value::as_u64)
                     .unwrap_or(1),
             )?,
-            "moveMouse" => input.move_pointer(x, y)?,
+            "moveMouse" => {
+                let duration = match params.get("durationMs") {
+                    None => 350,
+                    Some(v) => v.as_u64().filter(|n| *n <= 30_000).ok_or_else(|| {
+                        invalid("durationMs must be an integer between 0 and 30000")
+                    })?,
+                };
+                let path = if let Some(raw) = params.get("path") {
+                    let raw = raw
+                        .as_array()
+                        .ok_or_else(|| invalid("moveMouse.path must be an array"))?;
+                    if raw.len() < 2 || raw.len() > 600 {
+                        return Err(invalid("moveMouse.path requires 2 to 600 points"));
+                    }
+                    Some(
+                        raw.iter()
+                            .map(|p| {
+                                image_point_to_screen(
+                                    &geometry.frame,
+                                    geometry.image_width,
+                                    geometry.image_height,
+                                    p.get("x")
+                                        .and_then(Value::as_f64)
+                                        .ok_or_else(|| invalid("Motion point requires x"))?,
+                                    p.get("y")
+                                        .and_then(Value::as_f64)
+                                        .ok_or_else(|| invalid("Motion point requires y"))?,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, ProtocolError>>()?,
+                    )
+                } else {
+                    None
+                };
+                let report = input.smooth_move_pointer(x, y, path, duration)?;
+                pointer_motion = Some(
+                    json!({"durationMs":duration,"elapsedMs":report.elapsed_ms,"samples":report.samples}),
+                );
+            }
             "scroll" => input.scroll(
                 x,
                 y,
@@ -648,11 +775,20 @@ fn physical_act(
         }
         Ok(())
     })();
+    if dispatched.is_ok()
+        && params
+            .get("cursorOverlay")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        && matches!(action, "click" | "press" | "scroll" | "drag")
+    {
+        let _ = linux_bridge::agent_cursor::animate(vec![point, point], 350);
+    }
     if let Err(error) = dispatched {
         return input.failure_result(error);
     }
     Ok(
-        json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","mechanism":"xtest","deltaSource":"snapshot","windowId":owning_window},"evidence":{"mechanism":"xtest","windowId":owning_window}}),
+        json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","mechanism":"xtest","deltaSource":"snapshot","windowId":owning_window,"pointerMotion":pointer_motion},"evidence":{"mechanism":"xtest","windowId":owning_window}}),
     )
 }
 

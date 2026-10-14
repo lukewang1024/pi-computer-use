@@ -173,8 +173,10 @@ fn invalid(message: impl Into<String>) -> ProtocolError {
 #[cfg(windows)]
 mod native {
     use super::*;
+    use crate::pointer_motion::PointerMotion;
+    use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 
     pub fn open_browser_location(url: &str) -> Result<(), ProtocolError> {
         hotkey(&[VK_CONTROL], VK_L)?;
@@ -205,9 +207,47 @@ mod native {
             }
             "moveMouse" => {
                 let (x, y) = point.ok_or_else(|| invalid("moveMouse requires resolvedPoint"))?;
-                guard_point(args, x, y)?;
-                unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
-                ok("unknown", "coordinates", "hid")
+                let duration = match request.params.get("durationMs") {
+                    None => 350,
+                    Some(v) => v.as_u64().filter(|n| *n <= 30_000).ok_or_else(|| {
+                        invalid("durationMs must be an integer between 0 and 30000")
+                    })?,
+                };
+                let mut cursor = POINT::default();
+                unsafe { GetCursorPos(&mut cursor) }.map_err(input_failed)?;
+                let mut points = if let Some(raw) = args.get("resolvedPath") {
+                    raw.as_array()
+                        .ok_or_else(|| invalid("resolvedPath must be an array"))?
+                        .iter()
+                        .map(point_value_required)
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    let start = if guard_point(args, cursor.x, cursor.y).is_ok() {
+                        (cursor.x, cursor.y)
+                    } else {
+                        (x, y)
+                    };
+                    vec![start, (x, y)]
+                };
+                if points.last() != Some(&(x, y)) {
+                    points.push((x, y));
+                }
+                let motion = PointerMotion::new(points.clone(), duration).map_err(invalid)?;
+                for &(px, py) in &points {
+                    guard_point(args, px, py)?;
+                }
+                match motion.run(|px, py| {
+                    guard_point(args, px, py)?;
+                    unsafe { SetCursorPos(px, py) }.map_err(input_failed)
+                }) {
+                    Ok(report) => Ok(
+                        json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","pointerMotion":{"durationMs":duration,"elapsedMs":report.elapsed_ms,"samples":report.samples,"cursorBefore":{"x":cursor.x,"y":cursor.y},"endpoint":{"x":x,"y":y}}}}),
+                    ),
+                    Err(failure) if failure.samples == 0 => Err(failure.error),
+                    Err(failure) => Ok(
+                        json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid"},"error":{"code":"foreground_interrupted_after_partial_hid","message":failure.error.message},"inputDispatch":{"eventsDispatched":failure.samples,"recoveryRequired":true,"unreleasedKeys":[],"unreleasedMouseButtons":[]}}),
+                    ),
+                }
             }
             "drag" => {
                 let path = args
@@ -363,8 +403,12 @@ mod native {
     }
 
     fn guard_point(args: &Value, x: i32, y: i32) -> Result<(), ProtocolError> {
-        let hwnd = args["pointerGuard"]["hwnd"].as_i64().ok_or_else(|| invalid("Pointer input requires an observed HWND guard"))?;
-        let pid = args["pointerGuard"]["pid"].as_u64().ok_or_else(|| invalid("Pointer input requires an observed PID guard"))?;
+        let hwnd = args["pointerGuard"]["hwnd"]
+            .as_i64()
+            .ok_or_else(|| invalid("Pointer input requires an observed HWND guard"))?;
+        let pid = args["pointerGuard"]["pid"]
+            .as_u64()
+            .ok_or_else(|| invalid("Pointer input requires an observed PID guard"))?;
         crate::window::require_pointer_target(hwnd as isize, pid, x, y)
     }
 
@@ -384,7 +428,9 @@ mod native {
         if points.len() < 2 {
             return Err(invalid("drag requires at least two points"));
         }
-        for &(x, y) in points { guard_point(args, x, y)?; }
+        for &(x, y) in points {
+            guard_point(args, x, y)?;
+        }
         unsafe { SetCursorPos(points[0].0, points[0].1) }.map_err(input_failed)?;
         guard_point(args, points[0].0, points[0].1)?;
         send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?;

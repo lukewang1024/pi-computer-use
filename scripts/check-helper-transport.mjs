@@ -24,6 +24,16 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
  const r=JSON.parse(line);
  if(r.cmd==='exit')return process.exit(0);
  if(r.cmd==='silent')return;
+ if(['act','actBatch'].includes(r.cmd) && r.args.returnedErrorFixture){
+  const emit=(id,stage,elapsedMs)=>fs.writeSync(2,JSON.stringify({event:'cu_action_phase',requestId:id,stage,elapsedMs,secret:'not-retained'})+'\\n');
+  emit('different-request','native_mutation_started',0);
+  if(!r.args.noStages)emit(r.id,'reference_resolution_started',1);
+  if(r.args.afterMutation)emit(r.id,'native_mutation_started',2);
+  // stdout/stderr use independent pipes; absence of a late phase must not
+  // become evidence of non-delivery. Let this fixture's phases be observed.
+  setTimeout(()=>process.stdout.write(JSON.stringify({id:r.id,protocolVersion:r.protocolVersion,ok:false,error:{code:'stale_ref',message:'Element reference is stale'}})+'\\n'),30);
+  return;
+ }
  if(r.cmd==='act' && r.args.phaseFixture){
   const emit=(id,stage,elapsedMs)=>fs.writeSync(2,JSON.stringify({event:'cu_action_phase',requestId:id,stage,elapsedMs,secret:'not-retained'})+'\\n');
   emit('different-request','request_started',0);
@@ -63,6 +73,22 @@ try{
   return true;
  });
  assert.equal(await unrelated,'isolated');
+
+ for(const [command,afterMutation,noStages] of [['act',false,false],['act',true,false],['actBatch',false,true]]){
+  await assert.rejects(()=>client.command(command,{returnedErrorFixture:true,afterMutation,noStages}),error=>{
+   assert.equal(error.code,'stale_ref');
+   assert.equal(error.message,'Element reference is stale');
+   assert.equal(error.outcome,undefined);
+   assert.equal(error.transport,undefined);
+   assert.equal(error.requestWriteAttempted,undefined);
+   assert.deepEqual(error.nativeActionDiagnostics,{version:1,command,stages:[
+    ...(noStages?[]:[{stage:'reference_resolution_started',elapsedMs:1}]),
+    ...(afterMutation?[{stage:'native_mutation_started',elapsedMs:2}]:[])
+   ]});
+   return true;
+  });
+ }
+ assert.equal(await client.command('echo',{value:'after-native-error'}),'after-native-error');
 
  const slow=client.command('echo',{value:'slow',delay:30});
  const fast=client.command('echo',{value:'fast'});

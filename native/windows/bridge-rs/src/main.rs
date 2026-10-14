@@ -1696,13 +1696,20 @@ fn handle_wait_for(args: &Value) -> Result<Value, ProtocolError> {
         args.get("lookId").and_then(Value::as_str),
         args.get("scopeRef").and_then(Value::as_str),
     ) {
-        (Some(look_id), Some(scope_ref)) => Some(
-            helper_state()
+        (Some(look_id), Some(scope_ref)) => {
+            let runtime_id = helper_state()
                 .lock()
                 .map_err(|_| internal("helper state lock poisoned"))?
                 .element_for_look(look_id, scope_ref)?
-                .runtime_id,
-        ),
+                .runtime_id;
+            // Runtime ancestry cannot distinguish unidentified elements: []
+            // would match every unidentified candidate in the window.
+            if runtime_id.is_empty() {
+                return Err(ProtocolError::new(
+                    "Scoped element reference has no runtime identity", ErrorCode::StaleRef));
+            }
+            Some(runtime_id)
+        },
         (None, Some(_)) => return Err(invalid("scopeRef requires lookId")),
         _ => None,
     };
@@ -1902,6 +1909,21 @@ fn emit_response(response: &Response) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_wait_rejects_empty_runtime_identity_before_window_lookup() {
+        let look_id = "missing-runtime-scope-regression";
+        let mut look = look_with_element(0.0);
+        // AutomationId can resolve an element, but cannot provide the runtime
+        // ancestry identity used by this scoped wait implementation.
+        look.elements.get_mut("same-ref").unwrap().automation_id = "known-control".into();
+        store_look_record(look_id.into(), look).unwrap();
+        let result = handle_wait_for(&json!({"lookId":look_id,"scopeRef":"same-ref","text":"needle"}));
+        helper_state().lock().unwrap().looks.remove(look_id);
+        let error = result.expect_err("An unavailable scoped identity must reject before provider/window work");
+        assert_eq!(error.code, ErrorCode::StaleRef);
+        assert_eq!(error.message, "Scoped element reference has no runtime identity");
+    }
+
     #[test]
     fn uia_identity_failures_preserve_reason_and_rejecting_code() {
         for reason in ["Element reference is stale", "Element reference has no identity", "Element reference is ambiguous"] {

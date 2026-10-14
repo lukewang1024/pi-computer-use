@@ -99,6 +99,8 @@ struct AgentCursorTests {
         expect(firstWindow.ignoresMouseEvents, "cursor overlay must be click-through")
         expect(!firstWindow.canBecomeKey && !firstWindow.canBecomeMain, "cursor overlay must not take focus")
         expect(!firstWindow.isOpaque, "cursor overlay must remain transparent")
+        expect(NSScreen.screens.contains { $0.frame == firstWindow.frame },
+               "cursor rendering surface must fit one display rather than span the virtual desktop")
         cursor.animate(to: CGPoint(x: 500, y: 500), above: 0)
         expect(scheduler.count == 2, "each action should replace the idle timeout")
 

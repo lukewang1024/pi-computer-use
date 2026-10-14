@@ -49,3 +49,15 @@ ranked identity list is rejected rather than combined with an earlier page.
 Larger pages preserve the same ranking, root references and digest. Discovery
 does not activate windows or authorize input. Observe the selected exact root
 before acting, and never treat a partial page as a complete inventory.
+
+Windows returned action errors retain `nativeActionDiagnostics` alongside the
+original error code and message. The versioned record contains the command
+(`act` or `actBatch`) and at most 32 correlated, allowlisted progress stages.
+Only stage names and bounded elapsed times are retained; action arguments and
+unrelated helper stderr are discarded. SDK error compaction preserves the
+original error as its cause for trusted downstream diagnostics.
+
+The stdout error response and stderr progress travel on independent pipes.
+Stages may be missing, delayed, or incomplete. Neither a mutation stage nor its
+absence establishes delivery, completion, a safe retry, or foreground identity.
+These diagnostics never replace the existing action outcome or input guards.

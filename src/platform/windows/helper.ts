@@ -179,6 +179,14 @@ export class WindowsHelperClient {
 			} else {
 				const error = new Error(parsed.error?.message ?? "Windows helper command failed.") as Error & { code?: string };
 				error.code = parsed.error?.code;
+				// Correlated progress is diagnostic only. A returned native error
+				// does not establish delivery, completion, or permission to retry.
+				if (pending.command === "act" || pending.command === "actBatch") {
+					Object.assign(error, { nativeActionDiagnostics: {
+						version: 1, command: pending.command,
+						stages: pending.stages.map(row => ({ ...row })),
+					} });
+				}
 				pending.reject(error);
 			}
 		}

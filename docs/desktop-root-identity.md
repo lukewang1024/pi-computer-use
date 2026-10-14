@@ -61,3 +61,12 @@ The stdout error response and stderr progress travel on independent pipes.
 Stages may be missing, delayed, or incomplete. Neither a mutation stage nor its
 absence establishes delivery, completion, a safe retry, or foreground identity.
 These diagnostics never replace the existing action outcome or input guards.
+
+Windows UIA identity errors distinguish the bounded resolver reasons
+`Element reference has no identity`, `Element reference is ambiguous` and
+`Element reference is stale`. All retain the rejecting `stale_ref` code.
+Missing identity means neither an opaque RuntimeId nor AutomationId was
+available; ambiguity means the resolver could not select a unique candidate.
+These reasons help diagnose why a fresh-looking element cannot be used, but
+never authorize input, same-process substitution, or replay. Other provider
+text matching the legacy stale-reference category remains generalized.

@@ -70,3 +70,11 @@ available; ambiguity means the resolver could not select a unique candidate.
 These reasons help diagnose why a fresh-looking element cannot be used, but
 never authorize input, same-process substitution, or replay. Other provider
 text matching the legacy stale-reference category remains generalized.
+
+Scoped Windows UIA reads require a usable identity. Element extraction rejects
+when both RuntimeId and AutomationId are absent; it must not interpret that
+request as ordinary whole-window extraction. Scoped waits additionally require
+a nonempty RuntimeId, because their ancestry checks cannot distinguish multiple
+unidentified elements by the shared empty ID. Failure is reported before window
+lookup or provider traversal. Explicit window observations remain available,
+and these read-only restrictions do not change input or foreground permission.

@@ -205,6 +205,11 @@ pub fn extract_elements_from(
     runtime_id: &[i32],
     automation_id: &str,
 ) -> Result<Vec<Value>, String> {
+    // Empty identifiers select the window in the extraction worker protocol.
+    // An explicitly scoped element must never silently take that root path.
+    if runtime_id.is_empty() && automation_id.is_empty() {
+        return Err("Element reference has no identity".to_owned());
+    }
     #[cfg(not(windows))]
     {
         let _ = (store, hwnd, runtime_id, automation_id);
@@ -1496,6 +1501,18 @@ pub fn occlusion_ok(
 
 #[cfg(test)]
 mod unit_tests {
+    #[cfg(not(windows))]
+    #[test]
+    fn scoped_extraction_cannot_become_an_unscoped_window_read() {
+        let mut store = crate::refs::RefStore::new();
+        let error = super::extract_elements_from(&mut store, 1, &[], "")
+            .expect_err("Missing element identity must not select whole-window extraction");
+        assert_eq!(error, "Element reference has no identity");
+        assert!(super::extract_elements(&mut store, 1).is_empty());
+        assert!(super::extract_elements_from(&mut store, 1, &[42, 1], "").is_ok());
+        assert!(super::extract_elements_from(&mut store, 1, &[], "known-control").is_ok());
+    }
+
     use super::*;
     use crate::refs::NativeHandle;
     use serde_json::json;

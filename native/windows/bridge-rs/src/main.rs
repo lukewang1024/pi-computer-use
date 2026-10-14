@@ -1612,6 +1612,11 @@ fn delta_item(change: &str, root: &Value) -> Value {
         "title": root.get("title").and_then(Value::as_str).unwrap_or(""),
         "pid": root.get("pid").and_then(Value::as_u64).unwrap_or(0)
     });
+    // Snapshot refs come from a temporary RefStore. Carry the actual HWND so
+    // the public root reference can survive the next native enumeration.
+    if let Some(window_id) = root.get("windowId").and_then(Value::as_i64).filter(|id| *id > 0) {
+        item["windowId"] = json!(window_id);
+    }
     if let Some(is_modal) = root.get("isModal").and_then(Value::as_bool) {
         item["isModal"] = json!(is_modal);
     }
@@ -1987,6 +1992,21 @@ mod tests {
 
     fn root(id: i64, pid: u64, title: &str, focused: bool) -> Value {
         json!({ "windowId": id, "kind": "window", "title": title, "pid": pid, "rootRef": format!("@w{id}"), "isFocused": focused })
+    }
+
+    #[test]
+    fn root_delta_keeps_hwnd_for_all_windows_root_kinds() {
+        for kind in ["window", "dialog", "popover", "menu"] {
+            let mut popup = root(81, 1, "owned popup", true);
+            popup["kind"] = json!(kind);
+            let delta = delta_item("appeared", &popup);
+            assert_eq!(delta["windowId"], 81);
+            assert_eq!(delta["kind"], kind);
+        }
+        for id in [0, -1] {
+            assert!(delta_item("appeared", &root(id, 1, "invalid", false))
+                .get("windowId").is_none());
+        }
     }
 
     fn snap(roots: Vec<Value>, foreground_pid: Option<u64>) -> RootSnapshot {

@@ -6,6 +6,7 @@
 pub mod capture;
 pub mod error;
 pub mod input;
+pub mod pointer_motion;
 pub mod protocol;
 pub mod refs;
 pub mod state;
@@ -25,3 +26,5 @@ pub mod read_worker;
 mod uia_resolution;
 
 pub mod action_trace;
+
+pub mod agent_cursor;

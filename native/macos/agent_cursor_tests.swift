@@ -6,8 +6,31 @@ import Foundation
 struct AgentCursorTests {
     @MainActor
     static func main() {
+        testTimedTrajectory()
         testMotionLifecycle()
         testOverlayLifecycle()
+    }
+
+    @MainActor
+    private static func testTimedTrajectory() {
+        let renderer = AgentCursorRenderer()
+        renderer.moveAlong(points: [CGPoint(x: -400, y: 10), CGPoint(x: 0, y: 10), CGPoint(x: 0, y: 210)], durationMs: 1000)
+        renderer.tick(now: 100)
+        renderer.tick(now: 100.25)
+        expect(renderer.position == CGPoint(x: -200, y: 10), "trajectory must preserve negative display coordinates")
+        renderer.tick(now: 100.5)
+        expect(renderer.position == CGPoint(x: 0, y: 10), "trajectory must visit the path corner")
+        renderer.tick(now: 101)
+        expect(renderer.position == CGPoint(x: 0, y: 210), "trajectory must land exactly on its endpoint")
+        expect(!renderer.isAnimating, "completed timed trajectory must stop rendering")
+        renderer.moveAlong(points: [.zero, CGPoint(x: 80, y: 40)], durationMs: 0)
+        renderer.tick(now: 102)
+        expect(renderer.position == CGPoint(x: 80, y: 40), "zero-duration trajectory must settle immediately")
+        renderer.moveAlong(points: [.zero, CGPoint(x: 100, y: 100)], durationMs: 30000)
+        renderer.tick(now: 103)
+        renderer.cancelAnimation()
+        renderer.tick(now: 200)
+        expect(renderer.position == .zero, "cancelled trajectory must not continue moving")
     }
 
     @MainActor
@@ -73,6 +96,9 @@ struct AgentCursorTests {
             fail("first action should create a visible overlay")
         }
 
+        expect(firstWindow.ignoresMouseEvents, "cursor overlay must be click-through")
+        expect(!firstWindow.canBecomeKey && !firstWindow.canBecomeMain, "cursor overlay must not take focus")
+        expect(!firstWindow.isOpaque, "cursor overlay must remain transparent")
         cursor.animate(to: CGPoint(x: 500, y: 500), above: 0)
         expect(scheduler.count == 2, "each action should replace the idle timeout")
 

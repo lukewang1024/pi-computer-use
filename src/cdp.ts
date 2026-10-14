@@ -7,8 +7,12 @@
 // keeps the AX/CGEvent path, so with the env var unset this module is inert.
 
 import { randomUUID } from "node:crypto";
+import { getComputerUseConfig } from "./config.ts";
+import { browserCursorExpression, clearBrowserCursorExpression, type CursorPoint } from "./browser-cursor.ts";
 import { CdpNavigationFailure } from "./navigation-failure.ts";
 import { parseLookResponse, serializeOutline, type SerializedOutline } from "./outline.ts";
+
+const cursorContexts = new Set<string>();
 
 export interface CdpConsoleEntry {
 	level: string;
@@ -466,6 +470,11 @@ export class CdpTab {
 
 	async clickBackendNode(backendNodeId: number): Promise<void> {
 		await this.withBackendNode(backendNodeId, "function(){ this.scrollIntoView({block:'center', inline:'center'}); this.click(); }");
+		if (getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless) {
+			const box = await this.send("DOM.getContentQuads", {backendNodeId}).catch(() => undefined);
+			const quad = box?.quads?.[0];
+			if (Array.isArray(quad) && quad.length === 8 && quad.every(Number.isFinite)) await this.showAgentCursor([{x:(quad[0]+quad[2]+quad[4]+quad[6])/4,y:(quad[1]+quad[3]+quad[5]+quad[7])/4}],0,true).catch(() => {});
+		}
 	}
 
 	async pointerClickRemoteFrame(route: CdpRemoteFrameRoute, backendNodeId: number, button: "left" | "right" | "middle" = "left", clickCount = 1): Promise<void> {
@@ -811,8 +820,17 @@ export class CdpTab {
 		}
 	}
 
+	async showAgentCursor(points: CursorPoint[], durationMs = 350, click = false): Promise<void> {
+		const config = getComputerUseConfig();
+		if (!config.cursor_overlay || config.headless) return;
+		await this.evaluate(browserCursorExpression(points, durationMs, click));
+		cursorContexts.add(cdpContextId(this.targetId));
+	}
+
 	async mouseAt(x: number, y: number, type: "mouseMoved" | "mousePressed" | "mouseReleased", button: "left" | "right" | "middle" = "left", clickCount = 1): Promise<void> {
 		await this.send("Input.dispatchMouseEvent", { type, x, y, button: type === "mouseMoved" ? "none" : button, clickCount });
+		// A visual failure must not turn a completed input into a replayable error.
+		if (type !== "mouseReleased") await this.showAgentCursor([{x,y}], type === "mousePressed" ? 0 : 350, type === "mousePressed").catch(() => {});
 	}
 
 	async dragPath(path: Array<{ x: number; y: number }>): Promise<void> {
@@ -1081,6 +1099,27 @@ export async function cdpKeypressForContext(contextId: string, keys: string[], b
 
 export async function cdpMouseForContext(contextId: string, x: number, y: number, type: "mouseMoved" | "mousePressed" | "mouseReleased", button: "left" | "right" | "middle" = "left", clickCount = 1): Promise<boolean> {
 	return (await withCdpContextTab(contextId, async (tab) => { await tab.mouseAt(x, y, type, button, clickCount); return true; })) === true;
+}
+
+export async function clearAgentCursors(): Promise<void> {
+	const failures: unknown[] = [];
+	for (const contextId of cursorContexts) {
+		try {
+			await withCdpContextTab(contextId, tab => tab.evaluate(clearBrowserCursorExpression()));
+			cursorContexts.delete(contextId);
+		} catch (error) { failures.push(error); }
+	}
+	if (failures.length) throw new AggregateError(failures, "Browser cursor cleanup failed; task-owned overlay may remain.");
+}
+
+export async function cdpVirtualMouseForContext(contextId: string, points: CursorPoint[], durationMs: number): Promise<boolean> {
+	return (await withCdpContextTab(contextId, async (tab) => {
+		const result = await tab.evaluate("({width:innerWidth,height:innerHeight})") as {width:number;height:number};
+		if (!Number.isFinite(result?.width) || !Number.isFinite(result?.height) || points.some(p => p.x < 0 || p.y < 0 || p.x >= result.width || p.y >= result.height)) throw new Error("Virtual pointer falls outside its owning viewport.");
+		await tab.showAgentCursor(points, durationMs);
+		if (durationMs) await new Promise(resolve => setTimeout(resolve, durationMs));
+		return true;
+	})) === true;
 }
 
 export async function cdpDragForContext(contextId: string, path: Array<{ x: number; y: number }>): Promise<boolean> {

@@ -1,3 +1,4 @@
+import { getComputerUseConfig } from "../../config.ts";
 import { parseLookResponse, type LookResponse } from "../../outline.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformReadyState, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
@@ -122,10 +123,18 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 		return parseLookResponse(await windowsHelper.command("look", { ...request.target, baseLookId: request.baseLookId, maxDimension: request.maxDimension, readText: request.readText, scopeRef: request.scopeRef, includeImage: request.includeImage, ...(request.includeElements === undefined ? {} : { includeElements: request.includeElements }), allowImageFailure: request.allowImageFailure }, options));
 	},
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		return await windowsHelper.command<HelperActResult>("act", helperAction(request), options);
+		if (request.action === "moveMouse" && request.params.pointerMode !== "physical") {
+			const capability = await windowsHelper.command<{virtualMotion?: boolean}>("cursorCapabilities", {}, options);
+			if (capability.virtualMotion !== true) throw new Error("Installed helper does not support the virtual cursor; no input was dispatched. Rebuild or update the native helper.");
+		}
+		return await windowsHelper.command<HelperActResult>("act", {...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless}, options);
 	},
 	async actBatch(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		return await windowsHelper.command<HelperActResult>("actBatch", { actions: requests.map(helperAction) }, options);
+		if (requests.some(request => request.action === "moveMouse" && request.params.pointerMode !== "physical")) {
+			const capability = await windowsHelper.command<{virtualMotion?: boolean}>("cursorCapabilities", {}, options);
+			if (capability.virtualMotion !== true) throw new Error("Installed helper does not support the virtual cursor; no input was dispatched.");
+		}
+		return await windowsHelper.command<HelperActResult>("actBatch", { actions: requests.map(request => ({...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless})) }, options);
 	},
 	async readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse> {
 		return await windowsHelper.command("uiaReadText", { ...args }, options);

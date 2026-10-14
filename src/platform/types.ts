@@ -201,7 +201,7 @@ export type PlatformActRequest = PlatformActRequestBase & (
 	| { action: "keypress"; params: { keys: string[] } & PlatformActDeliveryParam }
 	| { action: "scroll"; params: { scrollX: number; scrollY: number } & PlatformActDeliveryParam }
 	| { action: "drag"; params: { path: PlatformPoint[] } & PlatformActDeliveryParam }
-	| { action: "moveMouse"; params: PlatformActDeliveryParam }
+	| { action: "moveMouse"; params: { durationMs?: number; pointerMode?: "virtual" | "physical"; path?: PlatformPoint[] } & PlatformActDeliveryParam }
 );
 
 export interface PlatformReadTextRequest {

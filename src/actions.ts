@@ -20,7 +20,7 @@ export type PreparedAction =
 	| { action: "keypress"; target: ActionTarget; params: { keys: string[] }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: boolean }
 	| { action: "scroll"; target: ActionTarget; params: { scrollX: number; scrollY: number }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "drag"; target: ActionTarget; params: { path: Array<{ x: number; y: number }> }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
-	| { action: "moveMouse"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
+	| { action: "moveMouse"; target: ActionTarget; params: { durationMs: number; pointerMode: "virtual" | "physical"; path?: Array<{ x: number; y: number }> }; establishesFocus: false; usesCurrentFocus: false; needsForeground: boolean }
 	| { action: "wait"; params: { ms: number }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false };
 
 export interface ActionState {
@@ -172,6 +172,15 @@ function path(value: UiAction["path"], env: ActionEnvironment): Array<{ x: numbe
 	});
 }
 
+function pointerMotion(action: UiAction, env: ActionEnvironment): { durationMs: number; pointerMode: "virtual" | "physical"; path?: Array<{ x: number; y: number }> } {
+	const durationMs = action.durationMs ?? 350;
+	if (!Number.isInteger(durationMs) || durationMs < 0 || durationMs > 30000) throw new Error("moveMouse.durationMs must be an integer between 0 and 30000.");
+	if (action.path !== undefined && (!Array.isArray(action.path) || action.path.length < 2 || action.path.length > 600)) throw new Error("moveMouse.path must contain 2 to 600 points.");
+	const pointerMode = action.pointerMode ?? "virtual";
+	if (!["virtual", "physical"].includes(pointerMode)) throw new Error("moveMouse.pointerMode must be virtual or physical.");
+	return { durationMs, pointerMode, ...(action.path !== undefined ? { path: path(action.path, env) } : {}) };
+}
+
 function nativeTarget(action: UiAction, operation: PreparedAction["action"], env: ActionEnvironment): ActionTarget {
 	if (action.ref?.trim()) {
 		const node = env.node(action.ref.trim());
@@ -280,7 +289,7 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 		case "keypress": return { action: operation, target, params: { keys: keys(action.keys, env.platform) }, establishesFocus: false, usesCurrentFocus, needsForeground: !env.headless && env.platform === "macos" };
 		case "scroll": return { action: operation, target, params: { scrollX: scrollDelta(action.scrollX), scrollY: scrollDelta(action.scrollY) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "drag": return { action: operation, target, params: { path: path(action.path, env) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
-		case "moveMouse": return { action: operation, target, params: {}, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
+		case "moveMouse": return { action: operation, target, params: pointerMotion(action, env), establishesFocus: false, usesCurrentFocus: false, needsForeground: !env.headless && action.pointerMode === "physical" };
 	}
 }
 

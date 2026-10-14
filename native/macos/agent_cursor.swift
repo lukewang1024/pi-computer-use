@@ -19,7 +19,7 @@ final class AgentCursor {
     }
 
     func animate(to point: CGPoint, above windowId: UInt32) {
-        show(above: windowId)
+        show(above: windowId, at: point)
         AgentCursorRenderer.shared.moveTo(point: point)
         startFrameLoop()
         scheduleHide(after: 8)
@@ -27,7 +27,7 @@ final class AgentCursor {
 
     func animate(points: [CGPoint], durationMs: Double, above windowId: UInt32) {
         guard points.count >= 2 else { return }
-        show(above: windowId)
+        show(above: windowId, at: points[0])
         let renderer = AgentCursorRenderer.shared
         var trajectory = points
         if trajectory.count == 2, trajectory[0] == trajectory[1] { trajectory[0] = renderer.position }
@@ -42,6 +42,7 @@ final class AgentCursor {
             let renderer = AgentCursorRenderer.shared
             while !Task.isCancelled, renderer.isAnimating {
                 renderer.tick(now: Date.timeIntervalSinceReferenceDate)
+                updateSurface(at: renderer.position)
                 try? await Task.sleep(for: .milliseconds(16))
             }
         }
@@ -66,12 +67,12 @@ final class AgentCursor {
         overlay = nil
     }
 
-    private func show(above windowId: UInt32) {
+    private func show(above windowId: UInt32, at point: CGPoint) {
         idleHideTask?.cancel()
         idleHideTask = nil
         idleGeneration &+= 1
 
-        let window = ensureWindow()
+        let window = ensureWindow(at: point)
         if !window.isVisible { window.orderFrontRegardless() }
         window.order(.above, relativeTo: Int(windowId))
 
@@ -117,25 +118,36 @@ final class AgentCursor {
         }
     }
 
-    private static var desktopFrame: CGRect {
-        NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }
+    private static func screenFrame(at point: CGPoint) -> CGRect {
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
+        let appKitPoint = CGPoint(x: point.x, y: primaryTop - point.y)
+        return (NSScreen.screens.first { $0.frame.contains(appKitPoint) } ?? NSScreen.screens.first)?.frame ?? .zero
     }
 
-    private func ensureWindow() -> AgentCursorOverlayWindow {
-        if let overlay { overlay.setFrame(Self.desktopFrame, display: true); return overlay }
+    private func updateSurface(at point: CGPoint) {
+        guard let overlay else { return }
+        let frame = Self.screenFrame(at: point)
+        guard overlay.frame != frame else { return }
+        overlay.setFrame(frame, display: true)
+        overlay.contentView = NSHostingView(rootView: AgentCursorView(screenFrame: frame).accessibilityHidden(true))
+    }
+
+    private func ensureWindow(at point: CGPoint) -> AgentCursorOverlayWindow {
+        if let overlay { updateSurface(at: point); return overlay }
+        let frame = Self.screenFrame(at: point)
         let window = AgentCursorOverlayWindow(
-            contentRect: Self.desktopFrame,
+            contentRect: frame,
             styleMask: .borderless,
             backing: .buffered,
             defer: false
         )
-        window.contentView = NSHostingView(rootView: AgentCursorView().accessibilityHidden(true))
+        window.contentView = NSHostingView(rootView: AgentCursorView(screenFrame: frame).accessibilityHidden(true))
         overlay = window
         return window
     }
 }
 
-/// Desktop-wide, click-through overlay that can never take focus.
+/// A display-sized, click-through overlay that can never take focus.
 private final class AgentCursorOverlayWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -155,6 +167,7 @@ private final class AgentCursorOverlayWindow: NSWindow {
 @MainActor
 private struct AgentCursorView: View {
     @Bindable private var renderer = AgentCursorRenderer.shared
+    let screenFrame: CGRect
 
     var body: some View {
         let position = renderer.position
@@ -167,9 +180,8 @@ private struct AgentCursorView: View {
 
     // Shared geometry and palette: src/agent-cursor-style.json. Fixed orientation.
     private func drawCursor(in graphics: GraphicsContext, position: CGPoint) {
-        let desktop = NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }
-        let point = CGPoint(x: position.x - desktop.minX - 3,
-                            y: position.y - ((NSScreen.screens.first?.frame.maxY ?? 0) - desktop.maxY) - 2)
+        let point = CGPoint(x: position.x - screenFrame.minX - 3,
+                            y: position.y - ((NSScreen.screens.first?.frame.maxY ?? 0) - screenFrame.maxY) - 2)
         guard point.x.isFinite, point.y.isFinite else { return }
         do {
             let points = [CGPoint(x: 3, y: 0), CGPoint(x: 2, y: 0), CGPoint(x: 1, y: 0), CGPoint(x: 1, y: 1), CGPoint(x: 1, y: 2), CGPoint(x: 10, y: 32), CGPoint(x: 10, y: 33), CGPoint(x: 10, y: 34), CGPoint(x: 11, y: 34), CGPoint(x: 17, y: 20), CGPoint(x: 18, y: 20), CGPoint(x: 18, y: 19), CGPoint(x: 19, y: 18), CGPoint(x: 30, y: 11), CGPoint(x: 31, y: 11), CGPoint(x: 30, y: 10), CGPoint(x: 29, y: 10)]

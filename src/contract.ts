@@ -129,7 +129,7 @@ export interface ActParams extends StateTargetParams {
 	includeImage?: boolean;
 	expect?: UiCondition;
 	/** Desktop successor observation only; input delivery and focus guards are unchanged. */
-	observationMode?: "semantic" | "fused";
+	observationMode?: "semantic" | "fused" | "pixels";
 	/** Response projection only; the complete successor remains saved for queries. */
 	outlineView?: "full" | "folded";
 	/** Bounded cached-only matches from this complete successor, before response projection. */

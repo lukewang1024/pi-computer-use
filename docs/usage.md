@@ -116,6 +116,17 @@ outline-only successor require a fresh image-bearing observation. The default
 a semantic successor; observe a semantic or fused state first. This option is
 currently desktop-only and is rejected for CDP browser contexts before input.
 
+Windows and macOS native `act_ui` also accept `observationMode: "pixels"`.
+The input is grounded in the current state as usual; its successor captures a
+fresh screenshot without accessibility-tree extraction or OCR. Old semantic
+refs are invalidated. Use it when the next step needs only window keyboard or
+image coordinates; observe semantic or fused again before querying controls.
+`expect` and `outlineQuery` are incompatible and rejected before input. This is
+not `includeImage: false`, which only omits the response image while retaining
+the original capture policy. Missing helper confirmation or image after input
+returns terminal evidence without an actionable successor and never replays
+input. Linux and browser contexts reject this option before dispatch.
+
 For browser CDP actions with `expect`, the snapshot that satisfies the condition
 is returned as the successor state. It is collected after input within the same
 resource write epoch; the bridge does not collect another full accessibility

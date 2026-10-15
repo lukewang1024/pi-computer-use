@@ -135,7 +135,7 @@ const expandUiTool = defineTool({
 	label: "Expand UI",
 	description: "Unfold bounded local outline context for one @e ref.",
 	promptSnippet: "Expand a specific ref instead of dumping unrelated UI.",
-	parameters: Type.Object({ ref: Type.String(), includeSubtree: Type.Optional(Type.Boolean({ description: "Return at most 500 structured subtree nodes; omit repeated rendered context. Check subtree.truncated before grounding." })), depth: Type.Optional(Type.Number({ minimum: 1, maximum: 8, description: "Subtree depth, default 3" })), stateId }),
+	parameters: Type.Object({ ref: Type.String(), refresh: Type.Optional(Type.Boolean({ description: "Force one read-only Windows/macOS native scope refresh using the current element identity, without screenshot or OCR. Useful when an ancestor has a coarse read frontier. Inspect scopeRefresh and subtree.truncated; this does not send input or make an incomplete subtree complete. Unsupported for browser and Linux roots." })), includeSubtree: Type.Optional(Type.Boolean({ description: "Return at most 500 structured subtree nodes; omit repeated rendered context. Check subtree.truncated before grounding." })), depth: Type.Optional(Type.Number({ minimum: 1, maximum: 8, description: "Subtree depth, default 3" })), stateId }),
 	execute: executeExpandUi,
 });
 

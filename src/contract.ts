@@ -80,6 +80,8 @@ export interface OutlineQuery {
 export interface SearchUiParams extends StateTargetParams, OutlineQuery {}
 
 export interface ExpandUiParams extends StateTargetParams {
+	/** Force a bounded native scope read even if the cached node has no frontier. */
+	refresh?: boolean;
 	/** Return a bounded structured subtree instead of repeated rendered context. */
 	includeSubtree?: boolean;
 	ref: string;

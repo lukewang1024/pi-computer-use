@@ -24,3 +24,24 @@ without transferring the unrelated full document or parsing display-path text.
 A collapsed descendant is not made actionable by this API; expand its real UI
 control through `act_ui`, verify the resulting state, then ground the child in
 that successor. No input is automatically retried.
+
+
+## Explicit native scope refresh
+
+On Windows and macOS, `expand_ui({stateId, ref, refresh: true, depth: 8,
+includeSubtree: true})` forces one bounded native scope read using the original
+exact-window and element identity. It neither captures a new image nor runs OCR
+or sends input. This is useful when an ancestor has a coarse native truncation
+marker while the selected child has no local marker. Without `refresh`, existing
+cached expansion and automatic frontier reads keep their original behavior.
+
+A successful explicit read returns `details.scopeRefresh` with `requested` and
+`performed` true, the model scope ref, and base/current look IDs. This acknowledges
+a scope read, not a complete subtree: still require `subtree.truncated === false`
+and check the actual scoped controls. The enclosing window may remain incomplete.
+Replaced descendants are retired, matching identities retain their refs, and
+unrelated controls are preserved. A stale scope, changed exact root, failed native
+read or mismatched returned scope/window is an error; it is not permission to
+continue with the old partial tree. Browser and Linux roots reject this explicit
+option before reading. Original input, foreground and stale-reference guards
+remain unchanged.

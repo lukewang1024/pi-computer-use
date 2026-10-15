@@ -1312,6 +1312,21 @@ fn act_on_ref(
     }
     windows_bridge::action_trace::phase("target_action_started");
     match parsed.action.as_str() {
+        "typeText" if element.can_set_value && !element.is_secure && !is_web_backed(&element) => {
+            input::policy_allows_raw_input(parsed)?;
+            with_physical_input(|| {
+                window::ensure_foreground(element.hwnd, record.pid)?;
+                windows_bridge::uia::focus_keyboard_editor(
+                    element.hwnd, &element.runtime_id, &element.automation_id,
+                ).map_err(|message| ProtocolError::new(message, ErrorCode::ForegroundRequired))?;
+                window::require_foreground(element.hwnd, record.pid)?;
+                windows_bridge::action_trace::phase("exact_keyboard_editor_focus_verified");
+                let mut result = input::act(args)?;
+                result["performed"]["grounding"] = json!("description");
+                result["performed"]["keyboardFocusVerified"] = json!(true);
+                Ok(result)
+            })
+        }
         "press" | "click" => match windows_bridge::uia::press(
             element.hwnd,
             &element.runtime_id,
@@ -2220,6 +2235,18 @@ mod tests {
                     runtime_id: vec![],
                 },
             )]),
+        }
+    }
+
+    #[test]
+    fn native_editor_typing_does_not_promote_background_policy_to_physical_input() {
+        let record = look_with_element(1.0);
+        for (policy, expected) in [("ax_only", ErrorCode::CoordinateBlocked),
+                                   ("default", ErrorCode::ForegroundRequired)] {
+            let action = json!({"lookId":"look-a","action":"typeText","policy":policy,
+                "target":{"ref":"same-ref"},"params":{"text":"owned fixture"}});
+            let parsed = input::parse_act_request(&action).unwrap();
+            assert_eq!(act_on_ref(&action, &parsed, &record, "same-ref").unwrap_err().code, expected);
         }
     }
 

@@ -1096,6 +1096,47 @@ mod native {
         unsafe { element.SetFocus().map_err(|e| format!("SetFocus: {e}")) }
     }
 
+    /// Keyboard delivery is grounded in actual focus, not the editor's center
+    /// pixel (which may be a note-reference glyph or another provider fragment).
+    /// No pointer fallback and no ancestor-of-focus/window/PID approximation.
+    pub fn focus_keyboard_editor(
+        hwnd: isize,
+        runtime_id_target: &[i32],
+        automation_id: &str,
+    ) -> Result<(), String> {
+        let (_com, uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        let target_id = runtime_id(&element).unwrap_or_default();
+        if target_id.is_empty() || target_id != runtime_id_target {
+            return Err("Exact keyboard editor identity required".to_owned());
+        }
+        let enabled = unsafe { element.CurrentIsEnabled() }
+            .map_err(|e| format!("Keyboard editor enabled: {e}"))?.as_bool();
+        let focusable = unsafe { element.CurrentIsKeyboardFocusable() }
+            .map_err(|e| format!("Keyboard editor focusable: {e}"))?.as_bool();
+        let secure = unsafe { element.CurrentIsPassword() }
+            .map_err(|e| format!("Keyboard editor secure: {e}"))?.as_bool();
+        let control = unsafe { element.CurrentControlType() }
+            .map_err(|e| format!("Keyboard editor control type: {e}"))?;
+        if !enabled || !focusable || secure
+            || (control != UIA_EditControlTypeId && control != UIA_DocumentControlTypeId) {
+            return Err("Enabled focusable nonsecure keyboard editor required".to_owned());
+        }
+        if let Ok(focused) = unsafe { uia.GetFocusedElement() } {
+            if super::exact_keyboard_focus(&target_id, &runtime_id(&focused).unwrap_or_default()) {
+                return Ok(());
+            }
+        }
+        unsafe { element.SetFocus() }.map_err(|e| format!("Keyboard editor SetFocus: {e}"))?;
+        // SetFocus returning successfully is not proof. A sibling, owner,
+        // document ancestor, or same-process floating window must be rejected.
+        let focused = unsafe { uia.GetFocusedElement() }
+            .map_err(|e| format!("Read keyboard focus: {e}"))?;
+        if !super::exact_keyboard_focus(&target_id, &runtime_id(&focused).unwrap_or_default()) {
+            return Err("Windows did not focus the exact keyboard editor; no physical input was sent".to_owned());
+        }
+        Ok(())
+    }
+
     pub fn scroll(
         hwnd: isize,
         runtime_id_target: &[i32],
@@ -1418,7 +1459,7 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    ensure_enabled, focus, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
+    ensure_enabled, focus, focus_keyboard_editor, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
 
@@ -1513,12 +1554,30 @@ pub fn occlusion_ok(
     Err("UIA is only supported on Windows".to_owned())
 }
 
+pub fn exact_keyboard_focus(target: &[i32], focused: &[i32]) -> bool {
+    !target.is_empty() && target == focused
+}
+
+#[cfg(not(windows))]
+pub fn focus_keyboard_editor(_hwnd: isize, _runtime_id: &[i32], _automation_id: &str) -> Result<(), String> {
+    Err("UIA is only supported on Windows".to_owned())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod unit_tests {
+    #[test]
+    fn keyboard_focus_requires_exact_nonempty_runtime_identity() {
+        assert!(super::exact_keyboard_focus(&[42, 1, 9], &[42, 1, 9]));
+        for focused in [vec![], vec![42, 1], vec![42, 1, 8], vec![42, 1, 9, 3]] {
+            assert!(!super::exact_keyboard_focus(&[42, 1, 9], &focused));
+        }
+        assert!(!super::exact_keyboard_focus(&[], &[]));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn scoped_extraction_cannot_become_an_unscoped_window_read() {

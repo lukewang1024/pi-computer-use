@@ -200,3 +200,22 @@ window and sends one real test click.
 A refused application-menu observation retains `stale_ref` and reports the exact guard reason plus the target, foreground, focused-window and ownership PID/window IDs. `unavailable` denotes unreadable metadata. These fields serialize the same observations used by the existing guard; they add no AX reads and contain no window titles, menu labels or document content. The guard runs before and after the menu observation.
 
 Per-application focused-window metadata alone does not establish global foreground ownership. Use the explicit foreground PID/window checks when diagnosing a refusal; do not authorize input from a same-process match or replay a failed action.
+
+## Windows native editor keyboard targeting
+
+For `typeText` addressed to an observed native editor with `canSetValue`, the
+helper resolves its live identity in the exact owning HWND, requires an enabled,
+focusable, nonsecure Edit/Document control, and checks actual UIA keyboard focus.
+If necessary it calls SetFocus once, then requires exact nonempty RuntimeId
+equality with GetFocusedElement. Owners, ancestors, descendants, siblings and
+same-process windows are not substitutes. Failure sends no physical text and
+does not fall back to clicking. Existing focus is retained when it already
+matches, preserving the editor selection.
+
+The foreground HWND/PID is verified before focusing and required again before
+text delivery. This keyboard path does not use the center-pixel hit test:
+an editor's tiny empty-note rectangle can cover a reference glyph instead of
+the insertion point. Clicks, pointer operations, web-backed targets and other
+coordinate fallback paths retain their existing occlusion checks. A successful
+focus check proves targeting only; save and native reopen evidence must still
+establish the requested text and document structure.

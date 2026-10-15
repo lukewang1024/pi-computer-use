@@ -23,6 +23,8 @@ const requiredPrebuilt = [
 	"prebuilt/linux/arm64/linux-bridge",
 ];
 const expected = [
+	"native/cursor_raster.rs",
+	"src/agent-cursor-style.json",
 	...requiredPrebuilt,
 	...await listFiles(path.join(rootDir, "prebuilt"), "prebuilt"),
 	...helperSourceRelativePaths,

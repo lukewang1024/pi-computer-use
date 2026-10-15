@@ -19,15 +19,32 @@ function renderBrowserCursor(input: { key: string; points: CursorPoint[]; durati
 		const host = document.createElement("div");
 		host.setAttribute("aria-hidden", "true"); host.setAttribute("inert", "");
 		host.setAttribute("data-pi-agent-cursor", "");
-		for (const [name,value] of Object.entries({position:"fixed",left:"0",top:"0",width:"34px",height:"36px",zIndex:"2147483647",pointerEvents:"none",userSelect:"none",contain:"strict"})) {
+		for (const [name,value] of Object.entries({position:"fixed",left:"0",top:"0",width:"85px",height:"86px",zIndex:"2147483647",pointerEvents:"none",userSelect:"none",contain:"strict"})) {
 			host.style.setProperty(name.replace(/[A-Z]/g,c=>"-"+c.toLowerCase()), value, "important");
 		}
 		const shadow = host.attachShadow({mode:"closed"});
 		const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-		svg.setAttribute("viewBox", "0 0 34 36"); svg.setAttribute("width", "34"); svg.setAttribute("height", "36");
+		svg.setAttribute("viewBox", "-33 -33 85 86"); svg.setAttribute("width", "85"); svg.setAttribute("height", "86");
 		svg.style.pointerEvents = "none";
+		// Alpha-capable overlays include the shared neutral radial halo.
+		const defs = document.createElementNS(svg.namespaceURI!, "defs");
+		const gradient = document.createElementNS(svg.namespaceURI!, "radialGradient");
+		gradient.setAttribute("id", "pi-cursor-glow");
+		const glowStops = [{"offset":0,"color":"#615C59","opacity":0.4},{"offset":0.5,"color":"#6E6966","opacity":0.28},{"offset":0.82,"color":"#75706E","opacity":0.11},{"offset":1,"color":"#999999","opacity":0}];
+		for (const value of glowStops) {
+			const stop = document.createElementNS(svg.namespaceURI!, "stop");
+			stop.setAttribute("offset", String(value.offset));
+			stop.setAttribute("stop-color", value.color);
+			stop.setAttribute("stop-opacity", String(value.opacity));
+			gradient.append(stop);
+		}
+		defs.append(gradient);
+		const glow = document.createElementNS(svg.namespaceURI!, "circle");
+		glow.setAttribute("cx", "9"); glow.setAttribute("cy", "9"); glow.setAttribute("r", "33");
+		glow.setAttribute("fill", "url(#pi-cursor-glow)");
+		svg.append(defs, glow);
 		// Shared geometry and palette: src/agent-cursor-style.json.
-		const layers = [{"color":"#4C1D95","points":[[3,0],[2,0],[1,0],[1,1],[1,2],[10,32],[10,33],[10,34],[11,34],[17,20],[18,20],[18,19],[19,18],[30,11],[31,11],[30,10],[29,10]]},{"color":"#FFFFFF","points":[[4,1],[3,1],[2,1],[2,2],[2,3],[10,31],[10,32],[11,32],[17,20],[17,19],[18,18],[19,18],[29,11],[29,10],[28,10],[27,10]]},{"color":"#8B5CF6","points":[[6,4],[5,4],[4,4],[5,5],[10,26],[11,27],[16,18],[16,17],[17,17],[24,11],[23,10]]}];
+		const layers = [{"color":"#E6E6E6","points":[[3,1],[2,1],[1,2],[1,3],[6,16],[7,17],[8,17],[9,16],[11,11],[16,9],[17,8],[17,7],[16,6],[4,1]]},{"color":"#615C59","points":[[3,3],[7,15],[8,15],[10,10],[15,8],[15,7]]}];
 		for (const layer of layers) {
 			const polygon = document.createElementNS(svg.namespaceURI!, "polygon");
 			polygon.setAttribute("points", layer.points.map(p=>p.join(",")).join(" "));
@@ -50,7 +67,7 @@ function renderBrowserCursor(input: { key: string; points: CursorPoint[]; durati
 		const scaled = progress*(points.length-1), index = Math.min(Math.floor(scaled), points.length-2), fraction = scaled-index;
 		const a = points[index], b = points[index+1];
 		cursor.position = {x:a.x+(b.x-a.x)*fraction, y:a.y+(b.y-a.y)*fraction};
-		cursor.host.style.setProperty("transform", "translate("+(cursor.position.x-3)+"px,"+(cursor.position.y-2)+"px)", "important");
+		cursor.host.style.setProperty("transform", "translate("+(cursor.position.x-2-33)+"px,"+(cursor.position.y-1-33)+"px)", "important");
 		if (progress < 1) cursor.frame = requestAnimationFrame(tick);
 	};
 	tick(started);

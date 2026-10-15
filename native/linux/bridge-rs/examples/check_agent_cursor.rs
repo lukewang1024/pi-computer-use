@@ -71,6 +71,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(16));
     }
     assert_ne!(overlay, 0, "no cursor window rendered");
+    let geometry = conn.get_geometry(overlay)?.reply()?;
+    if geometry.depth == 32 {
+        assert_eq!((geometry.width, geometry.height), (85, 86));
+        let halo = conn
+            .get_image(ImageFormat::Z_PIXMAP, overlay, 60, 42, 1, 1, u32::MAX)?
+            .reply()?
+            .data;
+        let alpha = if conn.setup().image_byte_order == ImageOrder::LSB_FIRST {
+            halo[3]
+        } else {
+            halo[0]
+        };
+        assert!(
+            alpha > 0 && alpha < 255,
+            "halo must retain per-pixel translucency"
+        );
+    } else {
+        assert_eq!((geometry.width, geometry.height), (19, 20));
+    }
+
     assert!(
         positions.len() >= 60,
         "animation did not produce enough distinct positions: {}",
@@ -99,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .data;
     assert_eq!(
         &pixel[..3],
-        &[246, 92, 139],
+        &[89, 92, 97],
         "cursor was not present in the composed desktop image"
     );
     x11rb::protocol::xtest::fake_input(&conn, BUTTON_PRESS_EVENT, 1, 0, root, 400, 300, 0)?

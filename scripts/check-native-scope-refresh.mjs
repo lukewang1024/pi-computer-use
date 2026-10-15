@@ -14,11 +14,12 @@ const overrides={name:'windows',ensureReady:async()=>({lastPermissionCheckAt:Dat
   requests.push(request);
   if(request.scopeRef&&mode==='failure')throw Error('Scope ref is stale or outside the target root');
   const scope=request.scopeRef;
-  const outline=scope?node(mode==='wrong-scope'?'other-scope':scope,'Revision menu',[
+  const returnedScope=mode==='wrong-scope'?'other-scope':(backend.name==='macos'?'renewed-mac-scope-'+sequence:scope);
+  const outline=scope?node(returnedScope,'Revision menu',[
    node('fresh-a','Accept All Changes',[],{role:'menuItem',isEnabled:true}),
-   node('fresh-b','Accept All Changes',[],{role:'menuItem',isEnabled:true})],{truncated:mode==='partial'}):
+   node('fresh-b','Accept All Changes',[],{role:'menuItem',isEnabled:true})],{truncated:mode==='partial',...(mode==='wrong-role'?{role:'text'}:{}),...(mode==='wrong-identifier'?{identifier:'different'}:{})}):
    node('window','Owned fixture',[node('scope','Revision menu',[node('old','Accept All Changes',[],{role:'menuItem',isEnabled:true})]),node('outside','Outside')],{truncated:true});
-  return parseLookResponse({lookId:'scope-look-'+(++sequence),window:{windowId:mode==='wrong-window'&&scope?20:10,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1},outline});
+  return parseLookResponse({lookId:'scope-look-'+(++sequence),window:{windowId:mode==='wrong-window'&&scope?20:10,rootRef:scope&&mode==='wrong-native-root'?'other-native-window':root.rootRef,framePoints:root.framePoints,scaleFactor:1},outline});
  },act:async()=>{inputs++;throw Error('Unexpected input');},shutdown:async()=>{}};
 const original=Object.fromEntries(Object.keys(overrides).map(k=>[k,backend[k]]));Object.assign(backend,overrides);
 const call=(fn,params)=>fn('native-scope-refresh',params,undefined,undefined,{cwd:process.cwd(),hasUI:false});
@@ -47,6 +48,7 @@ try{
   backend.name=name;full=await observe();stateId=full.details.capture.stateId;scope=full.details.outline.root.children[0].ref;
   mode='partial';const partial=await call(executeExpandUi,{stateId,ref:scope,refresh:true,includeSubtree:true});
   assert.equal(partial.details.scopeRefresh.performed,true);assert.equal(partial.details.subtree.truncated,true,'Native frontier must remain incomplete');mode='fresh';
+  assert.equal(partial.details.scopeRefresh.nativeRefRenewed,name==='macos','Receipt must distinguish renewed AX refs from Windows echoed scope refs');
  }
  let count=requests.length;
  await assert.rejects(()=>call(executeExpandUi,{stateId,ref:scope,refresh:'yes'}),/must be boolean/);
@@ -59,6 +61,12 @@ try{
   const unchanged=await call(executeSearchUi,{stateId,text:'Accept All Changes',role:'menuItem'});
   assert.equal(unchanged.details.matches.length,1,'Failed read must not graft mismatched contents');
  }
+ backend.name='macos';
+ for(const failure of ['wrong-native-root','wrong-window','wrong-role','wrong-identifier']){
+  mode='fresh';full=await observe();stateId=full.details.capture.stateId;scope=full.details.outline.root.children[0].ref;
+  mode=failure;await assert.rejects(()=>call(executeExpandUi,{stateId,ref:scope,refresh:true,includeSubtree:true}),/identity mismatch/);
+ }
+ backend.name='windows';
  mode='fresh';full=await observe();stateId=full.details.capture.stateId;scope=full.details.outline.root.children[0].ref;
  count=requests.length;closed=true;await assert.rejects(()=>call(executeExpandUi,{stateId,ref:scope,refresh:true}));
  assert.equal(requests.length,count,'Closed exact root must reject before native reading');

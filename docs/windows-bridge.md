@@ -26,6 +26,11 @@ The helper declares per-monitor-v2 DPI awareness at startup and reports `scaleFa
 
 ## Refs, actions, and deltas
 
+RuntimeId arrays returned by UIA are owned by the reader and destroyed when
+copying finishes, including bounds/element-read error paths. Returned integer
+identities remain opaque copied values. This resource-lifetime repair does not
+claim to restore provider-missing identities or change input authorization.
+
 Observed `@e` refs retain RuntimeId from the original live UIA element before property-cache reconstruction, with the cached element as a fallback. If both RuntimeId and AutomationId are unavailable, the outline still exposes readable text and control semantics, but `canPress`, `canSetValue`, `canScroll`, and `canFocus` are false: the reference cannot safely resolve an action target. No name, position, or same-process substitution is permitted.
 
 Ref-targeted actions resolve a live `IUIAutomationElement` first:

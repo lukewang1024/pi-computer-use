@@ -432,7 +432,7 @@ mod native {
     use windows::Win32::Foundation::*;
     use windows::Win32::System::Com::*;
     use windows::Win32::System::Ole::{
-        SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+        SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
     };
     use windows::Win32::UI::Accessibility::*;
 
@@ -704,11 +704,22 @@ mod native {
         Ok(elements)
     }
 
+    /// Owns arrays returned by UIA client methods, including early read failures.
+    struct OwnedRuntimeArray(*mut SAFEARRAY);
+
+    impl Drop for OwnedRuntimeArray {
+        fn drop(&mut self) {
+            // The reader never leaves the array locked or exposes this pointer.
+            let _ = unsafe { SafeArrayDestroy(self.0) };
+        }
+    }
+
     fn runtime_id(element: &IUIAutomationElement) -> Option<Vec<i32>> {
         let array = unsafe { element.GetRuntimeId().ok()? };
         if array.is_null() {
             return None;
         }
+        let _owned = OwnedRuntimeArray(array);
         let lower = unsafe { SafeArrayGetLBound(array, 1).ok()? };
         let upper = unsafe { SafeArrayGetUBound(array, 1).ok()? };
         let mut values = Vec::with_capacity((upper - lower + 1).max(0) as usize);

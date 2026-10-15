@@ -45,3 +45,12 @@ read or mismatched returned scope/window is an error; it is not permission to
 continue with the old partial tree. Browser and Linux roots reject this explicit
 option before reading. Original input, foreground and stale-reference guards
 remain unchanged.
+
+
+Mac scoped reads allocate a new native AX wire reference for the same requested
+stored element. SDK128 accepts this native renewal only with the same exact
+window ID and native window reference, role and identifier. The native helper
+still resolves the original requested AX element and checks its descent from the
+requested window; there is no title search or same-PID substitution. The public
+scope ref stays stable when grafting the fresh subtree. `scopeRefresh.nativeRefRenewed`
+records this distinction. Windows continues to require its echoed scope wire ref.

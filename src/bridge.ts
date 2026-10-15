@@ -322,7 +322,7 @@ interface OutlineToolDetails {
 	matches?: SerializedOutlineSearchMatch[];
 	target?: SerializedOutlineNode;
 	subtree?: SerializedOutlineSubtree;
-	scopeRefresh?: { requested: true; performed: true; scopeRef: string; baseLookId: string; lookId: string };
+	scopeRefresh?: { requested: true; performed: true; scopeRef: string; baseLookId: string; lookId: string; nativeRefRenewed: boolean };
 	ancestors?: SerializedOutlineAncestors;
 	note?: WindowNote;
 }
@@ -2171,6 +2171,7 @@ async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Pr
 	const regionKey = noteRegionKeyForRef(outline, ref);
 	const regionChanged = Boolean(regionKey && state.currentNote?.regions.some((region) => region.key === regionKey && region.status === "changed"));
 	const baseLookId = outline.lookId;
+	let nativeRefRenewed = false;
 	if (params.refresh === true || target.truncated || regionChanged) {
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		const targetWireRef = wireRefForNode(target);
@@ -2182,14 +2183,29 @@ async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Pr
 			maxDimension: 1,
 			includeImage: false,
 		}, signal))).value;
-		if (params.refresh === true && (!scoped.parsedOutline || scoped.window.windowId !== currentTarget.windowId || scoped.parsedOutline.root.wireRef !== targetWireRef)) throw new Error("Native scope refresh identity mismatch; cached outline was not replaced.");
+		if (params.refresh === true) {
+			const root = scoped.parsedOutline?.root;
+			const mac = currentPlatformBackend.name === "macos";
+			// Mac AXRefStore allocates a new wire ref for each description, even
+			// for the exact AX element selected by scopeRef. Its native handler
+			// resolves that stored element and verifies descent from the exact
+			// requested window before walking it. Windows echoes the scope wire.
+			const macScopeMatches = mac && Boolean(root?.wireRef) &&
+				Boolean(currentTarget.nativeWindowRef) && scoped.window.rootRef === currentTarget.nativeWindowRef &&
+				root?.role === target.role && root?.identifier === target.identifier;
+			if (!root || scoped.window.windowId !== currentTarget.windowId ||
+				(mac ? !macScopeMatches : root.wireRef !== targetWireRef)) {
+				throw new Error("Native scope refresh identity mismatch; cached outline was not replaced.");
+			}
+			nativeRefRenewed = root.wireRef !== targetWireRef;
+		}
 		target = graftScopedOutline(outline, target.ref, scoped.parsedOutline!);
 		outline.lookId = scoped.lookId;
 		state.currentOutline = outline;
 		state.currentLook = { ...scoped, image: state.currentLook?.image, outline: outline.root, parsedOutline: outline };
 		persistOperation(state);
 	}
-	const refreshDetails = params.refresh === true ? { scopeRefresh: { requested: true as const, performed: true as const, scopeRef: target.ref, baseLookId, lookId: outline.lookId } } : {};
+	const refreshDetails = params.refresh === true ? { scopeRefresh: { requested: true as const, performed: true as const, scopeRef: target.ref, baseLookId, lookId: outline.lookId, nativeRefRenewed } } : {};
 	if (params.includeSubtree === true) {
 		const subtree = serializeOutlineSubtree(target, depth);
 		const details: OutlineToolDetails = { tool: "expand_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId,

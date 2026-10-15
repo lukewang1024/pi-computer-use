@@ -38,7 +38,7 @@ try{
  requests=[];await assert.rejects(()=>call(executeSearchUi,{text:'Save',stateId:pixels.details.capture.stateId}),/no semantic elements/);assert.equal(requests.length,0);
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,actions:[{action:'click',x:0,y:0}],expect:{text:'Save'}}),/semantic postconditions/);assert.equal(acts,0);
  await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'semantic',actions:[{action:'click',x:0,y:0}]}),/semantic successor/);assert.equal(acts,0);
- await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'invalid',actions:[{action:'click',x:0,y:0}]}),/must be semantic or fused/);assert.equal(acts,0);
+ await assert.rejects(()=>call(executeAct,{stateId:pixels.details.capture.stateId,observationMode:'invalid',actions:[{action:'click',x:0,y:0}]}),/must be semantic, fused or pixels/);assert.equal(acts,0);
  const acted=await call(executeAct,{stateId:pixels.details.capture.stateId,actions:[{action:'click',x:0,y:0}]});assert.equal(acted.details.execution.outcome,'unknown');assert.equal(acted.details.uiaDiagnostics.status,'skipped');assert.equal(requests.length,1);assert.equal(requests[0].includeElements,false);assert.equal(acts,1,'controlled input completion remains unverified; no batch replay');
  requests=[];
  const omitted=await call(executeAct,{stateId:acted.details.capture.stateId,includeImage:false,actions:[{action:'click',x:0,y:0}]});
@@ -73,5 +73,51 @@ try{
  ack=false;await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/did not confirm/);ack=true;
  image=false;await assert.rejects(()=>call(executeObserve,{root:ref,mode:'pixels'}),/did not confirm/);image=true;
  requests=[];const restored=await call(executeObserve,{root:ref,mode:'semantic'});assert.notEqual(requests[0].includeElements,false);assert.equal(restored.details.outline.root.children.length,1);
+ // Opt-in successor keeps semantic input grounding, then drops old refs.
+ const saveRef=restored.details.outline.root.children[0].ref;
+ const priorActs=acts;
+ for(const extra of [{expect:{text:'Save'}},{outlineQuery:{text:'Save'}}]){
+  await assert.rejects(()=>call(executeAct,{stateId:restored.details.capture.stateId,observationMode:'pixels',actions:[{action:'press',ref:saveRef}],...extra}),/semantic/);
+ }
+ assert.equal(acts,priorActs,'Incompatible verification/query must reject before input');
+ currentPlatformBackend.name='linux';
+ await assert.rejects(()=>call(executeAct,{stateId:restored.details.capture.stateId,observationMode:'pixels',actions:[{action:'press',ref:saveRef}]}),/Windows or macOS/);
+ assert.equal(acts,priorActs,'Unsupported platform must reject before input');
+ currentPlatformBackend.name='windows';requests=[];
+ const pixelSuccessor=await call(executeAct,{stateId:restored.details.capture.stateId,observationMode:'pixels',includeImage:false,actions:[{action:'press',ref:saveRef}]});
+ assert.equal(acts,priorActs+1,'Semantic input is dispatched once');
+ assert.equal(requests.length,1);assert.equal(requests[0].includeElements,false);assert.equal(requests[0].includeImage,true);assert.equal(requests[0].readText,'never');
+ assert.notEqual(pixelSuccessor.details.capture.stateId,restored.details.capture.stateId);
+ assert.equal(pixelSuccessor.details.outline.root.children.length,0);
+ assert.equal(pixelSuccessor.details.uiaDiagnostics.reason,'pixel_only_observation');
+ assert.equal(pixelSuccessor.details.observation.status,'pixels_only');
+ assert(pixelSuccessor.content.some(c=>c.type==='text'&&c.text.includes('Previous semantic element refs are invalid')));
+ await assert.rejects(()=>call(executeSearchUi,{stateId:pixelSuccessor.details.capture.stateId,text:'Save'}),/no semantic elements/);
+ await assert.rejects(()=>call(executeAct,{stateId:pixelSuccessor.details.capture.stateId,actions:[{action:'press',ref:saveRef}]}));
+ assert.equal(acts,priorActs+1,'Old semantic refs cannot send input after pixel successor');
+ const next=await call(executeAct,{stateId:pixelSuccessor.details.capture.stateId,actions:[{action:'click',x:0,y:0}]});
+ assert.equal(acts,priorActs+2,'Fresh retained screenshot supports coordinates without another observe');
+ assert(next.content.some(c=>c.type==='image'));
+ // Missing helper confirmation/image after returned input produces no state,
+ // preserves terminal evidence and never retries the delivered action.
+ for(const platform of ['windows','macos']){
+  currentPlatformBackend.name=platform;
+  for(const fault of ['ack','image']){
+   const base=await call(executeObserve,{root:ref,mode:'semantic'});
+   const before=acts;
+   if(fault==='ack')ack=false;else image=false;
+   const terminal=await call(executeAct,{stateId:base.details.capture.stateId,observationMode:'pixels',actions:[{action:'press',ref:base.details.outline.root.children[0].ref}]});
+   ack=true;image=true;
+   assert.equal(acts,before+1,'Returned input must never be replayed after capture failure');
+   assert.equal(terminal.details.status,'post_action_observation_failed');
+   assert.equal(terminal.details.capture,undefined,'Unconfirmed successor cannot become actionable');
+   await assert.rejects(()=>call(executeAct,{stateId:base.details.capture.stateId,actions:[{action:'press',ref:base.details.outline.root.children[0].ref}]}));
+   assert.equal(acts,before+1,'Failed successor must invalidate the old state');
+  }
+  const base=await call(executeObserve,{root:ref,mode:'semantic'});
+  const result=await call(executeAct,{stateId:base.details.capture.stateId,observationMode:'pixels',actions:[{action:'press',ref:base.details.outline.root.children[0].ref}]});
+  assert.equal(result.details.outline.root.children.length,0);
+  assert(result.content.some(c=>c.type==='image'));
+ }
  console.log('Windows and macOS pixel-only contract checks passed (controlled backend; no native performance claim)');
 }finally{await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);}

@@ -2437,6 +2437,9 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const pixelOnly = isPixelOnlyLook(look);
+	const pixelSuccessor = pixelOnly || params.observationMode === "pixels";
+	if (params.observationMode === "pixels" && params.expect) throw new Error("Pixel-only successor cannot verify semantic postconditions; use semantic or fused.");
+	if (params.observationMode === "pixels" && params.outlineQuery) throw new Error("outlineQuery requires a semantic successor.");
 	if (pixelOnly && semanticSuccessor) throw new Error("Pixel-only state cannot return a semantic successor; observe semantic or fused first.");
 	if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
@@ -2504,12 +2507,17 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			} else {
 				await sleep(settleMsForExecution(execution), signal);
 			}
-			const capture = await captureCurrentTarget(signal, pixelOnly || semanticSuccessor ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, !semanticSuccessor, false, pixelOnly ? false : undefined);
+			const capture = await captureCurrentTarget(signal, pixelSuccessor || semanticSuccessor ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, !semanticSuccessor, false, pixelSuccessor ? false : undefined);
 			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}
-			return await buildToolResult("act_ui", `${describeActionExecution(executedActions.length, actions.length, execution.outcome ?? "unknown")} Target: ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			const result = await buildToolResult("act_ui", `${describeActionExecution(executedActions.length, actions.length, execution.outcome ?? "unknown")} Target: ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			if (pixelSuccessor) {
+				result.details.observation = { status: "pixels_only", readOnly: true };
+				result.content.unshift({ type: "text", text: "Pixel-only successor: fresh screenshot captured without accessibility tree or OCR. Previous semantic element refs are invalid; observe semantic or fused before querying controls." });
+			}
+			return result;
 		} catch (error) {
 			if (signal?.aborted) {
 				clearDesktopOperationState(state);
@@ -2634,8 +2642,8 @@ function validateActionTarget(action: UiAction): void {
 async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
 	if (params.includeImage !== undefined && typeof params.includeImage !== "boolean") throw new Error("act_ui.includeImage must be boolean.");
 	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
-	if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused") {
-		throw new Error("act_ui.observationMode must be semantic or fused.");
+	if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused" && params.observationMode !== "pixels") {
+		throw new Error("act_ui.observationMode must be semantic, fused or pixels.");
 	}
 	const actions = Array.isArray(params.actions) ? params.actions : [];
 	if (actions.length === 0) throw new Error("act_ui.actions must contain at least one action.");
@@ -2646,6 +2654,7 @@ async function performAct(params: ActParams, signal?: AbortSignal): Promise<Agen
 		if (actions.some(action => action.action === "selectText")) throw new Error("selectText is only available for macOS native editors.");
 		return await performBrowserTransaction(params, actions, signal);
 	}
+	if (params.observationMode === "pixels" && currentPlatformBackend.name !== "windows" && currentPlatformBackend.name !== "macos") throw new Error("Pixel-only successor requires Windows or macOS native capture; no input was sent.");
 	return await performDesktopTransaction(params, actions, signal);
 }
 

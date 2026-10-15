@@ -242,7 +242,9 @@ try {
   present=true;badImage=false;axNodes=[{nodeId:'ready',role:{value:'StaticText'},name:{value:'Ready after action'}}];
   const actionBase=await tool(executeObserve,{root,mode:'semantic'});
   const beforeDesktopOption=calls.length;
-  await assert.rejects(()=>tool(executeAct,{stateId:actionBase.details.stateId,observationMode:'semantic',actions:[{action:'click',x:1,y:1}]}),/desktop-only/);
+  for (const observationMode of ['semantic','pixels']) {
+    await assert.rejects(()=>tool(executeAct,{stateId:actionBase.details.stateId,observationMode,actions:[{action:'click',x:1,y:1}]}),/desktop-only/);
+  }
   assert.equal(calls.length,beforeDesktopOption,'unsupported desktop observation mode must reject before any CDP dispatch');
   const beforeAction=calls.length;
   const satisfied=await tool(executeAct,{stateId:actionBase.details.stateId,actions:[{action:'click',x:1,y:1}],expect:{text:'Ready after action',timeoutMs:1000}});

@@ -314,6 +314,8 @@ try {
   const navRef=localSearch.details.matches[0].ref;
   const cachedStart=calls.length;
   await assert.rejects(()=>tool(executeExpandUi,{stateId:localBase.details.stateId,ref:navRef,includeSubtree:'yes'}),/must be boolean/);
+  await assert.rejects(()=>tool(executeExpandUi,{stateId:localBase.details.stateId,ref:navRef,refresh:true,includeSubtree:true}),/Windows or macOS native/);
+  assert.equal(calls.length,cachedStart,'Native refresh must reject browser roots before any CDP call');
   const structured=await tool(executeExpandUi,{stateId:localBase.details.stateId,ref:navRef,depth:8,includeSubtree:true});
   assert.equal(structured.details.subtree.root.ref,navRef);
   assert.equal(structured.details.subtree.root.children[0].title,'Toggle Features subsection');

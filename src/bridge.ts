@@ -322,6 +322,7 @@ interface OutlineToolDetails {
 	matches?: SerializedOutlineSearchMatch[];
 	target?: SerializedOutlineNode;
 	subtree?: SerializedOutlineSubtree;
+	scopeRefresh?: { requested: true; performed: true; scopeRef: string; baseLookId: string; lookId: string };
 	ancestors?: SerializedOutlineAncestors;
 	note?: WindowNote;
 }
@@ -2156,42 +2157,47 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 
 /** Reads cached outline; truncated refs trigger a scoped look. */
 async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
+	if (params.refresh !== undefined && typeof params.refresh !== "boolean") throw new Error("expand_ui.refresh must be boolean.");
 	if (params.includeSubtree !== undefined && typeof params.includeSubtree !== "boolean") throw new Error("expand_ui.includeSubtree must be boolean.");
 	const state = operationState();
 	let outline = currentOutlineOrThrow(params.stateId);
 	const ref = trimOrUndefined(params.ref);
 	if (!ref) throw new Error("expand_ui.ref is required.");
+	if (params.refresh === true && (isBrowserContextId(state.contextId) || !["windows", "macos"].includes(currentPlatformBackend.name))) throw new Error("expand_ui.refresh requires a Windows or macOS native root; no native scope read was submitted.");
 	const initialTarget = nodeByRef(outline, ref);
 	if (!initialTarget) throw new Error(`Outline ref '${ref}' is not available in the current outline.`);
 	let target: OutlineNode = initialTarget;
 	const depth = Math.max(1, Math.min(8, Math.trunc(toFiniteNumber(params.depth, 3))));
 	const regionKey = noteRegionKeyForRef(outline, ref);
 	const regionChanged = Boolean(regionKey && state.currentNote?.regions.some((region) => region.key === regionKey && region.status === "changed"));
-	if (target.truncated || regionChanged) {
+	const baseLookId = outline.lookId;
+	if (params.refresh === true || target.truncated || regionChanged) {
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		const targetWireRef = wireRefForNode(target);
 		if (!state.resourceKey || state.epoch === undefined) throw new Error("The observation has no live resource identity. Observe again.");
 		const scoped = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await performLook(currentTarget, {
-			readText: "auto",
+			readText: params.refresh === true ? "never" : "auto",
 			baseLookId: outline.lookId,
 			scopeRef: targetWireRef,
 			maxDimension: 1,
 			includeImage: false,
 		}, signal))).value;
+		if (params.refresh === true && (!scoped.parsedOutline || scoped.window.windowId !== currentTarget.windowId || scoped.parsedOutline.root.wireRef !== targetWireRef)) throw new Error("Native scope refresh identity mismatch; cached outline was not replaced.");
 		target = graftScopedOutline(outline, target.ref, scoped.parsedOutline!);
 		outline.lookId = scoped.lookId;
 		state.currentOutline = outline;
 		state.currentLook = { ...scoped, image: state.currentLook?.image, outline: outline.root, parsedOutline: outline };
 		persistOperation(state);
 	}
+	const refreshDetails = params.refresh === true ? { scopeRefresh: { requested: true as const, performed: true as const, scopeRef: target.ref, baseLookId, lookId: outline.lookId } } : {};
 	if (params.includeSubtree === true) {
 		const subtree = serializeOutlineSubtree(target, depth);
 		const details: OutlineToolDetails = { tool: "expand_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId,
-			target: serializeOutlineNodeShallow(target), subtree, note: state.currentNote };
+			target: serializeOutlineNodeShallow(target), subtree, ...refreshDetails, note: state.currentNote };
 		return { content: [{ type: "text", text: `${formatOutlineNodeLabel(target)}\nStructured subtree: ${subtree.nodeCount} nodes${subtree.truncated ? " (truncated; inspect omitted regions before grounding)" : ""}. State ${outline.lookId}.` }], details };
 	}
 	const folded = foldToBudget(outline, { maxDepth: depth, maxNodes: 150 }, [target.ref]);
-	const details: OutlineToolDetails = { tool: "expand_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, target: serializeOutlineNodeShallow(target), renderedOutline: folded.text, note: state.currentNote };
+	const details: OutlineToolDetails = { tool: "expand_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, target: serializeOutlineNodeShallow(target), renderedOutline: folded.text, ...refreshDetails, note: state.currentNote };
 	return { content: [{ type: "text", text: `${formatOutlineNodeLabel(target)}\npath: ${outlineNodePath(target)}\n\n${folded.text}` }], details };
 }
 

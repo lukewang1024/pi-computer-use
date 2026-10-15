@@ -31,7 +31,16 @@ assert.equal(host.styles['pointer-events'],'none');
 assert.equal(host.attributes['aria-hidden'],'true');
 assert.equal(host.shadowOptions.mode,'closed');
 const sharedStyle=JSON.parse(fs.readFileSync(new URL('../src/agent-cursor-style.json',import.meta.url),'utf8'));
-const polygons=host.shadow.children[0].children;
+assert.equal(host.styles.width, (sharedStyle.width+2*sharedStyle.glow.padding)+'px');
+assert.equal(host.styles.height, (sharedStyle.height+2*sharedStyle.glow.padding)+'px');
+assert.equal(host.shadow.children[0].attributes.viewBox, '-33 -33 85 86');
+const svgChildren=host.shadow.children[0].children;
+const gradientStops=svgChildren[0].children[0].children;
+assert.deepEqual(gradientStops.map(s=>({offset:Number(s.attributes.offset),color:s.attributes['stop-color'],opacity:Number(s.attributes['stop-opacity'])})), sharedStyle.glow.stops);
+assert.equal(Number(svgChildren[1].attributes.r),sharedStyle.glow.radius);
+assert.equal(Number(svgChildren[1].attributes.cx),sharedStyle.glow.center[0]);
+assert.equal(Number(svgChildren[1].attributes.cy),sharedStyle.glow.center[1]);
+const polygons=svgChildren.slice(2);
 assert.equal(polygons.length,sharedStyle.layers.length);
 for(let i=0;i<polygons.length;i++) {
  assert.equal(polygons[i].attributes.fill,sharedStyle.layers[i].color);
@@ -39,8 +48,6 @@ for(let i=0;i<polygons.length;i++) {
 }
 for(const [file,pattern] of [
  ['../native/macos/agent_cursor.swift',/CGPoint\(x:\s*(-?\d+), y:\s*(-?\d+)\)/g],
- ['../native/windows/bridge-rs/src/agent_cursor.rs',/POINT \{ x:\s*(-?\d+), y:\s*(-?\d+) \}/g],
- ['../native/linux/bridge-rs/src/agent_cursor.rs',/\((-?\d+),\s*(-?\d+)\)/g],
 ]) {
  const source=fs.readFileSync(new URL(file,import.meta.url),'utf8');
  const geometry=source.slice(source.indexOf('// Shared geometry'));
@@ -48,19 +55,30 @@ for(const [file,pattern] of [
  const expected=sharedStyle.layers.flatMap(layer=>layer.points);
  assert.equal(JSON.stringify(actual),JSON.stringify(expected),file+' geometry differs from the shared cursor design');
 }
+const palettePatterns = [
+ ['../native/macos/agent_cursor.swift', /Color\(red: (\d+)\/255, green: (\d+)\/255, blue: (\d+)\/255\)/g,
+  m=>[Number(m[1]),Number(m[2]),Number(m[3])]],
+
+];
+for (const [file,pattern,rgb] of palettePatterns) {
+ const source=fs.readFileSync(new URL(file,import.meta.url),'utf8');
+ const actual=[...source.slice(source.indexOf('// Shared geometry')).matchAll(pattern)].map(rgb).slice(-sharedStyle.layers.length);
+ const expected=sharedStyle.layers.map(layer=>layer.color.slice(1).match(/../g).map(v=>parseInt(v,16)));
+ assert.deepEqual(actual,expected,file+' palette differs from the shared cursor design');
+}
 const macStyle=fs.readFileSync(new URL('../native/macos/agent_cursor.swift',import.meta.url),'utf8');
 assert(!macStyle.includes('renderer.heading')&&!macStyle.includes('.rotated('),'Mac cursor orientation must remain fixed');
 
-advance(250);assert.equal(host.styles.transform,'translate(117px,28px)');
-advance(500);assert.equal(host.styles.transform,'translate(217px,28px)');
-advance(1000);assert.equal(host.styles.transform,'translate(217px,128px)');
+advance(250);assert.equal(host.styles.transform,'translate(85px,-4px)');
+advance(500);assert.equal(host.styles.transform,'translate(185px,-4px)');
+advance(1000);assert.equal(host.styles.transform,'translate(185px,96px)');
 assert.equal(frames.size,0,'finished trajectory must stop scheduling frames');
 assert.equal(focusCalls,0);assert.equal(inputCalls,0,'virtual cursor must never dispatch page input');
 vm.runInContext(browserCursorExpression([{x:420,y:130}],500),context);
-advance(1250);assert.equal(host.styles.transform,'translate(317px,128px)','next movement starts at the virtual position');
+advance(1250);assert.equal(host.styles.transform,'translate(285px,96px)','next movement starts at the virtual position');
 vm.runInContext(browserCursorExpression([{x:10,y:10}],0,true),context);
 assert.equal(root.children.length,1,'new actions reuse the task-owned overlay');
-assert.equal(host.styles.transform,'translate(7px,8px)');
+assert.equal(host.styles.transform,'translate(-25px,-24px)');
 assert.equal(frames.size,0,'superseded animation must be cancelled');
 assert.equal(timers.size,1,'superseded idle timer must be cancelled');
 vm.runInContext(clearBrowserCursorExpression(),context);

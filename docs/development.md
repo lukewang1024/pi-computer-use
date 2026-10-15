@@ -166,6 +166,24 @@ The harness creates its own D-Bus and Xvfb session. It fails rather than
 silently passing when the live flag, helper, accessibility bridge, or required
 X11 applications are unavailable.
 
+### Virtual pointer appearance
+
+`src/agent-cursor-style.json` records the compact 19 × 20 cursor canvas, (2, 1)
+hotspot, fixed northwest geometry, and neutral gray/light-outline palette. Native
+macOS, Windows and Linux renderers and the browser SVG keep the same artwork.
+Update their surface bounds and hotspot subtraction together when changing size;
+never scale the action coordinates or trajectories. `test:agent-cursor` checks
+cross-platform geometry and browser canvas dimensions as well as delivery behavior.
+The shared specification also records the neutral radial halo. Its 33-unit radius
+extends beyond the arrow canvas; padding keeps it unclipped without moving the
+hotspot. Windows and X11 consume the JSON directly through `native/cursor_raster.rs`,
+which supersamples the artwork into premultiplied ARGB. Windows uploads it once
+with `UpdateLayeredWindow` and `AC_SRC_ALPHA`. X11 selects an alpha-capable Render
+visual when the screen has a compositor; without one it uses a shaped arrow.
+Both paths retain input transparency. The halo is static and adds no animation
+work while idle. Run the Rust `agent_cursor::artwork` unit tests for alpha and
+hotspot checks; live X11 acceptance should cover sessions with and without a compositor.
+
 ### Virtual pointer verification
 
 Run `npm run test:agent-cursor` for animation, replacement, cleanup, no-input

@@ -4,7 +4,9 @@ use crate::pointer_motion::PointerMotion;
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
-use x11rb::protocol::{shape, xproto::*};
+use x11rb::protocol::{render, shape, xproto::*};
+#[path = "../../../cursor_raster.rs"]
+mod artwork;
 use x11rb::wrapper::ConnectionExt as _;
 
 #[derive(Clone, Default)]
@@ -51,9 +53,9 @@ pub fn animate(points: Vec<(i32, i32)>, duration_ms: u64) -> Result<(), String> 
             .spawn(move || {
                 let result = setup();
                 match result {
-                    Ok((conn, window)) => {
+                    Ok((conn, window, hotspot)) => {
                         let _ = ready_tx.send(Ok(()));
-                        run(conn, window, rx);
+                        run(conn, window, hotspot, rx);
                     }
                     Err(error) => {
                         let _ = ready_tx.send(Err(error));
@@ -75,7 +77,7 @@ pub fn animate(points: Vec<(i32, i32)>, duration_ms: u64) -> Result<(), String> 
     Ok(())
 }
 
-fn setup() -> Result<(x11rb::rust_connection::RustConnection, Window), String> {
+fn setup() -> Result<(x11rb::rust_connection::RustConnection, Window, [i32; 2]), String> {
     let (conn, screen_index) = x11rb::connect(None).map_err(|e| e.to_string())?;
     let shape_version = shape::query_version(&conn)
         .map_err(|e| e.to_string())?
@@ -87,177 +89,157 @@ fn setup() -> Result<(x11rb::rust_connection::RustConnection, Window), String> {
         return Err("X Shape 1.1 is required for an input-transparent cursor".into());
     }
     let screen = &conn.setup().roots[screen_index];
+    let selection = conn
+        .intern_atom(false, format!("_NET_WM_CM_S{screen_index}").as_bytes())
+        .map_err(|e| e.to_string())?
+        .reply()
+        .map_err(|e| e.to_string())?
+        .atom;
+    let composited = conn
+        .get_selection_owner(selection)
+        .map_err(|e| e.to_string())?
+        .reply()
+        .map_err(|e| e.to_string())?
+        .owner
+        != x11rb::NONE;
+    let formats = if composited {
+        render::query_pict_formats(&conn)
+            .ok()
+            .and_then(|c| c.reply().ok())
+    } else {
+        None
+    };
+    let argb_visual = formats.as_ref().and_then(|formats| {
+        let ids: Vec<_> = formats
+            .formats
+            .iter()
+            .filter(|f| {
+                f.depth == 32
+                    && f.type_ == render::PictType::DIRECT
+                    && f.direct.alpha_mask == 255
+                    && f.direct.alpha_shift == 24
+                    && f.direct.red_mask == 255
+                    && f.direct.red_shift == 16
+                    && f.direct.green_mask == 255
+                    && f.direct.green_shift == 8
+                    && f.direct.blue_mask == 255
+                    && f.direct.blue_shift == 0
+            })
+            .map(|f| f.id)
+            .collect();
+        formats
+            .screens
+            .get(screen_index)?
+            .depths
+            .iter()
+            .flat_map(|d| &d.visuals)
+            .find(|v| ids.contains(&v.format))
+            .map(|v| v.visual)
+    });
+    let glow = argb_visual.is_some();
+    let raster = artwork::render(glow);
+    let hotspot = raster.hotspot;
+    let visual_id = argb_visual.unwrap_or(screen.root_visual);
+    let depth = if glow { 32 } else { screen.root_depth };
+    let visual = screen
+        .allowed_depths
+        .iter()
+        .flat_map(|d| &d.visuals)
+        .find(|v| v.visual_id == visual_id)
+        .ok_or("cursor visual unavailable")?;
     let window = conn.generate_id().map_err(|e| e.to_string())?;
     let pixels = conn.generate_id().map_err(|e| e.to_string())?;
-    let mask = conn.generate_id().map_err(|e| e.to_string())?;
-    let color_gc = conn.generate_id().map_err(|e| e.to_string())?;
-    let mask_gc = conn.generate_id().map_err(|e| e.to_string())?;
-    conn.create_pixmap(screen.root_depth, pixels, screen.root, 34, 36)
+    let gc = conn.generate_id().map_err(|e| e.to_string())?;
+    let colormap = conn.generate_id().map_err(|e| e.to_string())?;
+    conn.create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual_id)
         .map_err(|e| e.to_string())?
         .check()
         .map_err(|e| e.to_string())?;
-    conn.create_pixmap(1, mask, screen.root, 34, 36)
+    conn.create_pixmap(depth, pixels, screen.root, raster.width, raster.height)
         .map_err(|e| e.to_string())?
         .check()
         .map_err(|e| e.to_string())?;
-    conn.create_gc(
-        color_gc,
+    conn.create_gc(gc, pixels, &CreateGCAux::new())
+        .map_err(|e| e.to_string())?
+        .check()
+        .map_err(|e| e.to_string())?;
+    let format = conn
+        .setup()
+        .pixmap_formats
+        .iter()
+        .find(|f| f.depth == depth)
+        .ok_or("cursor pixmap format unavailable")?;
+    let bytes_per_pixel = usize::from(format.bits_per_pixel) / 8;
+    if ![2, 3, 4].contains(&bytes_per_pixel) {
+        return Err("unsupported cursor pixel format".into());
+    }
+    let stride = (usize::from(raster.width) * usize::from(format.bits_per_pixel))
+        .div_ceil(usize::from(format.scanline_pad))
+        * usize::from(format.scanline_pad)
+        / 8;
+    let mut data = vec![0; stride * usize::from(raster.height)];
+    let channel = |value: u32, mask: u32| -> u32 {
+        if mask == 0 {
+            return 0;
+        }
+        let shift = mask.trailing_zeros();
+        ((value * (mask >> shift) + 127) / 255) << shift
+    };
+    let unpremultiply =
+        |value: u32, alpha: u32| (value * 255).checked_div(alpha).unwrap_or(0).min(255);
+    for (i, &pixel) in raster.pixels.iter().enumerate() {
+        let pixel = if glow {
+            pixel
+        } else {
+            channel(
+                unpremultiply((pixel >> 16) & 255, pixel >> 24),
+                visual.red_mask,
+            ) | channel(
+                unpremultiply((pixel >> 8) & 255, pixel >> 24),
+                visual.green_mask,
+            ) | channel(unpremultiply(pixel & 255, pixel >> 24), visual.blue_mask)
+        };
+        let offset = (i / usize::from(raster.width)) * stride
+            + (i % usize::from(raster.width)) * bytes_per_pixel;
+        if conn.setup().image_byte_order == ImageOrder::LSB_FIRST {
+            data[offset..offset + bytes_per_pixel]
+                .copy_from_slice(&pixel.to_le_bytes()[..bytes_per_pixel]);
+        } else {
+            data[offset..offset + bytes_per_pixel]
+                .copy_from_slice(&pixel.to_be_bytes()[4 - bytes_per_pixel..]);
+        }
+    }
+    conn.put_image(
+        ImageFormat::Z_PIXMAP,
         pixels,
-        &CreateGCAux::new().foreground(screen.white_pixel),
+        gc,
+        raster.width,
+        raster.height,
+        0,
+        0,
+        0,
+        depth,
+        &data,
     )
     .map_err(|e| e.to_string())?
     .check()
     .map_err(|e| e.to_string())?;
-    conn.create_gc(mask_gc, mask, &CreateGCAux::new().foreground(0))
-        .map_err(|e| e.to_string())?
-        .check()
-        .map_err(|e| e.to_string())?;
-    let full = [Rectangle {
-        x: 0,
-        y: 0,
-        width: 34,
-        height: 36,
-    }];
-    conn.poly_fill_rectangle(pixels, color_gc, &full)
-        .map_err(|e| e.to_string())?
-        .check()
-        .map_err(|e| e.to_string())?;
-    conn.poly_fill_rectangle(mask, mask_gc, &full)
-        .map_err(|e| e.to_string())?
-        .check()
-        .map_err(|e| e.to_string())?;
-    // Shared geometry and palette: src/agent-cursor-style.json.
-    {
-        let color = conn
-            .alloc_color(screen.default_colormap, 19532, 7453, 38293)
-            .map_err(|e| e.to_string())?
-            .reply()
-            .map_err(|e| e.to_string())?
-            .pixel;
-        let points = [
-            (3, 0),
-            (2, 0),
-            (1, 0),
-            (1, 1),
-            (1, 2),
-            (10, 32),
-            (10, 33),
-            (10, 34),
-            (11, 34),
-            (17, 20),
-            (18, 20),
-            (18, 19),
-            (19, 18),
-            (30, 11),
-            (31, 11),
-            (30, 10),
-            (29, 10),
-        ]
-        .map(|(x, y)| Point { x, y });
-        conn.change_gc(color_gc, &ChangeGCAux::new().foreground(color))
-            .map_err(|e| e.to_string())?;
-        conn.fill_poly(
-            pixels,
-            color_gc,
-            PolyShape::COMPLEX,
-            CoordMode::ORIGIN,
-            &points,
-        )
-        .map_err(|e| e.to_string())?;
-        conn.change_gc(mask_gc, &ChangeGCAux::new().foreground(1))
-            .map_err(|e| e.to_string())?;
-        conn.fill_poly(
-            mask,
-            mask_gc,
-            PolyShape::COMPLEX,
-            CoordMode::ORIGIN,
-            &points,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    {
-        let color = conn
-            .alloc_color(screen.default_colormap, 65535, 65535, 65535)
-            .map_err(|e| e.to_string())?
-            .reply()
-            .map_err(|e| e.to_string())?
-            .pixel;
-        let points = [
-            (4, 1),
-            (3, 1),
-            (2, 1),
-            (2, 2),
-            (2, 3),
-            (10, 31),
-            (10, 32),
-            (11, 32),
-            (17, 20),
-            (17, 19),
-            (18, 18),
-            (19, 18),
-            (29, 11),
-            (29, 10),
-            (28, 10),
-            (27, 10),
-        ]
-        .map(|(x, y)| Point { x, y });
-        conn.change_gc(color_gc, &ChangeGCAux::new().foreground(color))
-            .map_err(|e| e.to_string())?;
-        conn.fill_poly(
-            pixels,
-            color_gc,
-            PolyShape::COMPLEX,
-            CoordMode::ORIGIN,
-            &points,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    {
-        let color = conn
-            .alloc_color(screen.default_colormap, 35723, 23644, 63222)
-            .map_err(|e| e.to_string())?
-            .reply()
-            .map_err(|e| e.to_string())?
-            .pixel;
-        let points = [
-            (6, 4),
-            (5, 4),
-            (4, 4),
-            (5, 5),
-            (10, 26),
-            (11, 27),
-            (16, 18),
-            (16, 17),
-            (17, 17),
-            (24, 11),
-            (23, 10),
-        ]
-        .map(|(x, y)| Point { x, y });
-        conn.change_gc(color_gc, &ChangeGCAux::new().foreground(color))
-            .map_err(|e| e.to_string())?;
-        conn.fill_poly(
-            pixels,
-            color_gc,
-            PolyShape::COMPLEX,
-            CoordMode::ORIGIN,
-            &points,
-        )
-        .map_err(|e| e.to_string())?;
-    }
     conn.create_window(
-        x11rb::COPY_DEPTH_FROM_PARENT,
+        depth,
         window,
         screen.root,
         0,
         0,
-        34,
-        36,
+        raster.width,
+        raster.height,
         0,
         WindowClass::INPUT_OUTPUT,
-        x11rb::COPY_FROM_PARENT,
+        visual_id,
         &CreateWindowAux::new()
             .override_redirect(1)
-            .background_pixmap(pixels),
+            .background_pixmap(pixels)
+            .border_pixel(0)
+            .colormap(colormap),
     )
     .map_err(|e| e.to_string())?
     .check()
@@ -272,19 +254,35 @@ fn setup() -> Result<(x11rb::rust_connection::RustConnection, Window), String> {
     .map_err(|e| e.to_string())?
     .check()
     .map_err(|e| e.to_string())?;
-    // Visual mask and input shape are separate: the arrow is visible but never receives input.
-    shape::mask(
-        &conn,
-        shape::SO::SET,
-        shape::SK::BOUNDING,
-        window,
-        0,
-        0,
-        mask,
-    )
-    .map_err(|e| e.to_string())?
-    .check()
-    .map_err(|e| e.to_string())?;
+    // Without a compositor, keep a shaped arrow instead of an opaque halo rectangle.
+    if !glow {
+        let rectangles: Vec<_> = raster
+            .pixels
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| (**pixel >> 24) >= 128)
+            .map(|(i, _)| Rectangle {
+                x: (i % usize::from(raster.width)) as i16,
+                y: (i / usize::from(raster.width)) as i16,
+                width: 1,
+                height: 1,
+            })
+            .collect();
+        shape::rectangles(
+            &conn,
+            shape::SO::SET,
+            shape::SK::BOUNDING,
+            ClipOrdering::UNSORTED,
+            window,
+            0,
+            0,
+            &rectangles,
+        )
+        .map_err(|e| e.to_string())?
+        .check()
+        .map_err(|e| e.to_string())?;
+    }
+    // Empty input shape applies to both the arrow and its full halo surface.
     shape::rectangles(
         &conn,
         shape::SO::SET,
@@ -298,18 +296,17 @@ fn setup() -> Result<(x11rb::rust_connection::RustConnection, Window), String> {
     .map_err(|e| e.to_string())?
     .check()
     .map_err(|e| e.to_string())?;
-    conn.free_gc(color_gc).map_err(|e| e.to_string())?;
-    conn.free_gc(mask_gc).map_err(|e| e.to_string())?;
-    conn.free_pixmap(mask).map_err(|e| e.to_string())?;
-    // The window retains its background pixmap until the window is destroyed.
+    conn.free_gc(gc).map_err(|e| e.to_string())?;
     conn.free_pixmap(pixels).map_err(|e| e.to_string())?;
+    // Keep the colormap alive with the window; closing this dedicated connection frees it.
     conn.flush().map_err(|e| e.to_string())?;
-    Ok((conn, window))
+    Ok((conn, window, hotspot))
 }
 
 fn run(
     conn: x11rb::rust_connection::RustConnection,
     window: Window,
+    hotspot: [i32; 2],
     rx: mpsc::Receiver<Animation>,
 ) {
     let mut animation: Option<Animation> = None;
@@ -358,8 +355,8 @@ fn run(
                     .configure_window(
                         window,
                         &ConfigureWindowAux::new()
-                            .x(x - 3)
-                            .y(y - 2)
+                            .x(x - hotspot[0])
+                            .y(y - hotspot[1])
                             .stack_mode(StackMode::ABOVE),
                     )
                     .is_err()

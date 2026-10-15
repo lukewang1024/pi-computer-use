@@ -2,12 +2,18 @@
 #[cfg(windows)]
 mod desktop {
     use crate::pointer_motion::PointerMotion;
+    mod artwork {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../cursor_raster.rs"
+        ));
+    }
     use std::sync::{mpsc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
     use windows::core::w;
     use windows::Win32::Foundation::{
         GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT,
-        POINT, WPARAM,
+        POINT, SIZE, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -56,9 +62,9 @@ mod desktop {
                 .name("agent-cursor".into())
                 .spawn(move || unsafe {
                     match setup() {
-                        Ok(window) => {
+                        Ok((window, hotspot)) => {
                             let _ = ready_tx.send(Ok(()));
-                            run(window, rx);
+                            run(window, hotspot, rx);
                         }
                         Err(error) => {
                             let _ = ready_tx.send(Err(error));
@@ -84,7 +90,8 @@ mod desktop {
         Ok(())
     }
 
-    unsafe fn setup() -> Result<HWND, String> {
+    unsafe fn setup() -> Result<(HWND, [i32; 2]), String> {
+        let raster = artwork::render(true);
         let name = w!("PiComputerUseAgentCursor");
         let module = HINSTANCE(GetModuleHandleW(None).map_err(|e| e.to_string())?.0);
         let class = WNDCLASSW {
@@ -104,19 +111,19 @@ mod desktop {
             WS_POPUP,
             0,
             0,
-            34,
-            36,
+            raster.width as i32,
+            raster.height as i32,
             None,
             None,
             module,
             None,
         )
         .map_err(|e| e.to_string())?;
-        if let Err(error) = SetLayeredWindowAttributes(window, COLORREF(0), 255, LWA_COLORKEY) {
+        if let Err(error) = paint_alpha(window, &raster) {
             let _ = DestroyWindow(window);
-            return Err(error.to_string());
+            return Err(error);
         }
-        Ok(window)
+        Ok((window, raster.hotspot))
     }
 
     unsafe extern "system" fn window_proc(
@@ -128,101 +135,71 @@ mod desktop {
         match message {
             WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-            WM_PAINT => {
-                let mut paint = PAINTSTRUCT::default();
-                let dc = BeginPaint(window, &mut paint);
-                let rect = windows::Win32::Foundation::RECT {
-                    left: 0,
-                    top: 0,
-                    right: 34,
-                    bottom: 36,
-                };
-                let black = CreateSolidBrush(COLORREF(0));
-                let _ = FillRect(dc, &rect, black);
-                // Shared geometry and palette: src/agent-cursor-style.json.
-                let no_pen = GetStockObject(NULL_PEN);
-                let old_pen = SelectObject(dc, no_pen);
-                {
-                    let brush = CreateSolidBrush(COLORREF(0x00951d4c));
-                    let old_brush = SelectObject(dc, brush);
-                    let points = [
-                        POINT { x: 3, y: 0 },
-                        POINT { x: 2, y: 0 },
-                        POINT { x: 1, y: 0 },
-                        POINT { x: 1, y: 1 },
-                        POINT { x: 1, y: 2 },
-                        POINT { x: 10, y: 32 },
-                        POINT { x: 10, y: 33 },
-                        POINT { x: 10, y: 34 },
-                        POINT { x: 11, y: 34 },
-                        POINT { x: 17, y: 20 },
-                        POINT { x: 18, y: 20 },
-                        POINT { x: 18, y: 19 },
-                        POINT { x: 19, y: 18 },
-                        POINT { x: 30, y: 11 },
-                        POINT { x: 31, y: 11 },
-                        POINT { x: 30, y: 10 },
-                        POINT { x: 29, y: 10 },
-                    ];
-                    let _ = Polygon(dc, &points);
-                    let _ = SelectObject(dc, old_brush);
-                    let _ = DeleteObject(brush);
-                }
-                {
-                    let brush = CreateSolidBrush(COLORREF(0x00ffffff));
-                    let old_brush = SelectObject(dc, brush);
-                    let points = [
-                        POINT { x: 4, y: 1 },
-                        POINT { x: 3, y: 1 },
-                        POINT { x: 2, y: 1 },
-                        POINT { x: 2, y: 2 },
-                        POINT { x: 2, y: 3 },
-                        POINT { x: 10, y: 31 },
-                        POINT { x: 10, y: 32 },
-                        POINT { x: 11, y: 32 },
-                        POINT { x: 17, y: 20 },
-                        POINT { x: 17, y: 19 },
-                        POINT { x: 18, y: 18 },
-                        POINT { x: 19, y: 18 },
-                        POINT { x: 29, y: 11 },
-                        POINT { x: 29, y: 10 },
-                        POINT { x: 28, y: 10 },
-                        POINT { x: 27, y: 10 },
-                    ];
-                    let _ = Polygon(dc, &points);
-                    let _ = SelectObject(dc, old_brush);
-                    let _ = DeleteObject(brush);
-                }
-                {
-                    let brush = CreateSolidBrush(COLORREF(0x00f65c8b));
-                    let old_brush = SelectObject(dc, brush);
-                    let points = [
-                        POINT { x: 6, y: 4 },
-                        POINT { x: 5, y: 4 },
-                        POINT { x: 4, y: 4 },
-                        POINT { x: 5, y: 5 },
-                        POINT { x: 10, y: 26 },
-                        POINT { x: 11, y: 27 },
-                        POINT { x: 16, y: 18 },
-                        POINT { x: 16, y: 17 },
-                        POINT { x: 17, y: 17 },
-                        POINT { x: 24, y: 11 },
-                        POINT { x: 23, y: 10 },
-                    ];
-                    let _ = Polygon(dc, &points);
-                    let _ = SelectObject(dc, old_brush);
-                    let _ = DeleteObject(brush);
-                }
-                let _ = SelectObject(dc, old_pen);
-                let _ = DeleteObject(black);
-                let _ = EndPaint(window, &paint);
-                LRESULT(0)
-            }
             _ => DefWindowProcW(window, message, wparam, lparam),
         }
     }
 
-    unsafe fn run(window: HWND, rx: mpsc::Receiver<Animation>) {
+    unsafe fn paint_alpha(window: HWND, raster: &artwork::Raster) -> Result<(), String> {
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            return Err(windows::core::Error::from_win32().to_string());
+        }
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: raster.width as i32,
+                biHeight: -(raster.height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let bitmap = match CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                let _ = DeleteDC(dc);
+                return Err(error.to_string());
+            }
+        };
+        std::ptr::copy_nonoverlapping(
+            raster.pixels.as_ptr(),
+            bits.cast::<u32>(),
+            raster.pixels.len(),
+        );
+        let previous = SelectObject(dc, bitmap);
+        let size = SIZE {
+            cx: raster.width as i32,
+            cy: raster.height as i32,
+        };
+        let origin = POINT::default();
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let result = UpdateLayeredWindow(
+            window,
+            None,
+            None,
+            Some(&size),
+            dc,
+            Some(&origin),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        )
+        .map_err(|error| error.to_string());
+        let _ = SelectObject(dc, previous);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(dc);
+        result
+    }
+
+    unsafe fn run(window: HWND, hotspot: [i32; 2], rx: mpsc::Receiver<Animation>) {
         let mut animation: Option<Animation> = None;
         let mut visible = false;
         let mut last_position = None;
@@ -280,8 +257,8 @@ mod desktop {
                     if SetWindowPos(
                         window,
                         HWND_TOPMOST,
-                        x - 3,
-                        y - 2,
+                        x - hotspot[0],
+                        y - hotspot[1],
                         0,
                         0,
                         SWP_NOACTIVATE | SWP_NOSIZE,

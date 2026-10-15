@@ -39,6 +39,8 @@
 		"native/macos/bridge.swift",
 		"native/macos/foreground_gate.swift",
 		"native/macos/text_input_source.swift",
+		"native/cursor_raster.rs",
+		"src/agent-cursor-style.json",
 		"native/windows/bridge-rs/Cargo.lock",
 		"native/windows/bridge-rs/Cargo.toml",
 		"native/windows/bridge-rs/src",

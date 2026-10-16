@@ -34,26 +34,42 @@ fn drag_trajectory(points: &[(i32, i32)]) -> Option<Vec<(i32, i32)>> {
     Some(trajectory)
 }
 
-// Validate every physical screen point before constructing a gesture, including
-// monitors left/above zero. Movement uses the same SetCursorPos path as moveMouse;
-// button transitions use SendInput without embedding another absolute movement.
+// Absolute SendInput coordinates cover the entire virtual desktop. Validate
+// every point before constructing a gesture, including monitors left/above zero.
 #[cfg(any(windows, test))]
 fn drag_events(points: &[(i32, i32)], desktop: (i32, i32, i32, i32)) -> Option<Vec<DragEvent>> {
-    fn inside(value: i32, origin: i32, span: i32) -> bool {
+    fn axis(value: i32, origin: i32, span: i32) -> Option<i32> {
         let offset = i64::from(value) - i64::from(origin);
-        span > 0 && offset >= 0 && offset < i64::from(span)
+        if span <= 0 || offset < 0 || offset >= i64::from(span) {
+            return None;
+        }
+        Some(if span == 1 {
+            0
+        } else {
+            (offset * 65_535 / i64::from(span - 1)) as i32
+        })
     }
-    if !(2..=600).contains(&points.len()) || points.iter().any(|&(x, y)| {
-        !inside(x, desktop.0, desktop.2) || !inside(y, desktop.1, desktop.3)
-    }) {
+    if points.len() < 2 || points.len() > 600 {
         return None;
     }
+    let mut moves = Vec::with_capacity(points.len());
+    for &(x, y) in points {
+        moves.push(DragEvent::Move(
+            axis(x, desktop.0, desktop.2)?,
+            axis(y, desktop.1, desktop.3)?,
+        ));
+    }
+    let &(last_x, last_y) = points.last()?;
+    let release = DragEvent::LeftUp(
+        axis(last_x, desktop.0, desktop.2)?,
+        axis(last_y, desktop.1, desktop.3)?,
+    );
     let mut events = Vec::with_capacity(points.len() + 2);
-    events.push(DragEvent::Move(points[0].0, points[0].1));
+    let mut moves = moves.into_iter();
+    events.push(moves.next()?);
     events.push(DragEvent::LeftDown);
-    events.extend(points[1..].iter().map(|&(x, y)| DragEvent::Move(x, y)));
-    let &(x, y) = points.last()?;
-    events.push(DragEvent::LeftUp(x, y));
+    events.extend(moves);
+    events.push(release);
     Some(events)
 }
 
@@ -697,13 +713,31 @@ mod native {
                     DragEvent::LeftUp(..) => *points.last().unwrap(),
                 };
                 guard_point(args, point.0, point.1)?;
-                match *event {
-                    DragEvent::Move(..) => {
-                        unsafe { SetCursorPos(point.0, point.1) }.map_err(input_failed)?;
-                    }
-                    DragEvent::LeftDown => send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?,
-                    DragEvent::LeftUp(..) => send(&[mouse(MOUSEEVENTF_LEFTUP, 0)])?,
-                }
+                let input = match *event {
+                    DragEvent::Move(x, y) | DragEvent::LeftUp(x, y) => INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: x,
+                                dy: y,
+                                dwFlags: MOUSEEVENTF_MOVE
+                                    | MOUSEEVENTF_ABSOLUTE
+                                    | MOUSEEVENTF_VIRTUALDESK
+                                    | MOUSEEVENTF_MOVE_NOCOALESCE
+                                    | if matches!(event, DragEvent::LeftUp(..)) {
+                                        MOUSEEVENTF_LEFTUP
+                                    } else {
+                                        MOUSE_EVENT_FLAGS(0)
+                                    },
+                                ..Default::default()
+                            },
+                        },
+                    },
+                    DragEvent::LeftDown => mouse(MOUSEEVENTF_LEFTDOWN, 0),
+                };
+                // A single-event SendInput is either inserted or not inserted;
+                // the interpreter therefore retains the exact sent-event count.
+                send(&[input])?;
                 emitted.set(emitted.get() + 1);
                 Ok(())
             },
@@ -733,7 +767,7 @@ mod native {
                     .is_ok()
                     .then(|| json!({"x":cursor.x,"y":cursor.y}));
                 Ok(
-                    json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","drag":{"movementApi":"SetCursorPos","buttonApi":"SendInput","requestedPoints":requested_points,"points":points.len(),"eventsDispatched":sent,"stepDwellMs":16,"releaseDwellMs":150,"postReleaseSettleMs":150,"leftDownAfter":unsafe {GetAsyncKeyState(1)} < 0,"elapsedMs":started.elapsed().as_millis(),"endpoint":points.last(),"cursorAfter":cursor_after,"settledState":drag_state(target_hwnd,started.elapsed().as_millis()),"eventTrace":trace.into_inner()}}}),
+                    json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","drag":{"requestedPoints":requested_points,"points":points.len(),"eventsDispatched":sent,"stepDwellMs":16,"releaseDwellMs":150,"postReleaseSettleMs":150,"leftDownAfter":unsafe {GetAsyncKeyState(1)} < 0,"elapsedMs":started.elapsed().as_millis(),"endpoint":points.last(),"cursorAfter":cursor_after,"settledState":drag_state(target_hwnd,started.elapsed().as_millis()),"eventTrace":trace.into_inner()}}}),
                 )
             }
             Err(failure) if failure.events_sent == 0 => Err(failure.error),
@@ -1002,23 +1036,23 @@ mod tests {
             Some(vec![
                 Move(0, 0),
                 LeftDown,
-                Move(50, 25),
-                Move(100, 50),
-                LeftUp(100, 50),
+                Move(32767, 32767),
+                Move(65535, 65535),
+                LeftUp(65535, 65535),
             ])
         );
     }
 
     #[test]
-    fn physical_drag_supports_negative_monitor_origins_and_edge_pixels() {
+    fn absolute_drag_supports_negative_monitor_origins_and_edge_pixels() {
         use DragEvent::{LeftDown, LeftUp, Move};
         assert_eq!(
             drag_events(&[(-1920, -1080), (1919, 1079)], (-1920, -1080, 3840, 2160)),
             Some(vec![
-                Move(-1920, -1080),
+                Move(0, 0),
                 LeftDown,
-                Move(1919, 1079),
-                LeftUp(1919, 1079)
+                Move(65535, 65535),
+                LeftUp(65535, 65535)
             ])
         );
         assert!(drag_events(&[(0, 0), (1, 1)], (0, 0, 2, 2)).is_some());

@@ -4,6 +4,48 @@ use crate::error::{ErrorCode, ProtocolError};
 
 #[cfg(any(windows, test))]
 #[derive(Debug, PartialEq)]
+enum DragEvent {
+    Move(i32, i32),
+    LeftDown,
+    LeftUp,
+}
+
+// Absolute SendInput coordinates cover the entire virtual desktop. Validate
+// every point before constructing a gesture, including monitors left/above zero.
+#[cfg(any(windows, test))]
+fn drag_events(points: &[(i32, i32)], desktop: (i32, i32, i32, i32)) -> Option<Vec<DragEvent>> {
+    fn axis(value: i32, origin: i32, span: i32) -> Option<i32> {
+        let offset = i64::from(value) - i64::from(origin);
+        if span <= 0 || offset < 0 || offset >= i64::from(span) {
+            return None;
+        }
+        Some(if span == 1 {
+            0
+        } else {
+            (offset * 65_535 / i64::from(span - 1)) as i32
+        })
+    }
+    if points.len() < 2 {
+        return None;
+    }
+    let mut moves = Vec::with_capacity(points.len());
+    for &(x, y) in points {
+        moves.push(DragEvent::Move(
+            axis(x, desktop.0, desktop.2)?,
+            axis(y, desktop.1, desktop.3)?,
+        ));
+    }
+    let mut events = Vec::with_capacity(points.len() + 2);
+    let mut moves = moves.into_iter();
+    events.push(moves.next()?);
+    events.push(DragEvent::LeftDown);
+    events.extend(moves);
+    events.push(DragEvent::LeftUp);
+    Some(events)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq)]
 enum TextKey {
     Unicode(u16),
     Return,
@@ -202,7 +244,10 @@ mod native {
     use crate::pointer_motion::PointerMotion;
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
 
     pub fn open_browser_location(url: &str) -> Result<(), ProtocolError> {
         hotkey(&[VK_CONTROL], VK_L)?;
@@ -457,13 +502,42 @@ mod native {
         for &(x, y) in points {
             guard_point(args, x, y)?;
         }
-        unsafe { SetCursorPos(points[0].0, points[0].1) }.map_err(input_failed)?;
+        let desktop = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        let events = drag_events(points, desktop)
+            .ok_or_else(|| invalid("Drag path is outside the current virtual desktop"))?;
+        let inputs: Vec<_> = events
+            .into_iter()
+            .map(|event| match event {
+                DragEvent::Move(x, y) => INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx: x,
+                            dy: y,
+                            dwFlags: MOUSEEVENTF_MOVE
+                                | MOUSEEVENTF_ABSOLUTE
+                                | MOUSEEVENTF_VIRTUALDESK
+                                | MOUSEEVENTF_MOVE_NOCOALESCE,
+                            ..Default::default()
+                        },
+                    },
+                },
+                DragEvent::LeftDown => mouse(MOUSEEVENTF_LEFTDOWN, 0),
+                DragEvent::LeftUp => mouse(MOUSEEVENTF_LEFTUP, 0),
+            })
+            .collect();
         guard_point(args, points[0].0, points[0].1)?;
-        send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?;
-        for &(x, y) in &points[1..] {
-            unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
-        }
-        send(&[mouse(MOUSEEVENTF_LEFTUP, 0)])
+        // Keep positioning, button transitions and moves in one ordered input
+        // stream. SetCursorPos between queued button events can collapse an
+        // Office drawing drag into a click that creates the default-size shape.
+        send(&inputs)
     }
 
     fn scroll(x: i32, y: i32, dx: f64, dy: f64, args: &Value) -> Result<(), ProtocolError> {
@@ -585,6 +659,40 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drag_queues_path_between_one_down_and_one_up() {
+        use DragEvent::{LeftDown, LeftUp, Move};
+        assert_eq!(
+            drag_events(&[(0, 0), (50, 25), (100, 50)], (0, 0, 101, 51)),
+            Some(vec![
+                Move(0, 0),
+                LeftDown,
+                Move(32767, 32767),
+                Move(65535, 65535),
+                LeftUp,
+            ])
+        );
+    }
+
+    #[test]
+    fn absolute_drag_supports_negative_monitor_origins_and_edge_pixels() {
+        use DragEvent::{LeftDown, LeftUp, Move};
+        assert_eq!(
+            drag_events(&[(-1920, -1080), (1919, 1079)], (-1920, -1080, 3840, 2160)),
+            Some(vec![Move(0, 0), LeftDown, Move(65535, 65535), LeftUp])
+        );
+        assert!(drag_events(&[(0, 0), (1, 1)], (0, 0, 2, 2)).is_some());
+    }
+
+    #[test]
+    fn invalid_drag_geometry_has_no_partial_input_plan() {
+        for points in [vec![], vec![(0, 0)], vec![(0, 0), (100, 100)]] {
+            assert_eq!(drag_events(&points, (0, 0, 100, 100)), None);
+        }
+        assert_eq!(drag_events(&[(0, 0), (1, 1)], (0, 0, 0, 100)), None);
+        assert_eq!(drag_events(&[(0, 0), (-1, 1)], (0, 0, 100, 100)), None);
+    }
 
     #[test]
     fn native_text_newlines_use_one_return_per_logical_break() {

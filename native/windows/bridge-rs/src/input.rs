@@ -3,6 +3,43 @@ use serde_json::{json, Value};
 use crate::error::{ErrorCode, ProtocolError};
 
 #[cfg(any(windows, test))]
+fn requested_click_count(params: &Value) -> Option<u8> {
+    match params.get("clickCount") {
+        None => Some(1),
+        Some(value) => value.as_u64().filter(|n| (1..=3).contains(n)).map(|n| n as u8),
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+struct ClickFailure<E> {
+    error: Option<E>,
+    events_sent: usize,
+}
+
+// A pair stays contiguous in SendInput. Check the exact target again before
+// each subsequent click: the previous click may have opened another window.
+#[cfg(any(windows, test))]
+fn dispatch_clicks<E>(
+    count: u8,
+    mut guard: impl FnMut() -> Result<(), E>,
+    mut emit_pair: impl FnMut() -> usize,
+) -> Result<usize, ClickFailure<E>> {
+    let mut events_sent = 0;
+    for _ in 0..count {
+        if let Err(error) = guard() {
+            return Err(ClickFailure { error: Some(error), events_sent });
+        }
+        let sent = emit_pair();
+        events_sent += sent;
+        if sent != 2 {
+            return Err(ClickFailure { error: None, events_sent });
+        }
+    }
+    Ok(events_sent)
+}
+
+#[cfg(any(windows, test))]
 #[derive(Debug, PartialEq)]
 enum TextKey {
     Unicode(u16),
@@ -219,7 +256,9 @@ mod native {
         match request.action.as_str() {
             "press" | "click" => {
                 let (x, y) = point.ok_or_else(|| invalid("click requires resolvedPoint"))?;
-                click(
+                let count = requested_click_count(&request.params)
+                    .ok_or_else(|| invalid("clickCount must be an integer between 1 and 3"))?;
+                click_counted(
                     x,
                     y,
                     args,
@@ -228,8 +267,9 @@ mod native {
                         .get("button")
                         .and_then(Value::as_str)
                         .unwrap_or("left"),
-                )?;
-                ok("unknown", grounding, "hid")
+                    count,
+                    grounding,
+                )
             }
             "moveMouse" => {
                 let (x, y) = point.ok_or_else(|| invalid("moveMouse requires resolvedPoint"))?;
@@ -450,6 +490,42 @@ mod native {
         send(&[mouse(down, 0), mouse(up, 0)])
     }
 
+    fn click_counted(
+        x: i32, y: i32, args: &Value, button: &str, count: u8, grounding: &str,
+    ) -> Result<Value, ProtocolError> {
+        guard_point(args, x, y)?;
+        unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
+        let (down, up, button_code) = match button {
+            "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 2),
+            "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 4),
+            _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1),
+        };
+        let pair = [mouse(down, 0), mouse(up, 0)];
+        match dispatch_clicks(count, || guard_point(args, x, y), || unsafe {
+            SendInput(&pair, std::mem::size_of::<INPUT>() as i32) as usize
+        }) {
+            Ok(sent) => Ok(json!({
+                "outcome":"unknown",
+                "performed":{"grounding":grounding,"delivery":"hid",
+                    "click":{"count":count,"button":button,"eventsDispatched":sent}}
+            })),
+            Err(failure) => {
+                let error = failure.error.unwrap_or_else(|| input_failed(format!(
+                    "SendInput inserted an incomplete click; {} events dispatched", failure.events_sent
+                )));
+                if failure.events_sent == 0 { return Err(error); }
+                Ok(json!({
+                    "outcome":"unknown",
+                    "performed":{"grounding":grounding,"delivery":"hid"},
+                    "error":{"code":"foreground_interrupted_after_partial_hid","message":error.message},
+                    "inputDispatch":{"eventsDispatched":failure.events_sent,
+                        "recoveryRequired":true,"retrySafe":false,"unreleasedKeys":[],
+                        "unreleasedMouseButtons":if failure.events_sent % 2 == 1 {vec![button_code]} else {vec![]}}
+                }))
+            }
+        }
+    }
+
     fn drag(points: &[(i32, i32)], args: &Value) -> Result<(), ProtocolError> {
         if points.len() < 2 {
             return Err(invalid("drag requires at least two points"));
@@ -585,6 +661,63 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn click_count_defaults_to_one_and_rejects_invalid_native_requests() {
+        assert_eq!(requested_click_count(&json!({})), Some(1));
+        for count in 1..=3 {
+            assert_eq!(requested_click_count(&json!({"clickCount":count})), Some(count));
+        }
+        for value in [json!(0), json!(4), json!(-1), json!(1.5), json!("2"), Value::Null] {
+            assert_eq!(requested_click_count(&json!({"clickCount":value})), None);
+        }
+    }
+
+    #[test]
+    fn double_and_triple_clicks_emit_all_pairs_with_fresh_target_checks() {
+        for count in 1..=3 {
+            let guards = std::cell::Cell::new(0);
+            let pairs = std::cell::Cell::new(0);
+            let result = dispatch_clicks(count, || {
+                guards.set(guards.get() + 1);
+                Ok::<_, &str>(())
+            }, || {
+                assert_eq!(guards.get(), pairs.get() + 1);
+                pairs.set(pairs.get() + 1);
+                2
+            });
+            assert_eq!(result.unwrap(), usize::from(count) * 2);
+            assert_eq!(pairs.get(), count);
+        }
+    }
+
+    #[test]
+    fn click_target_change_stops_without_sending_to_the_new_window() {
+        let pairs = std::cell::Cell::new(0);
+        let failure = dispatch_clicks(3, || {
+            if pairs.get() == 0 { Ok(()) } else { Err("new foreground") }
+        }, || { pairs.set(pairs.get() + 1); 2 }).unwrap_err();
+        assert_eq!(pairs.get(), 1);
+        assert_eq!(failure.events_sent, 2);
+        assert_eq!(failure.error, Some("new foreground"));
+        let failure = dispatch_clicks(2, || Err("stale target"), || {
+            panic!("initial refusal must send nothing")
+        }).unwrap_err();
+        assert_eq!(failure.events_sent, 0);
+    }
+
+    #[test]
+    fn incomplete_click_insertion_stops_and_retains_exact_held_button_state() {
+        let calls = std::cell::Cell::new(0);
+        let failure = dispatch_clicks(3, || Ok::<_, &str>(()), || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { 2 } else { 1 }
+        }).unwrap_err();
+        assert_eq!(calls.get(), 2);
+        assert_eq!(failure.events_sent, 3);
+        assert_eq!(failure.events_sent % 2, 1);
+        assert_eq!(failure.error, None);
+    }
 
     #[test]
     fn native_text_newlines_use_one_return_per_logical_break() {

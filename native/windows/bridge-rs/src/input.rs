@@ -7,7 +7,6 @@ use crate::error::{ErrorCode, ProtocolError};
 enum DragEvent {
     Move(i32, i32),
     LeftDown,
-    TerminalMove(i32, i32),
     LeftUp(i32, i32),
 }
 
@@ -65,18 +64,11 @@ fn drag_events(points: &[(i32, i32)], desktop: (i32, i32, i32, i32)) -> Option<V
         axis(last_x, desktop.0, desktop.2)?,
         axis(last_y, desktop.1, desktop.3)?,
     );
-    let mut events = Vec::with_capacity(points.len() + 3);
+    let mut events = Vec::with_capacity(points.len() + 2);
     let mut moves = moves.into_iter();
     events.push(moves.next()?);
     events.push(DragEvent::LeftDown);
     events.extend(moves);
-    // Repeat the endpoint as a separate guarded movement before release. Native
-    // drawing consumers can commit the previous motion sample on the next one;
-    // releasing immediately after the final distinct sample leaves them short.
-    events.push(DragEvent::TerminalMove(
-        axis(last_x, desktop.0, desktop.2)?,
-        axis(last_y, desktop.1, desktop.3)?,
-    ));
     events.push(release);
     Some(events)
 }
@@ -109,7 +101,7 @@ fn dispatch_drag<E>(
         match event {
             DragEvent::LeftDown => left_down = true,
             DragEvent::LeftUp(..) => left_down = false,
-            DragEvent::Move(..) | DragEvent::TerminalMove(..) => {}
+            DragEvent::Move(..) => {}
         }
         if !matches!(event, DragEvent::LeftUp(..)) {
             settle(matches!(events.get(sent + 1), Some(DragEvent::LeftUp(..))));
@@ -364,10 +356,7 @@ mod native {
     use crate::pointer_motion::PointerMotion;
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
 
     pub fn open_browser_location(url: &str) -> Result<(), ProtocolError> {
         hotkey(&[VK_CONTROL], VK_L)?;
@@ -690,8 +679,8 @@ mod native {
 
     fn drag(points: &[(i32, i32)], args: &Value) -> Result<Value, ProtocolError> {
         let requested_points = points.len();
-        let trajectory =
-            drag_trajectory(points).ok_or_else(|| invalid("drag requires 2 to 600 points"))?;
+        let trajectory = drag_trajectory(points)
+            .ok_or_else(|| invalid("drag requires 2 to 600 points"))?;
         let points = trajectory.as_slice();
         for &(x, y) in points {
             guard_point(args, x, y)?;
@@ -721,13 +710,11 @@ mod native {
                         p
                     }
                     DragEvent::LeftDown => points[0],
-                    DragEvent::TerminalMove(..) | DragEvent::LeftUp(..) => *points.last().unwrap(),
+                    DragEvent::LeftUp(..) => *points.last().unwrap(),
                 };
                 guard_point(args, point.0, point.1)?;
                 let input = match *event {
-                    DragEvent::Move(x, y)
-                    | DragEvent::TerminalMove(x, y)
-                    | DragEvent::LeftUp(x, y) => INPUT {
+                    DragEvent::Move(x, y) | DragEvent::LeftUp(x, y) => INPUT {
                         r#type: INPUT_MOUSE,
                         Anonymous: INPUT_0 {
                             mi: MOUSEINPUT {
@@ -765,11 +752,7 @@ mod native {
                 let index = emitted.get() - 1;
                 // Read-only bounded evidence after the existing pacing interval.
                 // No extra input, capture release, focus change or retry.
-                if events.len() <= 8
-                    || index < 2
-                    || index == events.len() / 2
-                    || index + 2 >= events.len()
-                {
+                if events.len() <= 8 || index < 2 || index == events.len() / 2 || index + 2 >= events.len() {
                     trace.borrow_mut().push(json!({"eventIndex":index,"event":format!("{:?}",events[index]),"state":drag_state(target_hwnd,started.elapsed().as_millis())}));
                 }
             },
@@ -1021,12 +1004,8 @@ mod tests {
         assert_eq!(path.last(), waypoints.last());
         let corner = path.iter().position(|p| *p == waypoints[1]).unwrap();
         assert!(corner > 0 && corner + 1 < path.len());
-        assert!(path[..=corner]
-            .windows(2)
-            .all(|p| p[0].0 <= p[1].0 && p[0].1 <= p[1].1));
-        assert!(path[corner..]
-            .windows(2)
-            .all(|p| p[0].0 >= p[1].0 && p[0].1 <= p[1].1));
+        assert!(path[..=corner].windows(2).all(|p| p[0].0 <= p[1].0 && p[0].1 <= p[1].1));
+        assert!(path[corner..].windows(2).all(|p| p[0].0 >= p[1].0 && p[0].1 <= p[1].1));
         let edges = drag_trajectory(&[(i32::MIN, i32::MAX), (i32::MAX, i32::MIN)]).unwrap();
         assert_eq!(edges.first(), Some(&(i32::MIN, i32::MAX)));
         assert_eq!(edges.last(), Some(&(i32::MAX, i32::MIN)));
@@ -1051,7 +1030,7 @@ mod tests {
 
     #[test]
     fn drag_queues_path_between_one_down_and_one_up() {
-        use DragEvent::{LeftDown, LeftUp, Move, TerminalMove};
+        use DragEvent::{LeftDown, LeftUp, Move};
         assert_eq!(
             drag_events(&[(0, 0), (50, 25), (100, 50)], (0, 0, 101, 51)),
             Some(vec![
@@ -1059,7 +1038,6 @@ mod tests {
                 LeftDown,
                 Move(32767, 32767),
                 Move(65535, 65535),
-                TerminalMove(65535, 65535),
                 LeftUp(65535, 65535),
             ])
         );
@@ -1067,14 +1045,13 @@ mod tests {
 
     #[test]
     fn absolute_drag_supports_negative_monitor_origins_and_edge_pixels() {
-        use DragEvent::{LeftDown, LeftUp, Move, TerminalMove};
+        use DragEvent::{LeftDown, LeftUp, Move};
         assert_eq!(
             drag_events(&[(-1920, -1080), (1919, 1079)], (-1920, -1080, 3840, 2160)),
             Some(vec![
                 Move(0, 0),
                 LeftDown,
                 Move(65535, 65535),
-                TerminalMove(65535, 65535),
                 LeftUp(65535, 65535)
             ])
         );
@@ -1115,27 +1092,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_move_rechecks_ownership_before_releasing() {
-        let events = drag_events(&[(0, 0), (100, 50)], (0, 0, 101, 51)).unwrap();
-        let mut sent = vec![];
-        let failure = dispatch_drag(
-            &events,
-            |event| {
-                if matches!(event, DragEvent::TerminalMove(..)) {
-                    return Err("endpoint ownership changed");
-                }
-                sent.push(*event);
-                Ok(())
-            },
-            |_| {},
-        )
-        .unwrap_err();
-        assert_eq!(failure.events_sent, 3);
-        assert!(failure.left_down);
-        assert!(!sent.iter().any(|e| matches!(e, DragEvent::LeftUp(..))));
-    }
-
-    #[test]
     fn paced_drag_finishes_once_and_initial_rejection_never_presses_a_button() {
         let events = drag_events(&[(0, 0), (100, 50)], (0, 0, 101, 51)).unwrap();
         let mut sent = vec![];
@@ -1150,8 +1106,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sent, events);
-        assert_eq!(count, 5);
-        assert_eq!(waits, vec![false, false, false, true]);
+        assert_eq!(count, 4);
+        assert_eq!(waits, vec![false, false, true]);
         let failure = dispatch_drag(
             &events,
             |_| Err("stale"),

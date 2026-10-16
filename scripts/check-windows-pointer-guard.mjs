@@ -11,7 +11,7 @@ for(const name of ['click','scroll']) {
  assert.ok(body.lastIndexOf('guard_point(args, x, y)?')>body.indexOf('SetCursorPos'));
  assert.ok(body.lastIndexOf('guard_point(args, x, y)?')<body.indexOf('send('));
 }
-assert.match(input,/for &\(x, y\) in points \{ guard_point\(args, x, y\)\?; \}/);
+assert.match(input,/for\s+&\(x,\s*y\)\s+in\s+points\s*\{\s*guard_point\(args,\s*x,\s*y\)\?;\s*\}/);
 assert.match(window,/root != hwnd \|\| hit_pid != expected_pid/);
 assert.match(window,/ErrorCode::OccludedTarget/);
 console.log('Windows pointer guard wiring checks passed');

@@ -2,6 +2,32 @@ use serde_json::{json, Value};
 
 use crate::error::{ErrorCode, ProtocolError};
 
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq)]
+enum TextKey {
+    Unicode(u16),
+    Return,
+}
+
+// Office's native slide editor ignores Unicode packets containing CR or LF.
+// Normalize all three newline encodings to one Return key, retaining ordinary
+// UTF-16 units (including surrogate pairs) and consecutive empty paragraphs.
+#[cfg(any(windows, test))]
+fn text_keys(text: &str) -> Vec<TextKey> {
+    let mut units = text.encode_utf16().peekable();
+    let mut keys = Vec::new();
+    while let Some(unit) = units.next() {
+        if unit == 0x0d && units.peek() == Some(&0x0a) {
+            units.next();
+        }
+        keys.push(match unit {
+            0x0a | 0x0d => TextKey::Return,
+            unit => TextKey::Unicode(unit),
+        });
+    }
+    keys
+}
+
 // ASCII punctuation values are not Windows virtual-key codes: '.' is VK_DELETE.
 // Only letters, digits and space have a layout-independent identity mapping.
 #[cfg(any(windows, test))]
@@ -465,9 +491,17 @@ mod native {
 
     fn send_text(text: &str) -> Result<(), ProtocolError> {
         let mut inputs = Vec::new();
-        for unit in text.encode_utf16() {
-            inputs.push(unicode(unit, false));
-            inputs.push(unicode(unit, true));
+        for text_key in text_keys(text) {
+            match text_key {
+                TextKey::Unicode(unit) => {
+                    inputs.push(unicode(unit, false));
+                    inputs.push(unicode(unit, true));
+                }
+                TextKey::Return => {
+                    inputs.push(key(VK_RETURN, false));
+                    inputs.push(key(VK_RETURN, true));
+                }
+            }
         }
         send(&inputs)
     }
@@ -551,6 +585,27 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_text_newlines_use_one_return_per_logical_break() {
+        use TextKey::{Return, Unicode};
+        for text in ["A\nB", "A\rB", "A\r\nB"] {
+            assert_eq!(text_keys(text), vec![Unicode(65), Return, Unicode(66)]);
+        }
+        assert_eq!(text_keys("\n\r\n\r"), vec![Return, Return, Return]);
+        assert_eq!(text_keys(""), vec![]);
+    }
+
+    #[test]
+    fn native_text_keeps_unicode_pairs_tabs_and_literal_punctuation() {
+        let text = "中🙂\t.Delete";
+        assert_eq!(
+            text_keys(text),
+            text.encode_utf16()
+                .map(TextKey::Unicode)
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn navigation_keys_keep_their_dedicated_keyboard_identity() {

@@ -10,6 +10,30 @@ enum DragEvent {
     LeftUp(i32, i32),
 }
 
+// A drag is continuous motion through the supplied waypoints. Sparse paths
+// otherwise jump across most of the gesture while an app initializes dragging.
+// Preserve every waypoint and endpoint; keep the expanded path within the same
+// 600-point bound as input validation. Every interpolated point is guarded too.
+#[cfg(any(windows, test))]
+fn drag_trajectory(points: &[(i32, i32)]) -> Option<Vec<(i32, i32)>> {
+    if !(2..=600).contains(&points.len()) {
+        return None;
+    }
+    let segments = points.len() - 1;
+    let steps = (22 + segments - 1) / segments;
+    let mut trajectory = Vec::with_capacity(segments * steps + 1);
+    trajectory.push(points[0]);
+    for pair in points.windows(2) {
+        for step in 1..=steps {
+            let axis = |a: i32, b: i32| {
+                (i64::from(a) + (i64::from(b) - i64::from(a)) * step as i64 / steps as i64) as i32
+            };
+            trajectory.push((axis(pair[0].0, pair[1].0), axis(pair[0].1, pair[1].1)));
+        }
+    }
+    Some(trajectory)
+}
+
 // Absolute SendInput coordinates cover the entire virtual desktop. Validate
 // every point before constructing a gesture, including monitors left/above zero.
 #[cfg(any(windows, test))]
@@ -654,9 +678,10 @@ mod native {
     }
 
     fn drag(points: &[(i32, i32)], args: &Value) -> Result<Value, ProtocolError> {
-        if points.len() < 2 {
-            return Err(invalid("drag requires at least two points"));
-        }
+        let requested_points = points.len();
+        let trajectory = drag_trajectory(points)
+            .ok_or_else(|| invalid("drag requires 2 to 600 points"))?;
+        let points = trajectory.as_slice();
         for &(x, y) in points {
             guard_point(args, x, y)?;
         }
@@ -727,7 +752,7 @@ mod native {
                 let index = emitted.get() - 1;
                 // Read-only bounded evidence after the existing pacing interval.
                 // No extra input, capture release, focus change or retry.
-                if index < 2 || index + 2 >= events.len() {
+                if events.len() <= 8 || index < 2 || index == events.len() / 2 || index + 2 >= events.len() {
                     trace.borrow_mut().push(json!({"eventIndex":index,"event":format!("{:?}",events[index]),"state":drag_state(target_hwnd,started.elapsed().as_millis())}));
                 }
             },
@@ -742,7 +767,7 @@ mod native {
                     .is_ok()
                     .then(|| json!({"x":cursor.x,"y":cursor.y}));
                 Ok(
-                    json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","drag":{"points":points.len(),"eventsDispatched":sent,"stepDwellMs":16,"releaseDwellMs":150,"postReleaseSettleMs":150,"leftDownAfter":unsafe {GetAsyncKeyState(1)} < 0,"elapsedMs":started.elapsed().as_millis(),"endpoint":points.last(),"cursorAfter":cursor_after,"settledState":drag_state(target_hwnd,started.elapsed().as_millis()),"eventTrace":trace.into_inner()}}}),
+                    json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","drag":{"requestedPoints":requested_points,"points":points.len(),"eventsDispatched":sent,"stepDwellMs":16,"releaseDwellMs":150,"postReleaseSettleMs":150,"leftDownAfter":unsafe {GetAsyncKeyState(1)} < 0,"elapsedMs":started.elapsed().as_millis(),"endpoint":points.last(),"cursorAfter":cursor_after,"settledState":drag_state(target_hwnd,started.elapsed().as_millis()),"eventTrace":trace.into_inner()}}}),
                 )
             }
             Err(failure) if failure.events_sent == 0 => Err(failure.error),
@@ -968,6 +993,39 @@ mod tests {
         assert_eq!(failure.events_sent, 3);
         assert_eq!(failure.events_sent % 2, 1);
         assert_eq!(failure.error, None);
+    }
+
+    #[test]
+    fn drag_trajectory_preserves_corners_and_exact_endpoints() {
+        let waypoints = [(0, 0), (100, 50), (-50, 80)];
+        let path = drag_trajectory(&waypoints).unwrap();
+        assert!(path.len() > waypoints.len());
+        assert_eq!(path.first(), waypoints.first());
+        assert_eq!(path.last(), waypoints.last());
+        let corner = path.iter().position(|p| *p == waypoints[1]).unwrap();
+        assert!(corner > 0 && corner + 1 < path.len());
+        assert!(path[..=corner].windows(2).all(|p| p[0].0 <= p[1].0 && p[0].1 <= p[1].1));
+        assert!(path[corner..].windows(2).all(|p| p[0].0 >= p[1].0 && p[0].1 <= p[1].1));
+        let edges = drag_trajectory(&[(i32::MIN, i32::MAX), (i32::MAX, i32::MIN)]).unwrap();
+        assert_eq!(edges.first(), Some(&(i32::MIN, i32::MAX)));
+        assert_eq!(edges.last(), Some(&(i32::MAX, i32::MIN)));
+    }
+
+    #[test]
+    fn drag_trajectory_keeps_all_allowed_paths_bounded() {
+        assert!(drag_trajectory(&[]).is_none());
+        assert!(drag_trajectory(&[(0, 0)]).is_none());
+        assert!(drag_trajectory(&vec![(0, 0); 601]).is_none());
+        for count in 2..=600 {
+            let supplied: Vec<_> = (0..count).map(|i| (i, -i)).collect();
+            let path = drag_trajectory(&supplied).unwrap();
+            assert!(path.len() <= 600);
+            let mut remaining = path.as_slice();
+            for waypoint in supplied {
+                let index = remaining.iter().position(|p| *p == waypoint).unwrap();
+                remaining = &remaining[index + 1..];
+            }
+        }
     }
 
     #[test]

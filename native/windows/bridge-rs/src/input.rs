@@ -12,8 +12,9 @@ enum DragEvent {
 
 // A drag is continuous motion through the supplied waypoints. Sparse paths
 // otherwise jump across most of the gesture while an app initializes dragging.
-// Preserve every waypoint and endpoint; keep the expanded path within the same
-// 600-point bound as input validation. Every interpolated point is guarded too.
+// Preserve every waypoint and endpoint. Public input remains bounded to 600
+// points; at most one terminal approach point brings the internal bound to 601.
+// Every interpolated point is guarded too.
 #[cfg(any(windows, test))]
 fn drag_trajectory(points: &[(i32, i32)]) -> Option<Vec<(i32, i32)>> {
     if !(2..=600).contains(&points.len()) {
@@ -29,6 +30,24 @@ fn drag_trajectory(points: &[(i32, i32)]) -> Option<Vec<(i32, i32)>> {
                 (i64::from(a) + (i64::from(b) - i64::from(a)) * step as i64 / steps as i64) as i32
             };
             trajectory.push((axis(pair[0].0, pair[1].0), axis(pair[0].1, pair[1].1)));
+        }
+    }
+    // Native drawing consumers can retain the previous distinct motion sample
+    // when finishing a gesture. Approach the endpoint by one screen pixel so
+    // that retained sample is within pixel quantization, without an off-path
+    // nudge, duplicate endpoint, extra button transition or input replay.
+    let end = *trajectory.last()?;
+    if let Some(index) = trajectory.iter().rposition(|point| *point != end) {
+        let previous = trajectory[index];
+        let dx = i64::from(end.0) - i64::from(previous.0);
+        let dy = i64::from(end.1) - i64::from(previous.1);
+        let distance = dx.abs().max(dy.abs());
+        if distance > 1 {
+            let step = |delta: i64| if delta.abs() * 2 >= distance { delta.signum() } else { 0 };
+            trajectory.insert(index + 1, (
+                (i64::from(end.0) - step(dx)) as i32,
+                (i64::from(end.1) - step(dy)) as i32,
+            ));
         }
     }
     Some(trajectory)
@@ -49,7 +68,7 @@ fn drag_events(points: &[(i32, i32)], desktop: (i32, i32, i32, i32)) -> Option<V
             (offset * 65_535 / i64::from(span - 1)) as i32
         })
     }
-    if points.len() < 2 || points.len() > 600 {
+    if points.len() < 2 || points.len() > 601 {
         return None;
     }
     let mut moves = Vec::with_capacity(points.len());
@@ -1029,6 +1048,34 @@ mod tests {
     }
 
     #[test]
+    fn terminal_approach_keeps_waypoints_and_handles_duplicate_endpoints() {
+        for supplied in [
+            vec![(0, 0), (200, 50), (300, 80), (300, 80)],
+            vec![(i32::MIN, i32::MAX), (i32::MAX, i32::MIN)],
+            vec![(300, 80), (0, 0)],
+        ] {
+            let path = drag_trajectory(&supplied).unwrap();
+            let end = *supplied.last().unwrap();
+            let previous = *path.iter().rev().find(|point| **point != end).unwrap();
+            assert!((i64::from(end.0) - i64::from(previous.0)).abs() <= 1);
+            assert!((i64::from(end.1) - i64::from(previous.1)).abs() <= 1);
+            let mut remaining = path.as_slice();
+            for waypoint in supplied {
+                let index = remaining.iter().position(|p| *p == waypoint).unwrap();
+                remaining = &remaining[index + 1..];
+            }
+        }
+        let mut maximum = vec![(0, 0); 599];
+        maximum.push((100, 100));
+        let path = drag_trajectory(&maximum).unwrap();
+        assert_eq!(path.len(), 601);
+        assert_eq!(&path[599..], &[(99, 99), (100, 100)]);
+        assert!(drag_events(&path, (0, 0, 101, 101)).is_some());
+        assert!(drag_trajectory(&vec![(0, 0); 601]).is_none());
+        assert!(drag_events(&vec![(0, 0); 602], (0, 0, 101, 101)).is_none());
+    }
+
+    #[test]
     fn drag_queues_path_between_one_down_and_one_up() {
         use DragEvent::{LeftDown, LeftUp, Move};
         assert_eq!(
@@ -1116,7 +1163,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(failure.events_sent, 0);
         assert!(!failure.left_down);
-        assert!(drag_events(&vec![(0, 0); 601], (0, 0, 101, 51)).is_none());
+        assert!(drag_events(&vec![(0, 0); 602], (0, 0, 101, 51)).is_none());
     }
 
     #[test]

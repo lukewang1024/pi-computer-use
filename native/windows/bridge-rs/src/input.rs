@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::error::{ErrorCode, ProtocolError};
 
 #[cfg(any(windows, test))]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum DragEvent {
     Move(i32, i32),
     LeftDown,
@@ -25,7 +25,7 @@ fn drag_events(points: &[(i32, i32)], desktop: (i32, i32, i32, i32)) -> Option<V
             (offset * 65_535 / i64::from(span - 1)) as i32
         })
     }
-    if points.len() < 2 {
+    if points.len() < 2 || points.len() > 600 {
         return None;
     }
     let mut moves = Vec::with_capacity(points.len());
@@ -47,6 +47,43 @@ fn drag_events(points: &[(i32, i32)], desktop: (i32, i32, i32, i32)) -> Option<V
     events.extend(moves);
     events.push(release);
     Some(events)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+struct DragFailure<E> {
+    error: E,
+    events_sent: usize,
+    left_down: bool,
+}
+
+// Emit one guarded event at a time. Apps must be able to consume the mouse-down
+// and motion messages before release; queuing the entire gesture is insufficient.
+#[cfg(any(windows, test))]
+fn dispatch_drag<E>(
+    events: &[DragEvent],
+    mut emit: impl FnMut(&DragEvent) -> Result<(), E>,
+    mut settle: impl FnMut(),
+) -> Result<usize, DragFailure<E>> {
+    let mut left_down = false;
+    for (sent, event) in events.iter().enumerate() {
+        if let Err(error) = emit(event) {
+            return Err(DragFailure {
+                error,
+                events_sent: sent,
+                left_down,
+            });
+        }
+        match event {
+            DragEvent::LeftDown => left_down = true,
+            DragEvent::LeftUp(..) => left_down = false,
+            DragEvent::Move(..) => {}
+        }
+        if !matches!(event, DragEvent::LeftUp(..)) {
+            settle();
+        }
+    }
+    Ok(events.len())
 }
 
 #[cfg(any(windows, test))]
@@ -334,8 +371,7 @@ mod native {
                     .iter()
                     .map(point_value_required)
                     .collect::<Result<Vec<_>, _>>()?;
-                drag(&points, args)?;
-                ok("unknown", "coordinates", "hid")
+                drag(&points, args)
             }
             "scroll" => {
                 let (x, y) = point.ok_or_else(|| invalid("scroll requires resolvedPoint"))?;
@@ -500,7 +536,7 @@ mod native {
         send(&[mouse(down, 0), mouse(up, 0)])
     }
 
-    fn drag(points: &[(i32, i32)], args: &Value) -> Result<(), ProtocolError> {
+    fn drag(points: &[(i32, i32)], args: &Value) -> Result<Value, ProtocolError> {
         if points.len() < 2 {
             return Err(invalid("drag requires at least two points"));
         }
@@ -517,36 +553,67 @@ mod native {
         };
         let events = drag_events(points, desktop)
             .ok_or_else(|| invalid("Drag path is outside the current virtual desktop"))?;
-        let inputs: Vec<_> = events
-            .into_iter()
-            .map(|event| match event {
-                DragEvent::Move(x, y) | DragEvent::LeftUp(x, y) => INPUT {
-                    r#type: INPUT_MOUSE,
-                    Anonymous: INPUT_0 {
-                        mi: MOUSEINPUT {
-                            dx: x,
-                            dy: y,
-                            dwFlags: MOUSEEVENTF_MOVE
-                                | MOUSEEVENTF_ABSOLUTE
-                                | MOUSEEVENTF_VIRTUALDESK
-                                | MOUSEEVENTF_MOVE_NOCOALESCE
-                                | if matches!(event, DragEvent::LeftUp(..)) {
-                                    MOUSEEVENTF_LEFTUP
-                                } else {
-                                    MOUSE_EVENT_FLAGS(0)
-                                },
-                            ..Default::default()
+        let started = std::time::Instant::now();
+        let mut move_index = 0;
+        let result = dispatch_drag(
+            &events,
+            |event| {
+                let point = match event {
+                    DragEvent::Move(..) => {
+                        let p = points[move_index];
+                        move_index += 1;
+                        p
+                    }
+                    DragEvent::LeftDown => points[0],
+                    DragEvent::LeftUp(..) => *points.last().unwrap(),
+                };
+                guard_point(args, point.0, point.1)?;
+                let input = match *event {
+                    DragEvent::Move(x, y) | DragEvent::LeftUp(x, y) => INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: x,
+                                dy: y,
+                                dwFlags: MOUSEEVENTF_MOVE
+                                    | MOUSEEVENTF_ABSOLUTE
+                                    | MOUSEEVENTF_VIRTUALDESK
+                                    | MOUSEEVENTF_MOVE_NOCOALESCE
+                                    | if matches!(event, DragEvent::LeftUp(..)) {
+                                        MOUSEEVENTF_LEFTUP
+                                    } else {
+                                        MOUSE_EVENT_FLAGS(0)
+                                    },
+                                ..Default::default()
+                            },
                         },
                     },
-                },
-                DragEvent::LeftDown => mouse(MOUSEEVENTF_LEFTDOWN, 0),
-            })
-            .collect();
-        guard_point(args, points[0].0, points[0].1)?;
-        // Keep positioning, button transitions and moves in one ordered input
-        // stream. SetCursorPos between queued button events can collapse an
-        // Office drawing drag into a click that creates the default-size shape.
-        send(&inputs)
+                    DragEvent::LeftDown => mouse(MOUSEEVENTF_LEFTDOWN, 0),
+                };
+                // A single-event SendInput is either inserted or not inserted;
+                // the interpreter therefore retains the exact sent-event count.
+                send(&[input])
+            },
+            || std::thread::sleep(std::time::Duration::from_millis(16)),
+        );
+        match result {
+            Ok(sent) => {
+                let mut cursor = POINT::default();
+                let cursor_after = unsafe { GetCursorPos(&mut cursor) }
+                    .is_ok()
+                    .then(|| json!({"x":cursor.x,"y":cursor.y}));
+                Ok(
+                    json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","drag":{"points":points.len(),"eventsDispatched":sent,"elapsedMs":started.elapsed().as_millis(),"endpoint":points.last(),"cursorAfter":cursor_after}}}),
+                )
+            }
+            Err(failure) if failure.events_sent == 0 => Err(failure.error),
+            Err(failure) => Ok(json!({
+                "outcome":"unknown",
+                "performed":{"grounding":"coordinates","delivery":"hid"},
+                "error":{"code":"foreground_interrupted_after_partial_hid","message":failure.error.message},
+                "inputDispatch":{"eventsDispatched":failure.events_sent,"recoveryRequired":true,"retrySafe":false,"unreleasedKeys":[],"unreleasedMouseButtons":if failure.left_down {vec![1]} else {vec![]}}
+            })),
+        }
     }
 
     fn scroll(x: i32, y: i32, dx: f64, dy: f64, args: &Value) -> Result<(), ProtocolError> {
@@ -706,6 +773,58 @@ mod tests {
         }
         assert_eq!(drag_events(&[(0, 0), (1, 1)], (0, 0, 0, 100)), None);
         assert_eq!(drag_events(&[(0, 0), (-1, 1)], (0, 0, 100, 100)), None);
+    }
+
+    #[test]
+    fn drag_interruption_reports_held_button_and_never_sends_release_to_new_target() {
+        let events = drag_events(&[(0, 0), (50, 25), (100, 50)], (0, 0, 101, 51)).unwrap();
+        let mut sent = vec![];
+        let mut waits = 0;
+        let failure = dispatch_drag(
+            &events,
+            |event| {
+                if sent.len() == 3 {
+                    return Err("target changed");
+                }
+                sent.push(*event);
+                Ok(())
+            },
+            || waits += 1,
+        )
+        .unwrap_err();
+        assert_eq!(failure.error, "target changed");
+        assert_eq!(failure.events_sent, 3);
+        assert!(failure.left_down);
+        assert_eq!(waits, 3);
+        assert!(!sent.iter().any(|e| matches!(e, DragEvent::LeftUp(..))));
+    }
+
+    #[test]
+    fn paced_drag_finishes_once_and_initial_rejection_never_presses_a_button() {
+        let events = drag_events(&[(0, 0), (100, 50)], (0, 0, 101, 51)).unwrap();
+        let mut sent = vec![];
+        let mut waits = 0;
+        let count = dispatch_drag(
+            &events,
+            |e| {
+                sent.push(*e);
+                Ok::<_, ()>(())
+            },
+            || waits += 1,
+        )
+        .unwrap();
+        assert_eq!(sent, events);
+        assert_eq!(count, 4);
+        assert_eq!(waits, 3);
+        let failure = dispatch_drag(
+            &events,
+            |_| Err("stale"),
+            || panic!("no wait after failed preflight"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.events_sent, 0);
+        assert!(!failure.left_down);
+        assert!(drag_events(&vec![(0, 0); 601], (0, 0, 101, 51)).is_none());
     }
 
     #[test]

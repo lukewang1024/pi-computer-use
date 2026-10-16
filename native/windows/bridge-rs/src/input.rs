@@ -63,7 +63,7 @@ struct DragFailure<E> {
 fn dispatch_drag<E>(
     events: &[DragEvent],
     mut emit: impl FnMut(&DragEvent) -> Result<(), E>,
-    mut settle: impl FnMut(),
+    mut settle: impl FnMut(bool),
 ) -> Result<usize, DragFailure<E>> {
     let mut left_down = false;
     for (sent, event) in events.iter().enumerate() {
@@ -80,7 +80,7 @@ fn dispatch_drag<E>(
             DragEvent::Move(..) => {}
         }
         if !matches!(event, DragEvent::LeftUp(..)) {
-            settle();
+            settle(matches!(events.get(sent + 1), Some(DragEvent::LeftUp(..))));
         }
     }
     Ok(events.len())
@@ -594,16 +594,27 @@ mod native {
                 // the interpreter therefore retains the exact sent-event count.
                 send(&[input])
             },
-            || std::thread::sleep(std::time::Duration::from_millis(16)),
+            |before_release| {
+                // Let the application consume the final move while the button
+                // is still held, before it sees the release/global up state.
+                std::thread::sleep(std::time::Duration::from_millis(if before_release {
+                    150
+                } else {
+                    16
+                }));
+            },
         );
         match result {
             Ok(sent) => {
+                // Let queued release/input messages settle before a caller
+                // observes/captures the app; this sends no further input.
+                std::thread::sleep(std::time::Duration::from_millis(150));
                 let mut cursor = POINT::default();
                 let cursor_after = unsafe { GetCursorPos(&mut cursor) }
                     .is_ok()
                     .then(|| json!({"x":cursor.x,"y":cursor.y}));
                 Ok(
-                    json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","drag":{"points":points.len(),"eventsDispatched":sent,"elapsedMs":started.elapsed().as_millis(),"endpoint":points.last(),"cursorAfter":cursor_after}}}),
+                    json!({"outcome":"unknown","performed":{"grounding":"coordinates","delivery":"hid","drag":{"points":points.len(),"eventsDispatched":sent,"stepDwellMs":16,"releaseDwellMs":150,"postReleaseSettleMs":150,"leftDownAfter":unsafe {GetAsyncKeyState(1)} < 0,"elapsedMs":started.elapsed().as_millis(),"endpoint":points.last(),"cursorAfter":cursor_after}}}),
                 )
             }
             Err(failure) if failure.events_sent == 0 => Err(failure.error),
@@ -789,7 +800,7 @@ mod tests {
                 sent.push(*event);
                 Ok(())
             },
-            || waits += 1,
+            |_| waits += 1,
         )
         .unwrap_err();
         assert_eq!(failure.error, "target changed");
@@ -803,23 +814,23 @@ mod tests {
     fn paced_drag_finishes_once_and_initial_rejection_never_presses_a_button() {
         let events = drag_events(&[(0, 0), (100, 50)], (0, 0, 101, 51)).unwrap();
         let mut sent = vec![];
-        let mut waits = 0;
+        let mut waits = vec![];
         let count = dispatch_drag(
             &events,
             |e| {
                 sent.push(*e);
                 Ok::<_, ()>(())
             },
-            || waits += 1,
+            |before_release| waits.push(before_release),
         )
         .unwrap();
         assert_eq!(sent, events);
         assert_eq!(count, 4);
-        assert_eq!(waits, 3);
+        assert_eq!(waits, vec![false, false, true]);
         let failure = dispatch_drag(
             &events,
             |_| Err("stale"),
-            || panic!("no wait after failed preflight"),
+            |_| panic!("no wait after failed preflight"),
         )
         .unwrap_err();
         assert_eq!(failure.events_sent, 0);

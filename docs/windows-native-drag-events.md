@@ -2,14 +2,17 @@
 
 The candidate sends absolute virtual-desktop positioning, one left-button press,
 all path positions, and one release carrying the final coordinates. Each event
-is injected separately with a 16ms processing interval before the next event.
+is injected separately with a 16ms processing interval; after the final move
+a bounded 150ms hold allows the app to consume it before release. A further
+150ms read-only settle precedes the completion diagnostic and caller capture.
 Paths are bounded to 2–600 points before input, so the pacing budget is bounded.
 Moves use `MOUSEEVENTF_MOVE_NOCOALESCE` and support monitors with negative origins.
 
 A native PowerPoint trial, with the rectangle tool selected by a physical click
 in its owned palette, produced the default one-inch square on the released
 implementation. Two atomic-queue candidates reached only the middle path point,
-even when release carried final coordinates. The paced candidate allows the app
+even when release carried final coordinates. A 16ms-only paced candidate reached the requested physical cursor endpoint but
+PowerPoint still saved the midpoint bounds. The final-hold candidate allows the app
 to process down/move messages before release; it still requires native geometry
 verification. These observations do not prove the precise internal Office cause.
 UIA Invoke on the shape palette inserts a default-size shape without entering

@@ -7,7 +7,7 @@ use crate::error::{ErrorCode, ProtocolError};
 enum DragEvent {
     Move(i32, i32),
     LeftDown,
-    LeftUp,
+    LeftUp(i32, i32),
 }
 
 // Absolute SendInput coordinates cover the entire virtual desktop. Validate
@@ -35,12 +35,17 @@ fn drag_events(points: &[(i32, i32)], desktop: (i32, i32, i32, i32)) -> Option<V
             axis(y, desktop.1, desktop.3)?,
         ));
     }
+    let &(last_x, last_y) = points.last()?;
+    let release = DragEvent::LeftUp(
+        axis(last_x, desktop.0, desktop.2)?,
+        axis(last_y, desktop.1, desktop.3)?,
+    );
     let mut events = Vec::with_capacity(points.len() + 2);
     let mut moves = moves.into_iter();
     events.push(moves.next()?);
     events.push(DragEvent::LeftDown);
     events.extend(moves);
-    events.push(DragEvent::LeftUp);
+    events.push(release);
     Some(events)
 }
 
@@ -515,7 +520,7 @@ mod native {
         let inputs: Vec<_> = events
             .into_iter()
             .map(|event| match event {
-                DragEvent::Move(x, y) => INPUT {
+                DragEvent::Move(x, y) | DragEvent::LeftUp(x, y) => INPUT {
                     r#type: INPUT_MOUSE,
                     Anonymous: INPUT_0 {
                         mi: MOUSEINPUT {
@@ -524,13 +529,17 @@ mod native {
                             dwFlags: MOUSEEVENTF_MOVE
                                 | MOUSEEVENTF_ABSOLUTE
                                 | MOUSEEVENTF_VIRTUALDESK
-                                | MOUSEEVENTF_MOVE_NOCOALESCE,
+                                | MOUSEEVENTF_MOVE_NOCOALESCE
+                                | if matches!(event, DragEvent::LeftUp(..)) {
+                                    MOUSEEVENTF_LEFTUP
+                                } else {
+                                    MOUSE_EVENT_FLAGS(0)
+                                },
                             ..Default::default()
                         },
                     },
                 },
                 DragEvent::LeftDown => mouse(MOUSEEVENTF_LEFTDOWN, 0),
-                DragEvent::LeftUp => mouse(MOUSEEVENTF_LEFTUP, 0),
             })
             .collect();
         guard_point(args, points[0].0, points[0].1)?;
@@ -670,7 +679,7 @@ mod tests {
                 LeftDown,
                 Move(32767, 32767),
                 Move(65535, 65535),
-                LeftUp,
+                LeftUp(65535, 65535),
             ])
         );
     }
@@ -680,7 +689,12 @@ mod tests {
         use DragEvent::{LeftDown, LeftUp, Move};
         assert_eq!(
             drag_events(&[(-1920, -1080), (1919, 1079)], (-1920, -1080, 3840, 2160)),
-            Some(vec![Move(0, 0), LeftDown, Move(65535, 65535), LeftUp])
+            Some(vec![
+                Move(0, 0),
+                LeftDown,
+                Move(65535, 65535),
+                LeftUp(65535, 65535)
+            ])
         );
         assert!(drag_events(&[(0, 0), (1, 1)], (0, 0, 2, 2)).is_some());
     }

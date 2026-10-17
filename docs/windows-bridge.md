@@ -186,3 +186,15 @@ Unknown delivery still stops subsequent actions and requires reconciliation;
 diagnostics never authorize retry or automatic recovery.
 
 During read-only UIA extraction, a cached `IsValuePatternAvailable=false` suppresses an unnecessary live ValuePattern lookup. Missing or unsupported cached metadata preserves the original live lookup. The diagnostic `cachedUnavailableValuePatternSkips` counts actual skipped lookups for retained visible nodes. Values and read-only state for supported patterns still come from the live provider; action resolution and foreground guards are unchanged. This count alone does not establish an end-to-end speed improvement.
+
+## Sparse window captures
+
+A near-uniform `PrintWindow` image triggers the existing guarded screen fallback.
+That suspicion threshold does not prove the screen image is blank: a fullscreen
+PowerPoint title slide can have more than 97% background pixels and still contain
+readable text. After the screen read passes the exact foreground, PID/thread and
+geometry checks, a valid OS client rectangle is rejected only when its pixels
+occupy one quantized color bucket. Non-client decorations cannot rescue a blank
+client. Unavailable client geometry retains the conservative whole-image rule.
+This changes capture classification, not window activation or physical-input
+permission.

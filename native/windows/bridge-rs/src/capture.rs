@@ -240,6 +240,24 @@ fn is_effectively_blank_bgra(bits: &[u8]) -> bool {
     total > 0 && dominant * 100 >= total * 97
 }
 
+#[cfg(any(windows, test))]
+fn screen_capture_has_content(
+    bits: &[u8],
+    width: usize,
+    height: usize,
+    client_region: Option<(usize, usize, usize, usize)>,
+) -> bool {
+    // The 97% rule is a reason to distrust PrintWindow and try the screen,
+    // not proof that a validated screen read is empty. Sparse title slides
+    // legitimately exceed it. Exclude non-client chrome and reject a uniform
+    // client, retaining the conservative whole-image rule if its bounds fail.
+    match client_region.and_then(|region| dominant_client_counts_bgra(bits, width, height, region))
+    {
+        Some(counts) => !client_pixels_are_uniform(counts),
+        None => !is_effectively_blank_bgra(bits),
+    }
+}
+
 #[cfg(windows)]
 fn screenshot_impl(
     store: &mut RefStore,
@@ -544,7 +562,15 @@ unsafe fn gdi_capture_to_base64(
             fallback_gate =
                 Some(json!({"before":gate,"after":after,"geometryMatches":geometry_matches}));
         }
-        fallback_result = Some(screen_read_ok && !is_effectively_blank_bgra(&bits));
+        fallback_result = Some(
+            screen_read_ok
+                && screen_capture_has_content(
+                    &bits,
+                    width as usize,
+                    height as usize,
+                    print_client_region,
+                ),
+        );
         if !screen_dc.is_invalid() {
             ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
         }
@@ -746,6 +772,12 @@ mod unit_tests {
         );
         assert!(client_pixels_are_uniform((552000, 552000)));
         assert!(!client_pixels_are_uniform((0, 0)));
+        assert!(!screen_capture_has_content(
+            &pixels,
+            width,
+            height,
+            Some((8, 0, 920, 600))
+        ));
         // Even one visible text pixel must not be erased by the client-only rule.
         pixels[(8 * width + 20) * 4..(8 * width + 20) * 4 + 3].fill(24);
         let sparse = dominant_client_counts_bgra(&pixels, width, height, (8, 0, 920, 600)).unwrap();
@@ -776,6 +808,48 @@ mod unit_tests {
             dominant_client_counts_bgra(&pixels[..10], width, height, (8, 0, 920, 600)),
             None
         );
+    }
+
+    #[test]
+    fn screen_capture_preserves_sparse_slide_text_above_printwindow_threshold() {
+        let (width, height) = (1000usize, 600usize);
+        let mut pixels = [255, 255, 255, 0].repeat(width * height);
+        for y in 200..220 {
+            for x in 250..750 {
+                pixels[(y * width + x) * 4..(y * width + x) * 4 + 3].fill(0);
+            }
+        }
+        assert!(is_effectively_blank_bgra(&pixels));
+        assert!(screen_capture_has_content(
+            &pixels,
+            width,
+            height,
+            Some((0, 0, width, height))
+        ));
+        // Without valid client geometry, keep the old conservative decision.
+        assert!(!screen_capture_has_content(&pixels, width, height, None));
+        assert!(!screen_capture_has_content(
+            &pixels,
+            width,
+            height,
+            Some((1, 0, width, height))
+        ));
+    }
+
+    #[test]
+    fn screen_capture_rejects_uniform_clients_with_quantized_noise() {
+        for color in [0u8, 248] {
+            let mut pixels = [color, color, color, 0].repeat(100 * 80);
+            for (i, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+                pixel[0] += (i % 8) as u8;
+            }
+            assert!(!screen_capture_has_content(
+                &pixels,
+                100,
+                80,
+                Some((0, 0, 100, 80))
+            ));
+        }
     }
 
     #[test]

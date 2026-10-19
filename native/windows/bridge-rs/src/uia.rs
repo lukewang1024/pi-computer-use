@@ -1129,12 +1129,21 @@ mod native {
         unsafe { element.SetFocus() }.map_err(|e| format!("Keyboard editor SetFocus: {e}"))?;
         // SetFocus returning successfully is not proof. A sibling, owner,
         // document ancestor, or same-process floating window must be rejected.
-        let focused = unsafe { uia.GetFocusedElement() }
-            .map_err(|e| format!("Read keyboard focus: {e}"))?;
-        if !super::exact_keyboard_focus(&target_id, &runtime_id(&focused).unwrap_or_default()) {
-            return Err("Windows did not focus the exact keyboard editor; no physical input was sent".to_owned());
-        }
-        Ok(())
+        // Chromium may acknowledge SetFocus before its UIA provider publishes
+        // the focused element. Observe that transition without sending another
+        // focus request or any key. The identity requirement remains exact.
+        let started = std::time::Instant::now();
+        let budget = std::time::Duration::from_millis(500);
+        super::wait_for_exact_keyboard_focus(
+            &target_id,
+            || {
+                let focused = unsafe { uia.GetFocusedElement() }
+                    .map_err(|e| format!("Read keyboard focus: {e}"))?;
+                Ok(runtime_id(&focused).unwrap_or_default())
+            },
+            || started.elapsed() < budget,
+            || std::thread::sleep(std::time::Duration::from_millis(10)),
+        )
     }
 
     pub fn scroll(
@@ -1554,6 +1563,25 @@ pub fn occlusion_ok(
     Err("UIA is only supported on Windows".to_owned())
 }
 
+// Poll only after one successful SetFocus request. Neither a provider
+// acknowledgement nor an intermediate sibling focus authorizes a physical key.
+#[cfg(any(windows, test))]
+fn wait_for_exact_keyboard_focus(
+    target: &[i32],
+    mut read_focus: impl FnMut() -> Result<Vec<i32>, String>,
+    mut within_budget: impl FnMut() -> bool,
+    mut pause: impl FnMut(),
+) -> Result<(), String> {
+    let mut observed = Vec::new();
+    while within_budget() {
+        observed = read_focus()?;
+        if !within_budget() { break; }
+        if exact_keyboard_focus(target, &observed) { return Ok(()); }
+        pause();
+    }
+    Err(format!("Windows did not focus the exact keyboard editor within 500ms; no physical input was sent (targetRuntimeId={target:?}, focusedRuntimeId={observed:?})"))
+}
+
 pub fn exact_keyboard_focus(target: &[i32], focused: &[i32]) -> bool {
     !target.is_empty() && target == focused
 }
@@ -1576,6 +1604,33 @@ mod unit_tests {
             assert!(!super::exact_keyboard_focus(&[42, 1, 9], &focused));
         }
         assert!(!super::exact_keyboard_focus(&[], &[]));
+    }
+
+    #[test]
+    fn keyboard_focus_waits_for_provider_transition_without_refocusing() {
+        let mut reads = 0;
+        let mut pauses = 0;
+        let result = super::wait_for_exact_keyboard_focus(&[42, 1, 9], || {
+            reads += 1;
+            Ok(if reads < 3 { vec![42, 1, 8] } else { vec![42, 1, 9] })
+        }, || true, || pauses += 1);
+        assert!(result.is_ok());
+        assert_eq!((reads, pauses), (3, 2));
+    }
+
+    #[test]
+    fn keyboard_focus_rejects_wrong_or_late_focus_and_provider_errors() {
+        for focused in [vec![], vec![42, 1], vec![42, 1, 8], vec![42, 1, 9, 3]] {
+            let mut checks = 0;
+            let result = super::wait_for_exact_keyboard_focus(&[42, 1, 9],
+                || Ok(focused.clone()), || { checks += 1; checks < 5 }, || {});
+            assert!(result.unwrap_err().contains("no physical input was sent"));
+        }
+        let mut checks = 0;
+        assert!(super::wait_for_exact_keyboard_focus(&[42, 1, 9],
+            || Ok(vec![42, 1, 9]), || { checks += 1; checks == 1 }, || {}).is_err());
+        assert_eq!(super::wait_for_exact_keyboard_focus(&[42, 1, 9],
+            || Err("provider unavailable".to_owned()), || true, || {}).unwrap_err(), "provider unavailable");
     }
 
     #[cfg(not(windows))]

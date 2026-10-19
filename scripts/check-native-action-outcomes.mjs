@@ -169,6 +169,19 @@ try{
  assert.deepEqual(mixedSummary.details.execution.steps.map(s=>s.backgroundFirst),[false,currentPlatformBackend.name!=='macos']);
  assert.equal(mixedSummary.details.execution.backgroundFirst,false,'Mixed summary reports its first step; later delivery stays in per-step traces');
  assert.equal(calls.length,2);
+ // Public Windows coordinate path must make one guarded foreground request.
+ currentPlatformBackend.name='windows';
+ for (const action of [{action:'typeText',x:0,y:0,text:'中文 é 👩‍💻'},{action:'scroll',x:0,y:0,scrollY:120}]) {
+  outcome='unknown';calls=[];
+  const found=await call('find_roots',{text:root.title});
+  const state=await call('observe_ui',{root:found.details.windows[0].windowRef,mode:'visual'});
+  const result=await call('act_ui',{stateId:state.details.capture.stateId,actions:[action,{action:'click',x:0,y:0}],observationMode:'semantic'});
+  assert.equal(calls.length,1,'Unknown first action stops batch without retry or next input');
+  assert.equal(calls[0].policy,'foreground');
+  assert.equal(calls[0].params.delivery,'hid');
+  assert.equal(result.details.execution.backgroundFirst,false);
+  assert.equal(result.details.execution.outcome,'unknown');
+ }
  // Exercise the public Mac executor, not just a prepared-action flag.
  currentPlatformBackend.name='macos';
  for (const refusedOrUnknown of ['didnt','unknown']) {

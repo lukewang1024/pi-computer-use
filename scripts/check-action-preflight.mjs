@@ -153,3 +153,19 @@ for (const action of [{action:'typeText',ref:'@e1',text:'native'}, {action:'keyp
  assert.equal(canRetryInForeground(prepared,'unknown',false),false);
 }
 assert.equal(preflightActionSequence([{action:'setText',ref:'@e1',text:'native'}],false,{...env,platform:'macos'})[0].needsForeground,false);
+
+// Coordinate-only Windows operations have no background implementation.
+for (const action of [
+ {action:'typeText',x:20,y:30,text:'中文 é 👩‍💻'},
+ {action:'scroll',x:20,y:30,scrollY:120},
+]) {
+ const prepared=preflightActionSequence([action],false,env)[0];
+ assert.equal(prepared.needsForeground,true);
+ assert.equal(canRetryInForeground(prepared,'unknown',false),false);
+ assert.equal(preflightActionSequence([action],false,{...env,headless:true})[0].needsForeground,false);
+ assert.equal(preflightActionSequence([action],false,{...env,platform:'linux'})[0].needsForeground,false);
+ assert.throws(()=>preflightActionSequence([{...action,x:100}],false,env),/Invalid point/);
+}
+assert.equal(preflightActionSequence([{action:'setText',ref:'@e1',text:'semantic'}],false,env)[0].needsForeground,false);
+assert.equal(preflightActionSequence([{action:'scroll',ref:'@e1',scrollY:120}],false,env)[0].needsForeground,false);
+console.log('Windows coordinate typing/scrolling select foreground; semantic/headless and no-replay boundaries preserved');

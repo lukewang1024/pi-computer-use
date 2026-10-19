@@ -120,7 +120,7 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 		return await windowsHelper.command<PlatformFocusWindowResult>("focusWindow", { ...target }, { signal });
 	},
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
-		return parseLookResponse(await windowsHelper.command("look", { ...request.target, baseLookId: request.baseLookId, maxDimension: request.maxDimension, readText: request.readText, scopeRef: request.scopeRef, includeImage: request.includeImage, ...(request.includeElements === undefined ? {} : { includeElements: request.includeElements }), allowImageFailure: request.allowImageFailure }, options));
+		return parseLookResponse(await windowsHelper.command("look", { ...request.target, baseLookId: request.baseLookId, afterLookId: request.afterLookId, afterPoint: request.afterPoint, maxDimension: request.maxDimension, readText: request.readText, scopeRef: request.scopeRef, includeImage: request.includeImage, ...(request.includeElements === undefined ? {} : { includeElements: request.includeElements }), allowImageFailure: request.allowImageFailure }, options));
 	},
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
 		if (request.action === "moveMouse" && request.params.pointerMode !== "physical") {

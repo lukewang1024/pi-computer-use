@@ -315,6 +315,13 @@ pub fn response_with_delta(mut response: Value, source: &str, delta: Vec<Value>)
         response["performed"] = json!({});
     }
     response["performed"]["deltaSource"] = json!(source);
+    // This observation enumerates native roots/events, not editor content or
+    // compositor frames. Never advertise it as application render readiness.
+    response["performed"]["deltaObservation"] = json!({
+        "scope": "roots",
+        "contentChecked": false,
+        "renderChecked": false
+    });
     if !delta.is_empty() {
         response["rootDelta"] = Value::Array(delta);
     }
@@ -1267,7 +1274,25 @@ mod tests {
             vec![json!({"change":"focused","kind":"window","pid":1})],
         );
         assert_eq!(out["performed"]["deltaSource"], "snapshot");
+        assert_eq!(out["performed"]["deltaObservation"]["scope"], "roots");
+        assert_eq!(out["performed"]["deltaObservation"]["contentChecked"], false);
+        assert_eq!(out["performed"]["deltaObservation"]["renderChecked"], false);
         assert_eq!(out["rootDelta"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn root_observation_does_not_promote_unknown_effect_or_require_a_delta() {
+        for source in ["snapshot", "win-poll", "win-event+snapshot"] {
+            let out = response_with_delta(
+                json!({"outcome":"unknown","performed":{"delivery":"hid"}}),
+                source,
+                vec![],
+            );
+            assert_eq!(out["outcome"], "unknown");
+            assert_eq!(out["performed"]["delivery"], "hid");
+            assert_eq!(out["performed"]["deltaObservation"]["renderChecked"], false);
+            assert!(out.get("rootDelta").is_none());
+        }
     }
 
     #[test]

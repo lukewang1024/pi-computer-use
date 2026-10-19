@@ -119,5 +119,20 @@ try{
   assert.equal(result.details.outline.root.children.length,0);
   assert(result.content.some(c=>c.type==='image'));
  }
+ // Windows visual follow-up is part of the one successor read, not input replay.
+ currentPlatformBackend.name='windows';
+ for(const status of ['change_observed','unchanged_at_limit','incomparable']){
+  const base=await call(executeObserve,{root:ref,mode:'pixels'});
+  const nativeLookId='pixel-look-'+looks;
+  captureDiagnostics.visualFollowup={status,samples:4,effectVerified:false,renderReadyVerified:false};
+  requests=[];const before=acts;
+  const result=await call(executeAct,{stateId:base.details.capture.stateId,observationMode:'pixels',actions:[{action:'typeText',x:0,y:0,text:'中文'}]});
+  assert.equal(acts,before+1,'Visual observation must not replay typing');
+  assert.equal(requests.length,1,'Native probes stay inside the one native successor operation');
+  assert.equal(requests[0].afterLookId,nativeLookId,'Native baseline must be the input-owning look');
+  assert.equal(result.details.captureDiagnostics.visualFollowup.status,status);
+  assert.equal(result.details.execution.outcome,'unknown','Visual change does not establish text correctness');
+ }
+ delete captureDiagnostics.visualFollowup;
  console.log('Windows and macOS pixel-only contract checks passed (controlled backend; no native performance claim)');
 }finally{await shutdownComputerUseSession();Object.assign(currentPlatformBackend,original);}

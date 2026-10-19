@@ -483,8 +483,9 @@ function executionTrace(
 }
 
 function settleMsForExecution(execution: ExecutionTrace): number {
-	// Any deltaSource means the helper already awaited UI quiescence; the
-	// bridge must not double-pay with its own settle sleep.
+	// A deltaSource means the helper already ran its platform observation wait.
+	// Windows checks roots/events only; this is not editor or paint readiness.
+	// Avoid a duplicate fixed sleep without promoting that evidence to readiness.
 	if (execution.performed?.deltaSource) return 0;
 	if (execution.variant === "stealth") {
 		switch (execution.strategy) {
@@ -1092,13 +1093,15 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean; includeElements?: boolean; focusContext?: boolean; applicationMenu?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; afterLookId?: string; afterPoint?: { x: number; y: number }; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean; allowImageFailure?: boolean; includeElements?: boolean; focusContext?: boolean; applicationMenu?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
 	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find_roots and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
 		...(options.focusContext === true ? { focusContext: true } : {}),
 		...(options.applicationMenu === true ? { applicationMenu: true } : {}),
 		baseLookId: options.baseLookId,
+		afterLookId: options.afterLookId,
+		afterPoint: options.afterPoint,
 		readText: options.readText,
 		scopeRef: options.scopeRef,
 		maxDimension: options.maxDimension,
@@ -1121,13 +1124,13 @@ function isPixelOnlyLook(look: LookResponse): boolean {
 	return look.elementCollection?.reason === "pixel_only_observation" || (look.uiaDiagnostics?.status === "skipped" && look.uiaDiagnostics?.reason === "pixel_only_observation");
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean, focusContext = false, applicationMenu = false): Promise<CaptureResult> {
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true, allowImageFailure = false, includeElements?: boolean, focusContext = false, applicationMenu = false, afterLookId?: string, afterPoint?: { x: number; y: number }): Promise<CaptureResult> {
 	const state = operationState();
 	const baseOutline = state.currentOutline;
 	const baseTarget = state.currentTarget;
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements, focusContext, applicationMenu }, signal);
+	const look = await performLook(target, { maxDimension, readText, includeImage, allowImageFailure, includeElements, focusContext, applicationMenu, afterLookId, afterPoint }, signal);
 	if (applicationMenu && look.applicationMenuIncluded !== true) throw new Error("Native helper did not verify application menu observation.");
 	if (includeElements === false && (!isPixelOnlyLook(look) || !look.image)) {
 		throw new Error("Native helper did not confirm pixel-only capture; no state was adopted.");
@@ -2529,7 +2532,11 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			} else {
 				await sleep(settleMsForExecution(execution), signal);
 			}
-			const capture = await captureCurrentTarget(signal, pixelSuccessor || semanticSuccessor ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, !semanticSuccessor, false, pixelSuccessor ? false : undefined);
+			const visualType = currentPlatformBackend.name === "windows" && !semanticSuccessor && !condition
+				? executedActions.find(action => action.action === "typeText" && action.x !== undefined && action.y !== undefined) : undefined;
+			const visualPoint = visualType?.x !== undefined && visualType.y !== undefined ? { x: visualType.x, y: visualType.y } : undefined;
+			const capture = await captureCurrentTarget(signal, pixelSuccessor || semanticSuccessor ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, !semanticSuccessor, false, pixelSuccessor ? false : undefined, false, false,
+				visualPoint ? look.lookId : undefined, visualPoint);
 			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });

@@ -4,6 +4,7 @@
 //! between the TypeScript host and the Rust helper binary.
 
 pub mod capture;
+pub mod visual_change;
 pub mod error;
 pub mod input;
 pub mod pointer_motion;

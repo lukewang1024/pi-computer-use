@@ -127,6 +127,21 @@ the original capture policy. Missing helper confirmation or image after input
 returns terminal evidence without an actionable successor and never replays
 input. Linux and browser contexts reject this option before dispatch.
 
+On Windows, an image-bearing successor after coordinate `typeText` without a semantic
+`expect` also performs a bounded native visual follow-up against the input's
+saved look, comparing a band around the input point (native radii 768 × 96
+points). Changes elsewhere, including the toolbar, do not trigger it. It samples at most six frames with a 2500 ms soft deadline (an
+in-flight capture may finish later). Geometry must match; both samples' visible
+synthetic cursor footprints and small changes are excluded. UIA is extracted
+once after the final frame when requested. `captureDiagnostics.visualFollowup`
+reports `change_observed`, `unchanged_at_limit`, `incomparable`, or `unavailable`.
+These are heuristic visual observations, not editor acknowledgements: a caret
+or unrelated UI change can still affect pixels, and short edits can remain below
+the threshold. Neither text fidelity nor render completion is established, and
+the action is never replayed. Use independent text/file checks for correctness.
+Native `performed.deltaObservation` separately identifies Windows root/event
+checks as `scope: "roots"`, with content and render checks explicitly false.
+
 For browser CDP actions with `expect`, the snapshot that satisfies the condition
 is returned as the successor state. It is collected after input within the same
 resource write epoch; the bridge does not collect another full accessibility

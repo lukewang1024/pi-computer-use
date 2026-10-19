@@ -113,6 +113,8 @@ export interface HelperActPerformed {
 	refound?: boolean;
 	/** Free-form diagnostic naming the platform's delta mechanism. */
 	deltaSource?: string;
+	/** Window-root/event checks do not establish editor content or paint readiness. */
+	deltaObservation?: { scope: "roots"; contentChecked: false; renderChecked: false };
 	selectionGrounding?: "ax" | "keyboard";
 	transaction?: boolean;
 	actionCount?: number;
@@ -165,6 +167,9 @@ export interface PlatformTarget {
 }
 
 export interface PlatformObserveRequest {
+	/** Native read-only visual follow-up against a same-root saved look. */
+	afterLookId?: string;
+	afterPoint?: { x: number; y: number };
 	target: PlatformTarget;
 	focusContext?: boolean;
 	applicationMenu?: boolean;

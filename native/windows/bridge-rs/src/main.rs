@@ -44,6 +44,7 @@ struct LookRecord {
     image_w: f64,
     image_h: f64,
     has_image: bool,
+    visual_sample: Option<windows_bridge::visual_change::VisualSample>,
     elements: HashMap<String, ElementRecord>,
 }
 
@@ -453,6 +454,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
         .get("allowImageFailure")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let mut visual_sample = None;
     let mut image_error = None;
     let mut image_payload = None;
     let mut capture_stage_timings = None;
@@ -465,12 +467,67 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
     if !is_outline_only {
         let wref = windows_bridge::refs::WindowRef::parse(&root_ref)
             .ok_or_else(|| invalid(format!("Invalid root ref '{root_ref}'")))?;
-        let shot = match capture::screenshot(
-            &mut store,
-            &wref,
-            scope_ref.is_none() && include_elements,
-            max_dimension,
-        ) {
+        let mut visual_anchor = None;
+        let baseline = if let Some(id) = args.get("afterLookId").and_then(Value::as_str) {
+            let state = helper_state().lock().map_err(|_| internal("helper state lock poisoned"))?;
+            let prior = state.looks.get(id).ok_or_else(|| invalid("Visual baseline look is stale"))?;
+            if prior.hwnd != root.get("windowId").and_then(Value::as_i64).unwrap_or(0) as isize
+                || prior.pid != root.get("pid").and_then(Value::as_u64).unwrap_or(0) {
+                return Err(invalid("Visual baseline belongs to another root"));
+            }
+            let point = args.get("afterPoint").ok_or_else(|| invalid("Visual follow-up requires an input point"))?;
+            let x = point.get("x").and_then(Value::as_f64).ok_or_else(|| invalid("Visual input point requires x"))?;
+            let y = point.get("y").and_then(Value::as_f64).ok_or_else(|| invalid("Visual input point requires y"))?;
+            if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || x >= prior.image_w || y >= prior.image_h {
+                return Err(invalid("Visual input point is outside the baseline image"));
+            }
+            let screen = screen_point(prior, x, y);
+            visual_anchor = Some((screen["x"].as_f64().unwrap_or(0.0),screen["y"].as_f64().unwrap_or(0.0)));
+            prior.visual_sample.clone()
+        } else { None };
+        let followup_started = Instant::now();
+        let mut samples = 0;
+        let mut visual_status = "unavailable";
+        let mut shot = loop {
+            samples += 1;
+            let cursor_before = windows_bridge::agent_cursor::status();
+            let shot = capture::screenshot(
+                &mut store, &wref,
+                baseline.is_none() && scope_ref.is_none() && include_elements,
+                max_dimension,
+            );
+            let Ok(ref value) = shot else {
+                visual_sample = None;
+                break shot;
+            };
+            // A cursor may expire while GDI captures/encodes the frame. Keep
+            // the pre-capture footprint rather than trusting only its later state.
+            let cursor_after = windows_bridge::agent_cursor::status();
+            let cursor = if cursor_before["visible"] == true { &cursor_before } else { &cursor_after };
+            visual_sample = windows_bridge::visual_change::VisualSample::from_shot(value, cursor);
+            let Some(before) = baseline.as_ref() else { break shot; };
+            if let Some(status) = windows_bridge::visual_change::followup_status(
+                visual_sample.as_ref().and_then(|after| after.changed_near(before, visual_anchor)),
+                samples, followup_started.elapsed().as_millis(),
+            ) {
+                visual_status = status;
+                break shot;
+            }
+            sleep(Duration::from_millis(80));
+        };
+        if args.get("afterLookId").is_some() {
+            if let Ok(ref mut value) = shot {
+                value["captureDiagnostics"]["visualFollowup"] = json!({
+                    "status":visual_status,"samples":samples,
+                    "elapsedMs":followup_started.elapsed().as_millis(),
+                    "maxSamples":windows_bridge::visual_change::MAX_SAMPLES,
+                    "softDeadlineMs":windows_bridge::visual_change::SOFT_DEADLINE_MS,
+                    "scope":"input_point_band","verticalRadiusPoints":96,"horizontalRadiusPoints":768,
+                    "effectVerified":false,"renderReadyVerified":false
+                });
+            }
+        }
+        let shot = match shot {
             Ok(shot) => shot,
             Err(error) if optional_capture_failure(allow_image_failure, error.code) => {
                 image_error = Some(error.to_string());
@@ -495,6 +552,13 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        // Pixel probes are read-only; extract UIA once, from the final capture.
+        #[cfg(windows)]
+        if baseline.is_some() && scope_ref.is_none() && include_elements {
+            if let Some(native) = store.get_window(&wref) {
+                elements = windows_bridge::uia::extract_elements(&mut store, native.raw());
+            }
+        }
     } else if scope_ref.is_none() && include_elements {
         // A scoped semantic look resolves and extracts its exact subtree below.
         // Enumerating the whole window here would discard that expensive result
@@ -605,6 +669,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
             .as_ref()
             .map(|look| look.has_image)
             .unwrap_or_else(|| image_payload.is_some()),
+        visual_sample,
         elements: element_records,
     };
     store_look_record(look_id.clone(), record)?;
@@ -2221,6 +2286,7 @@ mod tests {
             image_w: 100.0,
             image_h: 100.0,
             has_image: false,
+            visual_sample: None,
             elements: HashMap::from([(
                 "same-ref".to_owned(),
                 ElementRecord {

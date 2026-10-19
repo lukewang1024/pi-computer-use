@@ -1312,7 +1312,10 @@ fn act_on_ref(
     }
     windows_bridge::action_trace::phase("target_action_started");
     match parsed.action.as_str() {
-        "typeText" if element.can_set_value && !element.is_secure && !is_web_backed(&element) => {
+        // An editable ref grounds keyboard delivery in that editor, including
+        // Chromium controls. A fresh value/snapshot and foreground HWND alone
+        // do not establish which element will receive Enter or typed text.
+        "typeText" | "keypress" if element.can_set_value && !element.is_secure => {
             input::policy_allows_raw_input(parsed)?;
             with_physical_input(|| {
                 window::ensure_foreground(element.hwnd, record.pid)?;
@@ -2239,14 +2242,20 @@ mod tests {
     }
 
     #[test]
-    fn native_editor_typing_does_not_promote_background_policy_to_physical_input() {
-        let record = look_with_element(1.0);
-        for (policy, expected) in [("ax_only", ErrorCode::CoordinateBlocked),
-                                   ("default", ErrorCode::ForegroundRequired)] {
-            let action = json!({"lookId":"look-a","action":"typeText","policy":policy,
-                "target":{"ref":"same-ref"},"params":{"text":"owned fixture"}});
-            let parsed = input::parse_act_request(&action).unwrap();
-            assert_eq!(act_on_ref(&action, &parsed, &record, "same-ref").unwrap_err().code, expected);
+    fn explicit_editor_keyboard_never_promotes_background_policy_to_hid() {
+        for class in ["Edit", "ud__native-input Chrome_WidgetWin_1"] {
+            let mut record = look_with_element(1.0);
+            record.elements.get_mut("same-ref").unwrap().class_name = class.to_owned();
+            for operation in ["typeText", "keypress"] {
+                for (policy, expected) in [("ax_only", ErrorCode::CoordinateBlocked),
+                                           ("default", ErrorCode::ForegroundRequired)] {
+                    let action = json!({"lookId":"look-a","action":operation,"policy":policy,
+                        "target":{"ref":"same-ref"},"params":{"text":"owned fixture", "keys":["ENTER"]}});
+                    let parsed = input::parse_act_request(&action).unwrap();
+                    assert_eq!(act_on_ref(&action, &parsed, &record, "same-ref").unwrap_err().code, expected,
+                        "{class} {operation} {policy}");
+                }
+            }
         }
     }
 

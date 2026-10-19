@@ -289,7 +289,9 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 		case "click": return { action: operation, target, params: { button: mouseButton(action.button), clickCount: clickCount(action.clickCount), ...(!env.image && env.platform === "macos" && "ref" in target && env.node(action.ref!).isTextInput ? { nativeFocusOnly: true } : {}) }, establishesFocus, usesCurrentFocus: false, needsForeground };
 		case "setText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "typeText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus, needsForeground: windowsPointInput || (!env.headless && env.platform === "macos") };
-		case "keypress": return { action: operation, target, params: { keys: keys(action.keys, env.platform) }, establishesFocus: false, usesCurrentFocus, needsForeground: !env.headless && env.platform === "macos" };
+		// Windows keypress has no background implementation, even for an observed
+		// native window/editor ref. Keep exact native focus guards, skip only the refusal.
+		case "keypress": return { action: operation, target, params: { keys: keys(action.keys, env.platform) }, establishesFocus: false, usesCurrentFocus, needsForeground: !env.headless && (env.platform === "macos" || env.platform === "windows") };
 		case "scroll": return { action: operation, target, params: { scrollX: scrollDelta(action.scrollX), scrollY: scrollDelta(action.scrollY) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: windowsPointInput };
 		case "drag": return { action: operation, target, params: { path: path(action.path, env) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "moveMouse": return { action: operation, target, params: pointerMotion(action, env), establishesFocus: false, usesCurrentFocus: false, needsForeground: !env.headless && action.pointerMode === "physical" };

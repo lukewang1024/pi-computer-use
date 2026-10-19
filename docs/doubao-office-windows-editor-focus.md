@@ -58,3 +58,54 @@ this fixes the application. Previous W03 failures are retained.
 
 References: [KEYBDINPUT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput)
 and [MapVirtualKeyExW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw).
+
+
+## Recorded scan candidate outcomes (2026-10-20)
+
+Exact-source candidate 77093313 passed its Windows CI and isolated native/Edge
+probes: six down/up events carry the expected scan metadata; Edge reports trusted
+Home/ShiftLeft/ArrowRight codes. Scoped Sheet Enter/save/undo/redo and PPT
+notes/save/slideshow Left/Right/Esc regressions passed with independent persisted
+content checks and original recordings. These results do not establish overall
+Office acceptance or a performance improvement.
+
+Doubao Word Home/Shift+Right still selected the wrong range in independent plain
+and image fixtures. Separate Ctrl+Home controls also failed to establish the
+expected first-character range. Formatting was withheld on wrong/uncertain
+selections, and the saved control files remained byte-identical to their sources.
+The plain and image Ctrl+Home recordings are 246.5 and 53.6 seconds; both fully
+decoded. Native window cleanup and session completion were checked.
+
+Grounding must be read from the input state, not the pixel-only successor. The
+image control's original pre-keypress fused roots both had public @e1,
+wireRef=@w21 and pictureOnly=false. actions.ts therefore maps these keypresses to
+the synthetic native window reference, and main.rs uses its direct window branch.
+The later pictureOnly successor does not imply a coordinate fallback for the
+preceding keypress. A separate @w-vs-@e trial would not isolate that proposed
+variable in these records.
+
+A subsequent prospective click/Ctrl+Home/Shift+Right batch stopped after its
+unverified click (actionCount=1, stoppedAt=0). Neither keypress was dispatched.
+bridge.ts dispatchUiTransaction stops whenever step.outcome is not worked.
+This trial establishes a batch limitation, not a Word keyboard failure or a
+safe reason to weaken stop rules. Preserve unknown outcomes and avoid replay.
+
+Further diagnosis should establish actual editor focus and event handling before
+changing delivery or claiming W03 fixed. Scan metadata repair alone is insufficient.
+
+
+## Direct foreground keypress routing candidate (2026-10-20)
+
+Seven recorded window-ref keypresses in the visible-range control each show a
+background foreground_required refusal before foreground delivery. Windows input.rs
+rejects raw keypress for every non-foreground policy, including semantic editor and
+synthetic window refs. The action planner now requests foreground directly for
+non-headless Windows keypress, as it already does for macOS keypress. Linux and
+strict headless retain their existing policy; native exact-window/editor focus,
+key encoding, outcome verification and unknown-no-replay rules are unchanged.
+
+Preflight coverage preserves exact window/editor target refs, key preparation,
+strict-headless policy and unknown-result no-retry behavior. Native input is not
+sent by these tests. Recorded three-app regression and balanced workflow cost
+comparison remain required before a live improvement claim. This routing change
+does not repair Word Home selection or PPT U+0020/U+00A0 fidelity.

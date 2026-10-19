@@ -145,7 +145,7 @@ for (const action of [{action:'typeText',ref:'@e1',text:'native'}, {action:'keyp
  const prepared=preflightActionSequence([action],false,{...env,platform:'macos'})[0];
  assert.equal(prepared.needsForeground,true);
  for (const platform of ['windows','linux']) {
-  assert.equal(preflightActionSequence([action],false,{...env,platform})[0].needsForeground,false);
+  assert.equal(preflightActionSequence([action],false,{...env,platform})[0].needsForeground,platform==='windows' && action.action==='keypress');
  }
  assert.equal(preflightActionSequence([action],false,{...env,platform:'macos',headless:true})[0].needsForeground,false);
  assert.throws(()=>preflightActionSequence([{...action,ref:'@missing'}],false,{...env,platform:'macos'}),/Stale/);
@@ -169,3 +169,22 @@ for (const action of [
 assert.equal(preflightActionSequence([{action:'setText',ref:'@e1',text:'semantic'}],false,env)[0].needsForeground,false);
 assert.equal(preflightActionSequence([{action:'scroll',ref:'@e1',scrollY:120}],false,env)[0].needsForeground,false);
 console.log('Windows coordinate typing/scrolling select foreground; semantic/headless and no-replay boundaries preserved');
+
+// Windows native keypress is global input for both synthetic window and editor
+// refs. The exact target/keys and headless/no-replay boundaries must survive.
+for (const [role,wireRef,isTextInput] of [['Window','@w21',false],['textbox','native-text',true]]) {
+ const node={...text,role,wireRef,isTextInput,canSetValue:isTextInput};
+ const keyEnv={...env,node(ref){assert.equal(ref,'@e1');return node;}};
+ for (const keys of [['CTRL','S'],['HOME'],['SHIFT','RIGHT'],['ESC']]) {
+  const action={action:'keypress',ref:'@e1',keys};
+  const before=preflightActionSequence([action],false,keyEnv)[0];
+  assert.equal(before.needsForeground,true);
+  assert.deepEqual(before.target,{ref:wireRef});
+  assert.equal(before.establishesFocus,false);
+  assert.equal(canRetryInForeground(before,'unknown',false),false);
+  const strict=preflightActionSequence([action],false,{...keyEnv,headless:true})[0];
+  assert.equal(strict.needsForeground,false);
+  assert.deepEqual(strict.target,{ref:wireRef});
+ }
+}
+console.log('Windows window/editor keypress selects foreground without changing target, strict-headless, or unknown-outcome rules');

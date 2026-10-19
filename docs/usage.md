@@ -141,6 +141,10 @@ the threshold. Neither text fidelity nor render completion is established, and
 the action is never replayed. Use independent text/file checks for correctness.
 Native `performed.deltaObservation` separately identifies Windows root/event
 checks as `scope: "roots"`, with content and render checks explicitly false.
+The comparison sample is generated from the native source bitmap before output
+resizing, with its longest edge capped at 512 pixels. It stays inside the helper;
+changing the transported screenshot from 1600 to 900 pixels does not change this
+baseline. A move or resize of the actual source window remains incomparable.
 
 For browser CDP actions with `expect`, the snapshot that satisfies the condition
 is returned as the successor state. It is collected after input within the same

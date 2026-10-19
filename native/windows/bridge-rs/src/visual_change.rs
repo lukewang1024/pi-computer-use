@@ -30,18 +30,64 @@ pub struct VisualSample {
 }
 
 impl VisualSample {
+    /// Private sample from the native source bitmap, before output resizing.
+    pub fn source_value(
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        bounds: (i32, i32, i32, i32),
+    ) -> Option<Value> {
+        if width == 0
+            || height == 0
+            || (width as usize)
+                .checked_mul(height as usize)?
+                .checked_mul(4)?
+                != pixels.len()
+        {
+            return None;
+        }
+        let source = image::RgbaImage::from_raw(width, height, pixels.to_vec())?;
+        let scale = 512.0 / f64::from(width.max(height));
+        let (w, h) = if scale < 1.0 {
+            (
+                (f64::from(width) * scale).round().max(1.0) as u32,
+                (f64::from(height) * scale).round().max(1.0) as u32,
+            )
+        } else {
+            (width, height)
+        };
+        let resized = image::imageops::resize(&source, w, h, image::imageops::FilterType::Triangle);
+        Some(
+            serde_json::json!({"width":w,"height":h,"rgbaBase64":STANDARD.encode(resized.as_raw()),
+            "sourceBounds":{"x":bounds.0,"y":bounds.1,"width":bounds.2,"height":bounds.3}}),
+        )
+    }
+
     pub fn from_shot(shot: &Value, cursor: &Value) -> Option<Self> {
-        let c = shot.get("capture")?;
+        let private = shot.get("visualSource").filter(|value| value.is_object());
+        let c = private.or_else(|| shot.get("capture"))?;
         let width = u32::try_from(c.get("width")?.as_u64()?).ok()?;
         let height = u32::try_from(c.get("height")?.as_u64()?).ok()?;
         if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 4_000_000 {
             return None;
         }
-        let bytes = STANDARD.decode(c.get("imageBase64")?.as_str()?).ok()?;
-        let image = image::load_from_memory(&bytes).ok()?.into_rgba8();
-        if image.dimensions() != (width, height) {
-            return None;
-        }
+        let pixels = if private.is_some() {
+            if width > 512 || height > 512 {
+                return None;
+            }
+            let bytes = STANDARD.decode(c.get("rgbaBase64")?.as_str()?).ok()?;
+            if bytes.len() != (width as usize) * (height as usize) * 4 {
+                return None;
+            }
+            bytes
+        } else {
+            let bytes = STANDARD.decode(c.get("imageBase64")?.as_str()?).ok()?;
+            let image = image::load_from_memory(&bytes).ok()?.into_rgba8();
+            if image.dimensions() != (width, height) {
+                return None;
+            }
+            image.into_raw()
+        };
         let b = c.get("sourceBounds")?;
         let bounds = (
             i32::try_from(b.get("x")?.as_i64()?).ok()?,
@@ -63,7 +109,7 @@ impl VisualSample {
         Some(Self {
             width,
             height,
-            pixels: image.into_raw(),
+            pixels,
             bounds,
             cursor,
         })
@@ -198,5 +244,20 @@ mod tests {
         assert_eq!(b.changed_near(&a, Some((180.0, 150.0))), Some(false));
         ink(&mut b, 180, 140, 45, 8);
         assert_eq!(b.changed_near(&a, Some((180.0, 150.0))), Some(true));
+    }
+    #[test]
+    fn source_sample_does_not_depend_on_transport_image_dimensions() {
+        let a = blank();
+        let value = VisualSample::source_value(&a.pixels, a.width, a.height, a.bounds).unwrap();
+        let cursor = serde_json::json!({"visible":false});
+        let mut shot =
+            serde_json::json!({"visualSource":value,"capture":{"width":1600,"height":860}});
+        let before = VisualSample::from_shot(&shot, &cursor).unwrap();
+        shot["capture"] = serde_json::json!({"width":900,"height":484});
+        let after = VisualSample::from_shot(&shot, &cursor).unwrap();
+        assert_eq!(after.changed_from(&before), Some(false));
+        shot["visualSource"]["rgbaBase64"] = serde_json::json!("bad");
+        assert!(VisualSample::from_shot(&shot, &cursor).is_none());
+        assert!(VisualSample::source_value(&[], 320, 180, a.bounds).is_none());
     }
 }

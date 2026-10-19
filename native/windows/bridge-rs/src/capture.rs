@@ -353,7 +353,7 @@ fn screenshot_impl(
         captured =
             unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension, owner) };
     }
-    let (png_base64, output_width, output_height, captured_frame, capture_diagnostics) = captured?;
+    let (png_base64, output_width, output_height, captured_frame, capture_diagnostics, visual_source) = captured?;
     let image_capture_ms = image_started.elapsed().as_millis() as u64;
 
     let state_id = StateId::fresh("s");
@@ -373,6 +373,7 @@ fn screenshot_impl(
         },
         "warnings": warnings,
         "captureDiagnostics": capture_diagnostics,
+        "visualSource": visual_source,
     });
 
     // 5. Optionally extract UIA accessibility elements.
@@ -417,7 +418,7 @@ unsafe fn gdi_capture_to_base64(
     height: i32,
     max_dimension: Option<u32>,
     owner: CaptureFrame,
-) -> Result<(String, u32, u32, CaptureFrame, Value), ProtocolError> {
+) -> Result<(String, u32, u32, CaptureFrame, Value, Value), ProtocolError> {
     let before = read_capture_frame(hwnd).ok_or_else(|| {
         ProtocolError::new(
             "Capture target identity unavailable",
@@ -604,6 +605,8 @@ unsafe fn gdi_capture_to_base64(
 
     let source_width = width as u32;
     let source_height = height as u32;
+    let visual_source = crate::visual_change::VisualSample::source_value(
+        &bits, source_width, source_height, before.bounds).unwrap_or(Value::Null);
     let (output_width, output_height) = match max_dimension.filter(|limit| *limit > 0) {
         Some(limit) if source_width.max(source_height) > limit => {
             let scale = limit as f64 / source_width.max(source_height) as f64;
@@ -669,6 +672,7 @@ unsafe fn gdi_capture_to_base64(
             "screenFallbackValid": fallback_result,
             "foregroundGate": fallback_gate,
         }),
+        visual_source,
     ))
 }
 

@@ -8,8 +8,11 @@ import Foundation
 			precondition(Array(chunks.joined().unicodeScalars) == Array(text.unicodeScalars))
 			precondition(chunks.allSatisfy { !$0.isEmpty && $0.utf16.count <= 16 })
 		}
-		precondition(exactWordTextEvents("a\r\nb\nc\td") == [.unicode("a"), .key("enter"), .unicode("b"), .key("enter"), .unicode("c"), .key("tab"), .unicode("d")])
-		precondition(exactWordTextEvents("\r\r") == [.key("enter"), .key("enter")])
+		precondition(exactNativeTextEvents("a\r\nb\nc\td") == [.unicode("a"), .key("enter"), .unicode("b"), .key("enter"), .unicode("c"), .key("tab"), .unicode("d")])
+		precondition(exactNativeTextEvents("\r\r") == [.key("enter"), .key("enter")])
+		precondition(exactNativeTextEvents("\nMAC_CU_46 中文验收").first == .key("enter"), "A leading newline cannot become a Unicode payload")
+		precondition(exactNativeTextEvents("\tA\r\n\nB\r") == [.key("tab"), .unicode("A"), .key("enter"), .key("enter"), .unicode("B"), .key("enter")])
+		precondition(exactNativeTextEvents("\r\n") == [.key("enter")], "CRLF must not create two paragraphs")
 		var current = "ime"
 		var calls: [String] = []
 		let lease = try TextInputSourceLease(original: "ime", selected: "abc", current: { current }, select: { calls.append($0); current = $0; return true })

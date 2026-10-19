@@ -1,4 +1,24 @@
 // Shared by native AX observation and deterministic traversal regressions.
+// Deep web editors can exceed twenty parents. Require the exact ancestor,
+// keeping both a node bound and a clock budget; cycles never establish scope.
+func boundedAncestorMatches<Element>(
+    start: Element, ancestor: Element, maximumDepth: Int = 64,
+    parent: (Element) -> Element?, same: (Element, Element) -> Bool,
+    withinBudget: () -> Bool
+) -> Bool {
+    guard maximumDepth > 0 else { return false }
+    var current: Element? = start
+    var seen: [Element] = []
+    for depth in 0..<maximumDepth {
+        guard withinBudget(), let candidate = current else { return false }
+        if same(candidate, ancestor) { return true }
+        guard !seen.contains(where: { same($0, candidate) }) else { return false }
+        seen.append(candidate)
+        if depth + 1 < maximumDepth { current = parent(candidate) }
+    }
+    return false
+}
+
 func walkObservedOutline<Element, Node>(
     root: Element, node: Node, maxNodes: Int,
     identity: (Element) -> AnyHashable,

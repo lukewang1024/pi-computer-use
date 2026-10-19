@@ -16,6 +16,28 @@ final class Node {
 }
 @main struct Tests {
     static func main() {
+        var parentReads = 0
+        func ancestry(_ target: Int, depth: Int = 64) -> Bool {
+            boundedAncestorMatches(start: 0, ancestor: target, maximumDepth: depth,
+                parent: { parentReads += 1; return $0 < 80 ? $0 + 1 : nil },
+                same: { $0 == $1 }, withinBudget: { true })
+        }
+        precondition(ancestry(23), "Doubao's observed 24-node canvas chain must reach its exact window")
+        precondition(ancestry(63), "The last permitted node is still checked")
+        parentReads = 0
+        precondition(!ancestry(64) && parentReads == 63, "Do not read beyond the node budget")
+        precondition(!ancestry(-1), "Another window cannot establish ownership")
+        parentReads = 0
+        precondition(!boundedAncestorMatches(start: 0, ancestor: 9,
+            parent: { parentReads += 1; return 1 - $0 }, same: { $0 == $1 },
+            withinBudget: { true }) && parentReads == 2, "Cycles must terminate")
+        parentReads = 0
+        precondition(!boundedAncestorMatches(start: 0, ancestor: 0,
+            parent: { parentReads += 1; return $0 + 1 }, same: { $0 == $1 },
+            withinBudget: { false }) && parentReads == 0, "Expired scope cannot establish ownership")
+        precondition(!boundedAncestorMatches(start: 0, ancestor: 1,
+            parent: { _ in parentReads += 1; return 1 }, same: { $0 == $1 },
+            withinBudget: { parentReads == 0 }), "A parent read that exhausts the budget cannot authorize input")
         var availabilityReads = 0
         let denied = { availabilityReads += 1; return Optional(false) }
         precondition(observedAvailability(canPress: false, hasConfirm: false,

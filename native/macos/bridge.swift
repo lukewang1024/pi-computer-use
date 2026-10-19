@@ -3552,16 +3552,10 @@ final class Bridge {
 	}
 
 	private func isElement(_ element: AXUIElement, descendantOf ancestor: AXUIElement) -> Bool {
-		var current: AXUIElement? = element
-		var depth = 0
-		while let candidate = current, depth < 20 {
-			if sameElement(candidate, ancestor) {
-				return true
-			}
-			current = parentElement(candidate)
-			depth += 1
-		}
-		return false
+		let deadline = ProcessInfo.processInfo.systemUptime + 0.5
+		return boundedAncestorMatches(start: element, ancestor: ancestor,
+			parent: { self.parentElement($0) }, same: { self.sameElement($0, $1) },
+			withinBudget: { ProcessInfo.processInfo.systemUptime < deadline })
 	}
 
 	private func hasAncestorRole(_ element: AXUIElement, role: String) -> Bool {
@@ -4991,7 +4985,7 @@ final class Bridge {
 		if wordText {
 			// Word accepts Unicode text payloads. Use bounded chunks to avoid
 			// hundreds of accessibility/foreground walks for one paragraph.
-			for event in exactWordTextEvents(text) {
+			for event in exactNativeTextEvents(text) {
 				do { try sourceLease?.assertOwned() }
 				catch { throw TextInputSourceDispatchFailure(inputDispatch: target?.dispatchState.details ?? [:]) }
 				switch event {
@@ -5001,24 +4995,36 @@ final class Bridge {
 			}
 			return
 		}
-		for scalar in text.unicodeScalars {
-			do { try sourceLease?.assertOwned() }
-			catch { throw TextInputSourceDispatchFailure(inputDispatch: target?.dispatchState.details ?? [:]) }
-			let char = String(scalar)
-			if let stroke = physicalKeyStroke(for: char) {
-				try postKey(stroke.key, flags: stroke.flags, pid: pid, target: target, delivery: delivery)
-				continue
+		// Cocoa and Chromium editors need real control keys; a Unicode LF can
+		// be silently ignored. Share CRLF handling with Word while preserving
+		// the existing per-scalar physical/Unicode delivery for ordinary text.
+		for event in exactNativeTextEvents(text) {
+			switch event {
+			case let .key(key):
+				do { try sourceLease?.assertOwned() }
+				catch { throw TextInputSourceDispatchFailure(inputDispatch: target?.dispatchState.details ?? [:]) }
+				try postKey(key, flags: [], pid: pid, target: target, delivery: delivery)
+			case let .unicode(chunk):
+				for scalar in chunk.unicodeScalars {
+					do { try sourceLease?.assertOwned() }
+					catch { throw TextInputSourceDispatchFailure(inputDispatch: target?.dispatchState.details ?? [:]) }
+					let char = String(scalar)
+					if let stroke = physicalKeyStroke(for: char) {
+						try postKey(stroke.key, flags: stroke.flags, pid: pid, target: target, delivery: delivery)
+						continue
+					}
+					guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+						let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+					else {
+						throw BridgeFailure(message: "Failed to create unicode key event", code: "input_failed")
+					}
+					setUnicodeString(event: down, text: char)
+					setUnicodeString(event: up, text: char)
+					try postEvent(down, pid: pid, target: target, delivery: delivery)
+					try postEvent(up, pid: pid, target: target, delivery: delivery)
+					usleep(8_000)
+				}
 			}
-			guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-				let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
-			else {
-				throw BridgeFailure(message: "Failed to create unicode key event", code: "input_failed")
-			}
-			setUnicodeString(event: down, text: char)
-			setUnicodeString(event: up, text: char)
-			try postEvent(down, pid: pid, target: target, delivery: delivery)
-			try postEvent(up, pid: pid, target: target, delivery: delivery)
-			usleep(8_000)
 		}
 	}
 

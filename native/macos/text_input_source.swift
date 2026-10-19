@@ -16,13 +16,13 @@ func exactTextEventChunks(_ text: String, maximumUTF16Units: Int = 16) -> [Strin
 	return output
 }
 
-enum WordTextInputEvent: Equatable {
+enum NativeTextInputEvent: Equatable {
 	case unicode(String)
 	case key(String)
 }
 
-func exactWordTextEvents(_ text: String) -> [WordTextInputEvent] {
-	var output: [WordTextInputEvent] = []
+func exactNativeTextEvents(_ text: String) -> [NativeTextInputEvent] {
+	var output: [NativeTextInputEvent] = []
 	var buffer = ""
 	var previousCR = false
 	func flush() {

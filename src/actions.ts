@@ -279,7 +279,7 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 		env.validatePoint(point.x, point.y);
 	}
 	// Windows coordinate typing/scrolling is rejected before dispatch under background policy.
-	// Select foreground directly; native ownership and focus checks still apply.
+	// Select foreground directly, retaining native ownership and focus checks.
 	const windowsPointInput = !env.headless && env.platform === "windows" && "x" in target;
 	const needsForeground = !env.headless && (operation === "click" || operation === "press")
 		&& ("x" in target || pointerRefFallback);

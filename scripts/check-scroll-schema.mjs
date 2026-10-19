@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import { Check } from "typebox/value";
+import extension from "../extensions/computer-use.ts";
+const tools=[];
+extension({registerTool(tool){tools.push(tool)},registerCommand(){},on(){}});
+const schema=tools.find(tool=>tool.name==="act_ui").parameters;
+const accepts=action=>Check(schema,{stateId:"observed-state",actions:[action]});
+assert.equal(accepts({action:"scroll",x:1500,y:750,scrollY:563}),true);
+assert.equal(accepts({action:"scroll",ref:"@e1",scrollY:563}),true);
+assert.equal(accepts({action:"scroll",scrollY:563}),false);
+assert.equal(accepts({action:"scroll",x:1500,scrollY:563}),false);
+assert.equal(accepts({action:"scroll",y:750,scrollY:563}),false);
+assert.equal(accepts({action:"scroll",x:"1500",y:750,scrollY:563}),false);
+console.log("Registered scroll schema accepts coordinate/ref targets and rejects missing/partial targets; no native input.");

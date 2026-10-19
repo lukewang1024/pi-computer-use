@@ -69,7 +69,7 @@
 	"scripts": {
 		"postinstall": "node scripts/setup-helper.mjs --postinstall",
 		"typecheck": "tsc -p tsconfig.json",
-		"test:schema": "node scripts/check-tool-schemas.mjs",
+		"test:schema": "node scripts/check-tool-schemas.mjs && tsx scripts/check-scroll-schema.mjs",
 		"test:cdp-navigation": "tsx scripts/check-cdp-navigation.mjs && tsx scripts/check-browser-performance.mjs",
 		"test:cdp-viewport": "tsx scripts/check-cdp-viewport.mjs && tsx scripts/check-cdp-loopback.mjs",
 		"test:invariants": "node scripts/check-invariants.mjs",

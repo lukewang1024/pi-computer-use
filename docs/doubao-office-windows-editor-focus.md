@@ -32,3 +32,29 @@ Unit coverage exercises delayed exact focus, sibling/ancestor/descendant
 and empty identities, late arrival, and provider failure. Windows native
 compilation and the identical recorded live trial are still required.
 No success-rate or latency improvement is claimed from unit tests.
+
+
+## Physical-key scan metadata candidate (2026-10-20)
+
+A separate recorded native Edit probe received Home/Shift/Right with correct
+virtual keys and modifiers but scan code zero (system mappings 71/42/77).
+A recorded isolated Edge textarea then received six trusted native events with
+correct `key` values and empty `KeyboardEvent.code` for both down and up.
+Native Home then Shift+Right still selected exactly the first ASCII character
+in both controls. Thus empty `code` is established; its role in Doubao canvas
+selection failures remains unproven.
+
+The candidate fills `KEYBDINPUT.wScan` from `MapVirtualKeyExW` using the
+foreground thread's input layout, preserving virtual-key delivery and existing
+extended/key-up flags. Unicode text retains its separate Unicode packet path;
+no input-layout switch or input replay is introduced. A Windows-only encoding
+test checks nonzero/equal down/up scan metadata, unchanged virtual keys and
+flags, and untouched Unicode encoding. Linux tests do not run that test.
+
+Require checked exact-source Windows CI artifacts followed by recorded native
+and Chromium probes (expected nonempty Home/ShiftLeft/ArrowRight codes), common
+shortcut controls, and saved Doubao selection/formatting oracles before claiming
+this fixes the application. Previous W03 failures are retained.
+
+References: [KEYBDINPUT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput)
+and [MapVirtualKeyExW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw).

@@ -382,7 +382,7 @@ mod native {
     use crate::pointer_motion::PointerMotion;
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
 
     pub fn open_browser_location(url: &str) -> Result<(), ProtocolError> {
         hotkey(&[VK_CONTROL], VK_L)?;
@@ -572,11 +572,27 @@ mod native {
     }
 
     fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+        // Chromium derives KeyboardEvent.code from the message's hardware
+        // scan code. VK-only SendInput with wScan=0 delivers an empty code,
+        // even when a native Edit control handles the virtual key correctly.
+        // Map using the foreground thread's layout without changing it. Keep
+        // VK delivery and the existing extended/key-up flags; Unicode text
+        // continues through its separate KEYEVENTF_UNICODE path.
+        let scan = unsafe {
+            let foreground = GetForegroundWindow();
+            let thread = if foreground.0.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(foreground, None)
+            };
+            MapVirtualKeyExW(u32::from(vk.0), MAPVK_VK_TO_VSC, GetKeyboardLayout(thread)) as u16
+        };
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: vk,
+                    wScan: scan,
                     dwFlags: (if up {
                         KEYEVENTF_KEYUP
                     } else {
@@ -878,6 +894,28 @@ mod native {
     #[cfg(test)]
     mod key_guard_tests {
         use super::*;
+
+        #[test]
+        fn physical_keys_include_scan_on_down_and_up_without_changing_vk_delivery() {
+            for vk in [VK_HOME, VK_END, VK_RIGHT, VK_LEFT, VK_SHIFT, VK_CONTROL, VK_A, VK_RETURN] {
+                let down = unsafe { key(vk, false).Anonymous.ki };
+                let up = unsafe { key(vk, true).Anonymous.ki };
+                assert_eq!(down.wVk, vk);
+                assert_ne!(down.wScan, 0, "missing scan for {:?}", vk);
+                assert_eq!(down.wScan, up.wScan);
+                assert_eq!(down.dwFlags & KEYEVENTF_SCANCODE, KEYBD_EVENT_FLAGS(0));
+                assert_eq!(down.dwFlags & KEYEVENTF_UNICODE, KEYBD_EVENT_FLAGS(0));
+                assert_eq!(up.dwFlags, down.dwFlags | KEYEVENTF_KEYUP);
+                assert_eq!(
+                    down.dwFlags & KEYEVENTF_EXTENDEDKEY != KEYBD_EVENT_FLAGS(0),
+                    extended_virtual_key(vk.0)
+                );
+            }
+            let text = unsafe { unicode(0x4e2d, false).Anonymous.ki };
+            assert_eq!(text.wVk, VIRTUAL_KEY(0));
+            assert_eq!(text.wScan, 0x4e2d);
+            assert_eq!(text.dwFlags, KEYEVENTF_UNICODE);
+        }
 
         #[test]
         fn rejects_punctuation_after_modifier_before_any_key_is_sent() {

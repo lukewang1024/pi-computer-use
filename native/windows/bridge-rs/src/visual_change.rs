@@ -1,6 +1,16 @@
 //! Bounded visual evidence, never an application-effect acknowledgement.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
+use std::sync::OnceLock;
+
+mod cursor_artwork {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../cursor_raster.rs"));
+}
+
+fn cursor_raster() -> &'static cursor_artwork::Raster {
+    static RASTER: OnceLock<cursor_artwork::Raster> = OnceLock::new();
+    RASTER.get_or_init(|| cursor_artwork::render(true))
+}
 
 pub const MAX_SAMPLES: u32 = 6;
 pub const SOFT_DEADLINE_MS: u128 = 2500;
@@ -123,8 +133,24 @@ impl VisualSample {
             self.bounds.0 as f64 + f64::from(x) * f64::from(self.bounds.2) / f64::from(self.width);
         let sy =
             self.bounds.1 as f64 + f64::from(y) * f64::from(self.bounds.3) / f64::from(self.height);
-        // Conservative union of both samples' synthetic cursor footprints.
-        (sx - f64::from(cx)).abs() <= 64.0 && (sy - f64::from(cy)).abs() <= 64.0
+        // Use the renderer's actual alpha footprint, including its glow. A
+        // square around the hotspot hides short edits next to the pointer.
+        // Expand by the canonical triangle filter's source footprint so that
+        // downsampled cursor fringes cannot count as document changes.
+        let raster = cursor_raster();
+        let rx = sx - f64::from(cx) + f64::from(raster.hotspot[0]);
+        let ry = sy - f64::from(cy) + f64::from(raster.hotspot[1]);
+        let pad_x = (f64::from(self.bounds.2) / f64::from(self.width)).ceil() as i32 + 1;
+        let pad_y = (f64::from(self.bounds.3) / f64::from(self.height)).ceil() as i32 + 1;
+        let x0 = (rx.floor() as i32 - pad_x).max(0);
+        let y0 = (ry.floor() as i32 - pad_y).max(0);
+        let x1 = (rx.ceil() as i32 + pad_x).min(i32::from(raster.width) - 1);
+        let y1 = (ry.ceil() as i32 + pad_y).min(i32::from(raster.height) - 1);
+        (y0..=y1).any(|row| {
+            (x0..=x1).any(|col| {
+                raster.pixels[row as usize * usize::from(raster.width) + col as usize] >> 24 != 0
+            })
+        })
     }
 
     /// None means incomparable geometry. Small/caret-only changes are ignored.
@@ -200,6 +226,34 @@ mod tests {
         b.bounds.0 = 1;
         assert_eq!(b.changed_from(&a), None);
     }
+    #[test]
+    fn real_cursor_disappearance_is_ignored_but_adjacent_short_edit_is_observed() {
+        let clean = blank();
+        let mut pointer = clean.clone();
+        pointer.cursor = Some((100, 80));
+        let raster = cursor_raster();
+        for y in 0..u32::from(raster.height) {
+            for x in 0..u32::from(raster.width) {
+                let argb = raster.pixels[(y * u32::from(raster.width) + x) as usize];
+                let alpha = (argb >> 24) as u8;
+                let px = (100 - raster.hotspot[0]) as u32 + x;
+                let py = (80 - raster.hotspot[1]) as u32 + y;
+                let offset = ((py * pointer.width + px) * 4) as usize;
+                for (channel, shift) in [16, 8, 0].iter().enumerate() {
+                    pointer.pixels[offset + channel] =
+                        ((argb >> shift) & 255) as u8 + (255 - alpha);
+                }
+            }
+        }
+        assert_eq!(clean.changed_from(&pointer), Some(false));
+        assert_eq!(pointer.changed_from(&clean), Some(false));
+        let mut edited = clean.clone();
+        ink(&mut edited, 145, 80, 40, 8);
+        // This edit was mostly excluded by the old +/-64 square, leaving
+        // fewer than three changed tiles even though text was visible.
+        assert_eq!(edited.changed_near(&pointer, Some((100.0, 80.0))), Some(true));
+    }
+
     #[test]
     fn distributed_change_is_observed_but_small_change_is_not() {
         let a = blank();

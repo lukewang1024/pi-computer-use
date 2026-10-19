@@ -132,7 +132,9 @@ On Windows, an image-bearing successor after coordinate `typeText` without a sem
 saved look, comparing a band around the input point (native radii 768 × 96
 points). Changes elsewhere, including the toolbar, do not trigger it. It samples at most six frames with a 2500 ms soft deadline (an
 in-flight capture may finish later). Geometry must match; both samples' visible
-synthetic cursor footprints and small changes are excluded. UIA is extracted
+synthetic cursor footprints and small changes are excluded. Cursor exclusion follows
+the renderer's nontransparent artwork (including its glow), expanded for capture
+downsampling, rather than masking a large square around the input point. UIA is extracted
 once after the final frame when requested. `captureDiagnostics.visualFollowup`
 reports `change_observed`, `unchanged_at_limit`, `incomparable`, or `unavailable`.
 These are heuristic visual observations, not editor acknowledgements: a caret

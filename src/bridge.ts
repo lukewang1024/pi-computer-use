@@ -2124,21 +2124,23 @@ function shouldEscalateSearchOCR(matches: OutlineSearchMatch[], text?: string): 
 
 /** Pure outline query unless a window selector is supplied, in which case current target selection may change. */
 async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
+	const focused = params.focused;
+	if (focused !== undefined && typeof focused !== "boolean") throw new Error("focused must be a boolean.");
 	const state = operationState();
 	let outline = currentOutlineOrThrow(params.stateId);
 	if (state.currentLook && isPixelOnlyLook(state.currentLook)) throw new Error("Pixel-only observation has no semantic elements; observe semantic or fused before searching.");
 	const text = trimOrUndefined(params.text);
 	const role = trimOrUndefined(params.role);
 	const capability = trimOrUndefined(params.capability);
-	if (!text && !role && !capability) throw new Error("search_ui requires text, role, or capability. Use observe_ui for a bounded overview.");
+	if (!text && !role && !capability && focused === undefined) throw new Error("search_ui requires text, role, capability, or focused. Use observe_ui for a bounded overview.");
 	const limit = 12;
-	let ranked = searchOutlineRanked(outline, text, role, capability, limit);
+	let ranked = searchOutlineRanked(outline, text, role, capability, limit, focused);
 	let matches = ranked.matches;
 	let escalatedOCR = false;
 	const look = state.currentLook;
 	// Browser observations have their own CDP resource identity and no native
 	// target HWND. An empty AX tree must not trigger desktop OCR or focus.
-	if (!isBrowserContextId(state.contextId) && shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && look.ocrDiagnostics?.status !== "failed" && state.lastSearchOcrEscalatedLookId !== look.lookId) {
+	if (focused === undefined && !isBrowserContextId(state.contextId) && shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && look.ocrDiagnostics?.status !== "failed" && state.lastSearchOcrEscalatedLookId !== look.lookId) {
 		state.lastSearchOcrEscalatedLookId = look.lookId;
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		// captureCurrentTarget adopts the new look/outline/capture into
@@ -2148,7 +2150,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 		if (!state.resourceKey || state.epoch === undefined) throw new Error("The observation has no live resource identity. Observe again.");
 		const captureResult = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await captureCurrentTarget(signal, "always", AUTO_IMAGE_MAX_DIMENSION, currentTarget))).value;
 		outline = captureResult.outline;
-		ranked = searchOutlineRanked(outline, text, role, capability, limit);
+		ranked = searchOutlineRanked(outline, text, role, capability, limit, focused);
 		matches = ranked.matches;
 		escalatedOCR = true;
 	}
@@ -2958,8 +2960,12 @@ export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
 function validateOutlineQuery(raw: OutlineQuery | undefined): OutlineQuery | undefined {
  if (raw === undefined) return undefined;
- if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).some(k => !["text", "role", "capability"].includes(k))) throw new Error("outlineQuery must contain only text, role or capability.");
+ if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).some(k => !["text", "role", "capability", "focused"].includes(k))) throw new Error("outlineQuery must contain only text, role, capability or focused.");
  const query: OutlineQuery = {};
+ if (raw.focused !== undefined) {
+  if (typeof raw.focused !== "boolean") throw new Error("outlineQuery focused must be a boolean.");
+  query.focused = raw.focused;
+ }
  for (const key of ["text", "role", "capability"] as const) {
   const value = raw[key];
   if (value === undefined) continue;
@@ -2971,7 +2977,7 @@ function validateOutlineQuery(raw: OutlineQuery | undefined): OutlineQuery | und
 }
 
 function queryCachedOutline(outline: Outline, query: OutlineQuery, stateId: string) {
- const ranked = searchOutlineRanked(outline, query.text, query.role, query.capability, 12);
+ const ranked = searchOutlineRanked(outline, query.text, query.role, query.capability, 12, query.focused);
  const exactCount = ranked.matches.filter(match => match.matchReason === "exact").length;
  // Exact matches sort before every other rank. A non-exact returned row proves all exact rows fit.
  const exactMatchesComplete = exactCount < 12 || ranked.totalMatches <= 12;

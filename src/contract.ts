@@ -72,6 +72,8 @@ export interface ObserveParams extends ObserveTargetParams {
 }
 
 export interface OutlineQuery {
+	/** Match only an explicitly observed focus state; unknown never matches. */
+	focused?: boolean;
 	text?: string;
 	role?: string;
 	capability?: string;

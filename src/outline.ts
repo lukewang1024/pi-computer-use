@@ -498,13 +498,14 @@ export function rankedTextMatch(values: string[], text: string): { reason: "exac
 	return score >= 0.72 ? { reason: "fuzzy", score } : undefined;
 }
 
-export function searchOutlineRanked(outline: Outline, text?: string, role?: string, capability?: string, limit = 12): { matches: OutlineSearchMatch[]; totalMatches: number } {
+export function searchOutlineRanked(outline: Outline, text?: string, role?: string, capability?: string, limit = 12, focused?: boolean): { matches: OutlineSearchMatch[]; totalMatches: number } {
 	const query = text?.trim();
 	const roleQuery = role ? normalizedSearchRole(role) : undefined;
 	const actionQuery = capability?.trim();
 	const strong: Array<OutlineSearchMatch & { order: number }> = [];
 	const fuzzy: Array<OutlineSearchMatch & { order: number }> = [];
 	for (const [order, node] of outline.nodes.entries()) {
+		if (focused !== undefined && node.focused !== focused) continue;
 		if (roleQuery && normalizedSearchRole(node.role) !== roleQuery) continue;
 		if (actionQuery && !actionMatches(node, actionQuery)) continue;
 		const label = outlineNodeLabel(node);

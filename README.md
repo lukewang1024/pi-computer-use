@@ -337,3 +337,5 @@ DIB row count, dominant-color and total pixel counts before resizing, original
 image dimensions, and any screen-fallback foreground checks. A near-uniform
 image is capture evidence; it does not establish that the application rendered
 a white screen. These fields do not authorize input or change capture guards.
+
+`search_ui` and `outlineQuery` accept an optional boolean `focused` predicate, combined with text, role and capability. `focused: false` matches only explicitly observed false values; unknown focus matches neither boolean. Focus-only queries are allowed. These queries filter the retained snapshot and do not prove that a truncated tree contains every focused control. Searches with a focus predicate never escalate to OCR, which cannot establish keyboard focus. Normal state freshness and input guards remain required.

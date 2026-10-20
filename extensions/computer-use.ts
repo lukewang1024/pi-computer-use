@@ -48,6 +48,7 @@ const uiAction = Type.Union([
 ]);
 
 const outlineQuerySchema = Type.Optional(Type.Object({
+ focused: Type.Optional(Type.Boolean({ description: "Match an explicitly observed keyboard focus state. Unknown matches neither true nor false. Snapshot-only; no additional capture or input." })),
  text: Type.Optional(Type.String({ maxLength: 256 })),
  role: Type.Optional(Type.String({ maxLength: 128 })),
  capability: Type.Optional(Type.String({ maxLength: 128 })),
@@ -126,6 +127,7 @@ const searchUiTool = defineTool({
 		text: Type.Optional(Type.String({ description: "Human-readable text or label", maxLength: 256 })),
 		role: Type.Optional(Type.String({ description: "Exact normalized role, e.g. button", maxLength: 128 })),
 		capability: Type.Optional(Type.String({ description: "Exact capability, e.g. press", maxLength: 128 })),
+		focused: Type.Optional(Type.Boolean({ description: "Filter the cached keyboard focus state. Unknown matches neither true nor false. Disables OCR escalation because OCR cannot establish focus." })),
 		stateId,
 	}),
 	execute: executeSearchUi,

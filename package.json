@@ -111,7 +111,7 @@
 		"test:cdp-frames": "tsx scripts/check-cdp-frames.mjs",
 		"test:cdp-sessions": "tsx scripts/check-cdp-sessions.mjs && tsx scripts/check-cdp-ancestor-routes.mjs",
 		"test:native-action-outcomes": "tsx scripts/check-native-action-outcomes.mjs && tsx scripts/check-search-ocr-escalation.mjs && tsx scripts/check-pixel-observe.mjs",
-		"test:scoped-outline": "tsx scripts/check-scoped-outline.mjs && tsx scripts/check-folded-observe.mjs && tsx scripts/check-native-scope-refresh.mjs",
+		"test:scoped-outline": "tsx scripts/check-focused-query.mjs && tsx scripts/check-scoped-outline.mjs && tsx scripts/check-folded-observe.mjs && tsx scripts/check-native-scope-refresh.mjs",
 		"test:text-input-source": "node scripts/check-text-input-source.mjs",
 		"test:macos-identity": "tsx scripts/check-macos-helper-identity.mjs && tsx scripts/check-macos-helper-owned-restart.mjs",
 		"test:browser-startup": "tsx scripts/check-managed-browser-executable.mjs && tsx scripts/check-managed-browser.mjs && tsx scripts/check-browser-startup.mjs && tsx scripts/check-browser-launch-projection.mjs && tsx scripts/check-browser-downloads.mjs && tsx scripts/check-download-session.mjs",

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {cachedOutlineCompleteness} from '../src/outline.ts';
 import {changesBetween} from '../src/view.ts';
-import {parseLookResponse, graftScopedOutline, nodeByRef, serializeOutline, restoreOutline, searchOutline, serializeOutlineSubtree, serializeOutlineAncestors} from '../src/outline.ts';
+import {parseLookResponse, graftScopedOutline, nodeByRef, serializeOutline, restoreOutline, searchOutline, searchOutlineRanked, serializeOutlineSearchMatch, serializeOutlineSubtree, serializeOutlineAncestors} from '../src/outline.ts';
 const node=(ref,title,children=[],truncated=false)=>({ref,title,role:'AXGroup',children,truncated});
 const outline=root=>parseLookResponse({lookId:'test',outline:root,window:{}}).parsedOutline;
 const full=outline(node('window','Window',[node('pane','Document Pane',[node('old-body','Page 1 content')]),node('save','Save')]));
@@ -44,6 +44,34 @@ for(const [before,after] of [[undefined,false],[undefined,true],[false,true],[tr
  assert.equal(serialized.changes.find(c=>c.type==='updated').fields.isEnabled,after);
 }
 console.log('PASS availability deltas retain false/true and replace the view when availability becomes unknown');
+
+// A focused window is not proof that an editor inside it has keyboard focus.
+// Keep false distinct from an unavailable provider fact across serialization
+// and scoped refresh, so a lone edit match cannot look like the focused editor.
+for (const focused of [true,false,undefined]) {
+ const tree=outline({...node('focus-window','Window',[{...node('zoom','ud__native-input'),role:'edit',focused}]),focused:true});
+ const match=searchOutline(tree,undefined,'edit')[0];
+ assert.equal(match.focused,focused);
+ const ranked=searchOutlineRanked(tree,undefined,'edit').matches[0];
+ assert.equal(ranked.focused,focused);
+ const serialized=JSON.parse(JSON.stringify(serializeOutlineSearchMatch(ranked)));
+ assert.equal(Object.hasOwn(serialized,'focused'),focused!==undefined);
+ const roundTrip=restoreOutline(JSON.parse(JSON.stringify(serializeOutline(tree))));
+ assert.equal(searchOutline(roundTrip,undefined,'edit')[0].focused,focused);
+ const editor=tree.nodes.find(n=>n.wireRef==='zoom');
+ graftScopedOutline(tree,editor.ref,outline({...node('zoom','ud__native-input'),role:'edit'}));
+ assert.equal(searchOutline(tree,undefined,'edit')[0].focused,undefined,'scoped provider focus loss must not retain prior focus');
+}
+for(const known of [true,false]){
+ const focusedTree=value=>outline({...node('focus-window','Window',[{...node('editor','Editor'),role:'edit',focused:value}]),focused:true});
+ const lost=changesBetween(focusedTree(known),focusedTree(undefined));
+ assert.equal(lost.useFullView,true);
+ assert.equal(lost.reason,'focus_unknown');
+ const changed=changesBetween(focusedTree(known),focusedTree(!known));
+ assert.equal(changed.useFullView,false);
+ assert.equal(JSON.parse(JSON.stringify(changed)).changes.find(c=>c.type==='updated').fields.focused,!known);
+}
+console.log('PASS query focus truth, window/editor distinction, persistence and scoped unknown focus');
 
 // A comparison of node-local fields must not repeatedly serialize descendants.
 // Count child accesses instead of asserting noisy machine-specific timings.

@@ -514,6 +514,7 @@ mod native {
                     UIA_AutomationIdPropertyId, UIA_ClassNamePropertyId,
                     UIA_BoundingRectanglePropertyId, UIA_IsOffscreenPropertyId,
                     UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
+                    UIA_HasKeyboardFocusPropertyId,
                     UIA_IsPasswordPropertyId, UIA_IsInvokePatternAvailablePropertyId,
                     UIA_IsTogglePatternAvailablePropertyId, UIA_IsSelectionItemPatternAvailablePropertyId,
                     UIA_IsExpandCollapsePatternAvailablePropertyId, UIA_IsLegacyIAccessiblePatternAvailablePropertyId,
@@ -802,6 +803,12 @@ mod native {
                 .map(|value| value.as_bool())
                 .unwrap_or(false)
         };
+        // Focus is an observation, not a capability or input authority. Keep a
+        // failed provider read unknown rather than reporting a false fact.
+        let has_keyboard_focus = unsafe {
+            element.CachedHasKeyboardFocus().or_else(|_| element.CurrentHasKeyboardFocus())
+                .ok().map(|value| value.as_bool())
+        };
         let cached_value_available = unsafe {
             element.GetCachedPropertyValue(UIA_IsValuePatternAvailablePropertyId).ok()
                 .and_then(|value| bool::try_from(&value).ok())
@@ -861,6 +868,7 @@ mod native {
                 "isEnabled": is_enabled,
                 "isOffscreen": is_offscreen,
                 "isKeyboardFocusable": is_keyboard_focusable,
+                "hasKeyboardFocus": has_keyboard_focus,
                 "canInvoke": signals.invoke,
                 "canPress": can_press,
                 "canSetValue": can_set_value,

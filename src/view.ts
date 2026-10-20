@@ -118,6 +118,9 @@ export function changesBetween(base: Outline, next: Outline, identity: "ref" | "
 			if (previous.isEnabled !== undefined && node.isEnabled === undefined) {
 				return { changes: [], changedNodeCount: next.nodes.length, fullNodeCount: next.nodes.length, useFullView: true, reason: "availability_unknown" };
 			}
+			if (previous.focused !== undefined && node.focused === undefined) {
+				return { changes: [], changedNodeCount: next.nodes.length, fullNodeCount: next.nodes.length, useFullView: true, reason: "focus_unknown" };
+			}
 			if (identity === "wire") {
 				const oldParent = previous.parent ? key(previous.parent, base.root) : undefined;
 				const newParent = node.parent ? key(node.parent, next.root) : undefined;

@@ -794,7 +794,7 @@ fn outline_from_elements(
             "canDecrement": false,
             "isTextInput": matches!(raw.get("role").and_then(Value::as_str), Some("edit" | "document")),
             "rect": rect,
-            "focused": false,
+            "focused": caps.get("hasKeyboardFocus").and_then(Value::as_bool),
             "offscreen": caps.get("isOffscreen").and_then(Value::as_bool).unwrap_or(false),
             "pictureOnly": false,
             "truncated": raw.get("truncated").and_then(Value::as_bool).unwrap_or(false),
@@ -2068,6 +2068,20 @@ mod tests {
             assert!(super::include_look_elements(&value).is_err());
         }
     }
+    #[test]
+    fn keyboard_focus_observations_preserve_true_false_and_unknown() {
+        for observed in [Some(true), Some(false), None] {
+            let root = serde_json::json!({"windowId": 1, "isFocused": true});
+            let elements = vec![serde_json::json!({"ref":"@e1", "role":"edit", "runtimeId":[42,1],
+                "capabilities":{"isEnabled":true,"isKeyboardFocusable":true,"hasKeyboardFocus":observed}})];
+            let (outline, _) = super::outline_from_elements(
+                "@w1", "test", "window", &root, &elements, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0,
+            );
+            assert_eq!(outline["children"][0]["focused"], serde_json::json!(observed));
+            assert_eq!(outline["children"][0]["canFocus"], true);
+        }
+    }
+
     #[test]
     fn disabled_control_does_not_advertise_input_capabilities() {
         for enabled in [false, true] {

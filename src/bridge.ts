@@ -2154,7 +2154,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	}
 	const detailMatches = matches.map(serializeOutlineSearchMatch);
 	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, matches: detailMatches, totalMatches: ranked.totalMatches, returned: matches.length, hasMore: ranked.totalMatches > matches.length, note: state.currentNote };
-	const lines = matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]${match.isEnabled === false ? " [disabled]" : ""}\n  path: ${match.path}`);
+	const lines = matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]${match.isEnabled === false ? " [disabled]" : ""}${match.focused === true ? " [focused]" : match.focused === false ? " [not focused]" : ""}\n  path: ${match.path}`);
 	const noteHeader = renderNote(state.currentNote);
 	const noteText = noteHeader ? `${noteHeader}\n\n` : "";
 	const escalationText = escalatedOCR ? " OCR text was escalated for this search after the cached outline had no matches." : "";

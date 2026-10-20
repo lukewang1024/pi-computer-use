@@ -198,3 +198,17 @@ occupy one quantized color bucket. Non-client decorations cannot rescue a blank
 client. Unavailable client geometry retains the conservative whole-image rule.
 This changes capture classification, not window activation or physical-input
 permission.
+
+### Explicit observation after a popup obscures its source
+
+An action can open a native popup while capture of its source window fails.
+The bridge keeps `post_action_observation_failed`, clears the old state, and
+does not replay input or silently make the popup the action successor. When
+exact HWND/PID deltas identify one newly appeared, focused same-process window
+and a fresh native enumeration confirms that window is visible and focused,
+the terminal result includes `nextObservation`: an explicit read-only
+`observe_ui` request for its model root ref. This avoids requiring another
+`find_roots` just to rediscover the known popup. Uncertain dispatch, unrelated,
+replaced, hidden, unfocused, pre-existing, or ambiguous roots receive no hint.
+The hint proves neither the action's effect nor popup capture readiness; the
+caller must observe it and obtain fresh state before taking another action.

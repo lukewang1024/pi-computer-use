@@ -202,6 +202,7 @@ interface TerminalDesktopActionDetails {
 	};
 	execution: ExecutionTrace;
 	error: { code: string; message: string };
+	nextObservation?: { tool: "observe_ui"; root: string; mode: "pixels"; readOnly: true; pid: number; windowId: number };
 }
 
 
@@ -2368,6 +2369,32 @@ async function exactRootAvailability(target: ResolvedTarget): Promise<boolean | 
 	}
 }
 
+// A related popup can be suggested for an explicit read without turning it into
+// the source action's successor or authorizing another write.
+async function nextPopupObservation(target: ResolvedTarget, execution: ExecutionTrace): Promise<TerminalDesktopActionDetails["nextObservation"]> {
+	if (currentPlatformBackend.name !== "windows") return undefined;
+	const deltas = execution.rootDelta ?? [];
+	const candidates = deltas.filter(delta => delta.change === "appeared" && delta.pid === target.pid
+		&& delta.kind === "window" && delta.ref?.startsWith("@r")
+		&& Number.isSafeInteger(delta.windowId) && delta.windowId! > 0 && delta.windowId !== target.windowId
+		&& deltas.some(focused => focused.change === "focused" && focused.pid === delta.pid
+			&& focused.windowId === delta.windowId && focused.ref === delta.ref));
+	const unique = new Map(candidates.map(delta => [delta.windowId, delta]));
+	if (unique.size !== 1) return undefined;
+	const candidate = [...unique.values()][0]!;
+	try {
+		const roots = await currentPlatformBackend.listRoots({ pid: target.pid });
+		const matches = roots.filter(root => root.pid === target.pid && root.windowId === candidate.windowId
+			&& root.isFocused && root.isOnscreen && !root.isMinimized);
+		if (matches.length !== 1) return undefined;
+		const record = runtimeState.windowRefs.get(candidate.ref!);
+		if (!record || record.pid !== target.pid || record.windowId !== candidate.windowId) return undefined;
+		return { tool: "observe_ui", root: candidate.ref!, mode: "pixels", readOnly: true, pid: target.pid, windowId: candidate.windowId! };
+	} catch {
+		return undefined;
+	}
+}
+
 async function terminalDesktopActionResult(
 	target: ResolvedTarget,
 	baseStateId: string,
@@ -2419,6 +2446,7 @@ async function terminalDesktopActionResult(
 	const status = dispatchUnknown ? "dispatch_outcome_unknown" : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const code = semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (execution.error?.code === "modifier_interrupted_after_partial_hid" ? "modifier_interrupted_after_partial_hid" : "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
+	const nextObservation = dispatchUnknown ? undefined : await nextPopupObservation(target, execution);
 	clearDesktopOperationState(operationState());
 	const details: TerminalDesktopActionDetails = {
 		tool: "act_ui",
@@ -2435,6 +2463,7 @@ async function terminalDesktopActionResult(
 		},
 		execution,
 		error: { code, message },
+		...(nextObservation ? { nextObservation } : {}),
 	};
 	const unreleasedKeys = execution.inputDispatch?.unreleasedKeys ?? [];
 	const unreleasedButtons = execution.inputDispatch?.unreleasedMouseButtons ?? [];
@@ -2450,6 +2479,8 @@ async function terminalDesktopActionResult(
 	return {
 		content: [{ type: "text", text: dispatchUnknown
 			? `${result}\nNo successor state was created. Keep writes quarantined and perform explicit desktop recovery before any further CU call.`
+			: nextObservation
+			? `${result}\nNo successor state was created. A newly appeared same-process popup was independently confirmed focused. Do not replay input. Read it explicitly with observe_ui({root:"${nextObservation.root}", mode:"pixels"}); obtain fresh state and refs before further actions.`
 			: `${result}\nNo successor state was created. Call find_roots, then observe_ui to continue.` }],
 		details,
 	};

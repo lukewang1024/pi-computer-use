@@ -1847,7 +1847,17 @@ final class Bridge {
 			pending.append(contentsOf: node.children)
 		}
 		if !pending.isEmpty { return finish(["status": "budget_exceeded", "scopeVerified": false]) }
-		if matches.count > 1 { return finish(["status": "ambiguous", "scopeVerified": true]) }
+		// AX providers may expose one native element through both row and column
+		// paths. All matches above are CFEqual to the application's unique focused
+		// element; repeated outline paths do not imply competing native focuses.
+		// Choose an existing ref only if their observed semantics agree. Conflicting
+		// aliases remain ambiguous; never pick by AXFocused flags or geometry.
+		if let first = matches.first, matches.dropFirst().contains(where: {
+			$0.role != first.role || $0.subrole != first.subrole ||
+			$0.title != first.title || $0.description != first.description ||
+			$0.isTextInput != first.isTextInput || $0.canSetValue != first.canSetValue ||
+			$0.isEnabled != first.isEnabled
+		}) { return finish(["status": "ambiguous", "scopeVerified": true]) }
 		if let node = matches.first {
 			let secure = node.role == "AXSecureTextField" || node.subrole == "AXSecureTextField"
 			var result: [String: Any] = ["status": "matched", "scopeVerified": true, "wireRef": node.ref,

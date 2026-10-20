@@ -114,9 +114,23 @@ ${method}
   body.role = "AXSecureTextField"
   result = focusedContext(pid:7,window:window,outline:root)
   precondition(result["isSecure"] as? Bool == true && result["title"] == nil && result["description"] == nil && result["selectionRange"] == nil)
-  root.children = [body, LookNode(editor,"duplicate")]
+  body.role = "AXTextArea"; body.isEnabled = false
+  let alias = LookNode(editor,"duplicate")
+  root.children = [body, alias]
+  selected = CFRange(location:2,length:4)
+  editor.attributes["AXSelectedTextRange"] = AXValueCreate(.cfRange,&selected)!
   result = focusedContext(pid:7,window:window,outline:root)
-  precondition(result["status"] as? String == "ambiguous" && result["wireRef"] == nil)
+  precondition(result["status"] as? String == "matched" && result["wireRef"] as? String == "duplicate",
+    "Equal native table cell aliases are one focused element; choose an existing observation ref")
+  precondition(result["selectionRange"] as? [String:Int] == ["location":2,"length":4])
+  alias.description = "Conflicting observation"
+  result = focusedContext(pid:7,window:window,outline:root)
+  precondition(result["status"] as? String == "ambiguous" && result["wireRef"] == nil,
+    "Conflicting alias observations must remain ambiguous")
+  alias.description = body.description
+  alias.role = "AXSecureTextField"
+  result = focusedContext(pid:7,window:window,outline:root)
+  precondition(result["status"] as? String == "ambiguous" && result["selectionRange"] == nil)
   root.children = []
   editor.attributes = ["AXParent":window,"AXRole":"AXTextArea" as NSString,"AXSubrole":"" as NSString,"AXEnabled":NSNumber(value:false),"AXValue":"SECRET" as NSString]
   editor.settable = true

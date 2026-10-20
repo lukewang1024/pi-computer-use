@@ -12,7 +12,9 @@ fn cursor_raster() -> &'static cursor_artwork::Raster {
     RASTER.get_or_init(|| cursor_artwork::render(true))
 }
 
-pub const MAX_SAMPLES: u32 = 6;
+// Leave room for captures observed around 330ms each to reach the existing
+// soft deadline instead of ending after six frames at about two seconds.
+pub const MAX_SAMPLES: u32 = 8;
 pub const SOFT_DEADLINE_MS: u128 = 2500;
 
 pub fn followup_status(
@@ -271,13 +273,18 @@ mod tests {
         assert_eq!(followup_status(Some(false), 2, 200), None);
         assert_eq!(followup_status(Some(true), 3, 400), Some("change_observed"));
         assert_eq!(
-            followup_status(Some(false), 6, 600),
+            followup_status(Some(false), MAX_SAMPLES, 600),
             Some("unchanged_at_limit")
         );
         assert_eq!(
             followup_status(Some(false), 1, 2500),
             Some("unchanged_at_limit")
         );
+        // Recorded Word case: six unchanged captures at 2065ms must not
+        // exhaust sampling before the existing 2500ms deadline.
+        assert_eq!(followup_status(Some(false), 6, 2065), None);
+        assert_eq!(followup_status(Some(true), 7, 2400), Some("change_observed"));
+        assert_eq!(followup_status(Some(false), 7, 2500), Some("unchanged_at_limit"));
         assert_eq!(followup_status(None, 1, 10), Some("incomparable"));
     }
 

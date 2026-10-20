@@ -109,3 +109,15 @@ strict-headless policy and unknown-result no-retry behavior. Native input is not
 sent by these tests. Recorded three-app regression and balanced workflow cost
 comparison remain required before a live improvement claim. This routing change
 does not repair Word Home selection or PPT U+0020/U+00A0 fidelity.
+
+## Follow-up sampling candidate after the 18-trial comparison
+
+Recorded E3-Word exhausted six unchanged samples at 2065ms and returned a
+stale typed successor; F3-Word first reported change on sample six at 2010ms.
+Raise the sample ceiling to eight while retaining the 2500ms soft deadline,
+80ms interval, comparison thresholds, cursor masking and exact-root checks.
+A capture already in flight can still cross the soft deadline. This permits
+additional read-only sampling; it does not replay input or verify application
+effect/render readiness. Native recorded acceptance of this candidate remains
+pending. The recorded timing variation does not establish causality or guarantee
+that an extra sample will capture every edit.

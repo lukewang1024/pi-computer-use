@@ -748,7 +748,10 @@ function assertBrowserUseAllowed(target: { appName: string; bundleId?: string })
 
 function windowRecordIdentity(record: Pick<WindowRefRecord, "pid" | "windowId" | "nativeWindowRef" | "windowTitle" | "framePoints" | "rootKind">): string {
 	if (record.windowId && record.windowId > 0) {
-		return `pid:${record.pid}|id:${record.windowId}${record.rootKind ? `|kind:${record.rootKind}` : ""}`;
+		// Windows root kinds are observation metadata: delta-created popups and
+		// ordinary enumeration must share the same exact HWND/PID identity.
+		const kind = currentPlatformBackend.name === "windows" ? undefined : record.rootKind;
+		return `pid:${record.pid}|id:${record.windowId}${kind ? `|kind:${kind}` : ""}`;
 	}
 	if (record.nativeWindowRef) {
 		return `pid:${record.pid}|ref:${record.nativeWindowRef}`;
@@ -1280,7 +1283,7 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 	const exactWindowId = (delta.kind === "window" || currentPlatformBackend.name === "windows")
 		&& Number.isSafeInteger(delta.windowId) && delta.windowId! > 0 ? delta.windowId : undefined;
 	for (const record of runtimeState.windowRefs.values()) {
-		if ((!record.rootKind || record.rootKind === delta.kind) && record.pid === delta.pid
+		if ((currentPlatformBackend.name === "windows" && exactWindowId !== undefined || !record.rootKind || record.rootKind === delta.kind) && record.pid === delta.pid
 			&& (exactWindowId !== undefined ? record.windowId === exactWindowId : (record.nativeWindowRef === delta.ref || record.ref === delta.ref))
 			&& (delta.windowId === undefined || record.windowId === delta.windowId)) return record.ref;
 	}

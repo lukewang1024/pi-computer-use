@@ -212,3 +212,9 @@ the terminal result includes `nextObservation`: an explicit read-only
 replaced, hidden, unfocused, pre-existing, or ambiguous roots receive no hint.
 The hint proves neither the action's effect nor popup capture readiness; the
 caller must observe it and obtain fresh state before taking another action.
+
+Windows root references use the exact PID/HWND pair consistently across action
+deltas, explicit observations and full enumeration. A delta-created popup's
+root kind does not create a second identity for the same native window.
+Different PIDs or HWNDs remain distinct; this does not change saved-state
+validation or authorize input from an earlier observation.

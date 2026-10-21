@@ -300,10 +300,10 @@ act_ui({
 ```
 
 All platforms use the same compact 19 × 20 logical-unit northwest arrow, with
-a neutral gray fill and a light outline. The chamfered corners soften the small
-silhouette. All overlays add a soft neutral radial halo with a 33-unit radius, matching
-the Codex cursor treatment. Windows uses a per-pixel alpha layered window; X11
-uses an ARGB visual when a compositor is running. X11 sessions without a
+a black fill and a white outline. Rounded contours soften the small silhouette.
+All overlays add a soft blue radial halo with a 33-unit radius. Windows uses a
+per-pixel alpha layered window; X11 uses an ARGB visual when a compositor is
+running. X11 sessions without a
 compositor retain a shaped arrow, avoiding an opaque halo rectangle.
 The hotspot is (2, 1) within the arrow; changing the artwork does not move the action target. Its
 orientation does not follow movement. Desktop and browser renderers share the

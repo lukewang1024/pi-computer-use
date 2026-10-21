@@ -169,12 +169,12 @@ X11 applications are unavailable.
 ### Virtual pointer appearance
 
 `src/agent-cursor-style.json` records the compact 19 × 20 cursor canvas, (2, 1)
-hotspot, fixed northwest geometry, and neutral gray/light-outline palette. Native
+hotspot, fixed northwest geometry, a black fill, and a white outline. Native
 macOS, Windows and Linux renderers and the browser SVG keep the same artwork.
 Update their surface bounds and hotspot subtraction together when changing size;
 never scale the action coordinates or trajectories. `test:agent-cursor` checks
 cross-platform geometry and browser canvas dimensions as well as delivery behavior.
-The shared specification also records the neutral radial halo. Its 33-unit radius
+The shared specification also records the soft blue radial halo. Its 33-unit radius
 extends beyond the arrow canvas; padding keeps it unclipped without moving the
 hotspot. Windows and X11 consume the JSON directly through `native/cursor_raster.rs`,
 which supersamples the artwork into premultiplied ARGB. Windows uploads it once
@@ -194,6 +194,8 @@ X server (`PI_CU_CURSOR_TEST=1`). It checks actual composed pixels, animation
 positions, both pointer hit-test paths, keyboard focus, real click-through and
 idle hiding. Never point that test at a user's desktop: it prepares a test
 window and sends one real test click.
+Set `PI_CU_CURSOR_EXPECT_ALPHA=1` for a composited session or `0` for the shaped
+fallback so a run fails if it exercises the wrong rendering path.
 
 ## macOS application-menu refusal diagnostics
 

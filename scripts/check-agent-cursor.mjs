@@ -47,7 +47,7 @@ for(let i=0;i<polygons.length;i++) {
  assert.equal(polygons[i].attributes.points,sharedStyle.layers[i].points.map(p=>p.join(',')).join(' '));
 }
 for(const [file,pattern] of [
- ['../native/macos/agent_cursor.swift',/CGPoint\(x:\s*(-?\d+), y:\s*(-?\d+)\)/g],
+ ['../native/macos/agent_cursor.swift',/CGPoint\(x:\s*(-?\d+(?:\.\d+)?), y:\s*(-?\d+(?:\.\d+)?)\)/g],
 ]) {
  const source=fs.readFileSync(new URL(file,import.meta.url),'utf8');
  const geometry=source.slice(source.indexOf('// Shared geometry'));

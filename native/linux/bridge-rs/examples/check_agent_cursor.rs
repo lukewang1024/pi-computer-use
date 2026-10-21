@@ -28,12 +28,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .check()?;
     conn.map_window(window)?.check()?;
+    let mapping_deadline = Instant::now() + Duration::from_secs(2);
+    while conn.get_window_attributes(window)?.reply()?.map_state != MapState::VIEWABLE {
+        assert!(Instant::now() < mapping_deadline, "test window did not map");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)?
         .check()?;
     conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 400, 300)?
         .check()?;
     let before = conn.query_pointer(root)?.reply()?;
-    let focus = conn.get_input_focus()?.reply()?.focus;
+    // Let the window manager finish handling the fixture's map/enter events
+    // before checking that the renderer leaves the settled focus unchanged.
+    let focus_deadline = Instant::now() + Duration::from_secs(2);
+    let mut focus = conn.get_input_focus()?.reply()?.focus;
+    let mut stable_since = Instant::now();
+    loop {
+        let observed = conn.get_input_focus()?.reply()?.focus;
+        if observed != focus {
+            focus = observed;
+            stable_since = Instant::now();
+        }
+        if stable_since.elapsed() >= Duration::from_millis(150) {
+            break;
+        }
+        assert!(Instant::now() < focus_deadline, "test focus did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     linux_bridge::agent_cursor::animate(vec![(20, 50), (600, 50), (400, 300)], 1600)?;
     let start = Instant::now();
     let mut positions = std::collections::HashSet::new();
@@ -72,6 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     assert_ne!(overlay, 0, "no cursor window rendered");
     let geometry = conn.get_geometry(overlay)?.reply()?;
+    if let Ok(expected) = std::env::var("PI_CU_CURSOR_EXPECT_ALPHA") {
+        assert_eq!(
+            geometry.depth == 32,
+            expected == "1",
+            "unexpected compositing path"
+        );
+    }
     if geometry.depth == 32 {
         assert_eq!((geometry.width, geometry.height), (85, 86));
         let halo = conn
@@ -119,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .data;
     assert_eq!(
         &pixel[..3],
-        &[89, 92, 97],
+        &[0, 0, 0],
         "cursor was not present in the composed desktop image"
     );
     x11rb::protocol::xtest::fake_input(&conn, BUTTON_PRESS_EVENT, 1, 0, root, 400, 300, 0)?
@@ -143,9 +171,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     linux_bridge::agent_cursor::animate(vec![(400, 300), (50, 100)], 0)?;
     std::thread::sleep(Duration::from_millis(40));
     let translated = conn.translate_coordinates(overlay, root, 0, 0)?.reply()?;
+    let style: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../src/agent-cursor-style.json"))?;
+    let padding = if geometry.depth == 32 {
+        style["glow"]["padding"].as_i64().unwrap() as i16
+    } else {
+        0
+    };
+    let hotspot_x = style["hotspot"][0].as_i64().unwrap() as i16 + padding;
+    let hotspot_y = style["hotspot"][1].as_i64().unwrap() as i16 + padding;
     assert_eq!(
         (translated.dst_x, translated.dst_y),
-        (47, 98),
+        (50 - hotspot_x, 100 - hotspot_y),
         "replacement did not land at exact endpoint"
     );
     std::thread::sleep(Duration::from_millis(8100));
@@ -155,6 +192,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "idle cursor stayed visible"
     );
     conn.destroy_window(window)?.check()?;
-    println!("{{\"platform\":\"linux-x11\",\"distinctPositions\":{},\"systemPointerUnchanged\":true,\"focusUnchanged\":true,\"clickThrough\":true,\"composedPixels\":true,\"idleHidden\":true}}",positions.len());
+    println!("{{\"platform\":\"linux-x11\",\"alphaOverlay\":{},\"distinctPositions\":{},\"systemPointerUnchanged\":true,\"focusUnchanged\":true,\"clickThrough\":true,\"composedPixels\":true,\"idleHidden\":true}}",geometry.depth == 32,positions.len());
     Ok(())
 }

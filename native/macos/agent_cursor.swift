@@ -185,13 +185,17 @@ private struct AgentCursorView: View {
         guard point.x.isFinite, point.y.isFinite else { return }
         // Shared glow: src/agent-cursor-style.json. The arrow and action hotspot
         // stay compact; only the translucent, click-through halo extends outward.
-        let glowCenter = CGPoint(x: point.x + 9, y: point.y + 9)
+        let glowCenter = CGPoint(x: point.x + 8, y: point.y + 8)
         let glowRadius: CGFloat = 33
         let stops: [Gradient.Stop] = [
-            .init(color: Color(red: 97/255, green: 92/255, blue: 89/255).opacity(0.40), location: 0),
-            .init(color: Color(red: 110/255, green: 105/255, blue: 102/255).opacity(0.28), location: 0.50),
-            .init(color: Color(red: 117/255, green: 112/255, blue: 110/255).opacity(0.11), location: 0.82),
-            .init(color: Color(red: 153/255, green: 153/255, blue: 153/255).opacity(0), location: 1),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0.34), location: 0),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0.32), location: 0.18),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0.23), location: 0.28),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0.11), location: 0.43),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0.07), location: 0.5),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0.035), location: 0.65),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0.016), location: 0.82),
+            .init(color: Color(red: 0/255, green: 136/255, blue: 255/255).opacity(0), location: 1),
         ]
         graphics.fill(Path(ellipseIn: CGRect(x: glowCenter.x-glowRadius, y: glowCenter.y-glowRadius,
                                             width: glowRadius*2, height: glowRadius*2)),
@@ -199,20 +203,20 @@ private struct AgentCursorView: View {
                                             startRadius: 0, endRadius: glowRadius))
 
         do {
-            let points = [CGPoint(x: 3, y: 1), CGPoint(x: 2, y: 1), CGPoint(x: 1, y: 2), CGPoint(x: 1, y: 3), CGPoint(x: 6, y: 16), CGPoint(x: 7, y: 17), CGPoint(x: 8, y: 17), CGPoint(x: 9, y: 16), CGPoint(x: 11, y: 11), CGPoint(x: 16, y: 9), CGPoint(x: 17, y: 8), CGPoint(x: 17, y: 7), CGPoint(x: 16, y: 6), CGPoint(x: 4, y: 1)]
+            let points = [CGPoint(x: 3.25, y: 0.75), CGPoint(x: 2.25, y: 0.5), CGPoint(x: 1.25, y: 0.75), CGPoint(x: 0.5, y: 1.5), CGPoint(x: 0.25, y: 2.5), CGPoint(x: 0.5, y: 3.5), CGPoint(x: 5, y: 15.75), CGPoint(x: 5.5, y: 16.75), CGPoint(x: 6.25, y: 17.25), CGPoint(x: 7.25, y: 17.5), CGPoint(x: 8.25, y: 17.25), CGPoint(x: 9, y: 16.75), CGPoint(x: 9.5, y: 15.75), CGPoint(x: 11, y: 11.25), CGPoint(x: 15.75, y: 9.5), CGPoint(x: 16.75, y: 9), CGPoint(x: 17.25, y: 8.25), CGPoint(x: 17.5, y: 7.25), CGPoint(x: 17.25, y: 6.25), CGPoint(x: 16.75, y: 5.5), CGPoint(x: 15.75, y: 5)]
             var shape = Path()
             shape.addLines(points)
             shape.closeSubpath()
             graphics.fill(shape.applying(CGAffineTransform(translationX: point.x, y: point.y)),
-                          with: .color(Color(red: 230/255, green: 230/255, blue: 230/255)))
+                          with: .color(Color(red: 255/255, green: 255/255, blue: 255/255)))
         }
         do {
-            let points = [CGPoint(x: 3, y: 3), CGPoint(x: 7, y: 15), CGPoint(x: 8, y: 15), CGPoint(x: 10, y: 10), CGPoint(x: 15, y: 8), CGPoint(x: 15, y: 7)]
+            let points = [CGPoint(x: 2.5, y: 1.75), CGPoint(x: 1.875, y: 1.625), CGPoint(x: 1.5, y: 2.125), CGPoint(x: 1.625, y: 2.875), CGPoint(x: 6.125, y: 15.625), CGPoint(x: 6.5, y: 16.125), CGPoint(x: 7.125, y: 16.375), CGPoint(x: 7.75, y: 16.125), CGPoint(x: 8.125, y: 15.5), CGPoint(x: 10, y: 9.875), CGPoint(x: 15.625, y: 8), CGPoint(x: 16.125, y: 7.625), CGPoint(x: 16.375, y: 7), CGPoint(x: 16.125, y: 6.375), CGPoint(x: 15.5, y: 6.125)]
             var shape = Path()
             shape.addLines(points)
             shape.closeSubpath()
             graphics.fill(shape.applying(CGAffineTransform(translationX: point.x, y: point.y)),
-                          with: .color(Color(red: 97/255, green: 92/255, blue: 89/255)))
+                          with: .color(Color(red: 0/255, green: 0/255, blue: 0/255)))
         }
     }
 }

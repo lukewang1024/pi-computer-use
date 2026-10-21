@@ -26,11 +26,11 @@ function renderBrowserCursor(input: { key: string; points: CursorPoint[]; durati
 		const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 		svg.setAttribute("viewBox", "-33 -33 85 86"); svg.setAttribute("width", "85"); svg.setAttribute("height", "86");
 		svg.style.pointerEvents = "none";
-		// Alpha-capable overlays include the shared neutral radial halo.
+		// Alpha-capable overlays include the shared blue radial halo.
 		const defs = document.createElementNS(svg.namespaceURI!, "defs");
 		const gradient = document.createElementNS(svg.namespaceURI!, "radialGradient");
 		gradient.setAttribute("id", "pi-cursor-glow");
-		const glowStops = [{"offset":0,"color":"#615C59","opacity":0.4},{"offset":0.5,"color":"#6E6966","opacity":0.28},{"offset":0.82,"color":"#75706E","opacity":0.11},{"offset":1,"color":"#999999","opacity":0}];
+		const glowStops = [{"offset":0,"color":"#0088FF","opacity":0.34},{"offset":0.18,"color":"#0088FF","opacity":0.32},{"offset":0.28,"color":"#0088FF","opacity":0.23},{"offset":0.43,"color":"#0088FF","opacity":0.11},{"offset":0.5,"color":"#0088FF","opacity":0.07},{"offset":0.65,"color":"#0088FF","opacity":0.035},{"offset":0.82,"color":"#0088FF","opacity":0.016},{"offset":1,"color":"#0088FF","opacity":0}];
 		for (const value of glowStops) {
 			const stop = document.createElementNS(svg.namespaceURI!, "stop");
 			stop.setAttribute("offset", String(value.offset));
@@ -40,11 +40,11 @@ function renderBrowserCursor(input: { key: string; points: CursorPoint[]; durati
 		}
 		defs.append(gradient);
 		const glow = document.createElementNS(svg.namespaceURI!, "circle");
-		glow.setAttribute("cx", "9"); glow.setAttribute("cy", "9"); glow.setAttribute("r", "33");
+		glow.setAttribute("cx", "8"); glow.setAttribute("cy", "8"); glow.setAttribute("r", "33");
 		glow.setAttribute("fill", "url(#pi-cursor-glow)");
 		svg.append(defs, glow);
 		// Shared geometry and palette: src/agent-cursor-style.json.
-		const layers = [{"color":"#E6E6E6","points":[[3,1],[2,1],[1,2],[1,3],[6,16],[7,17],[8,17],[9,16],[11,11],[16,9],[17,8],[17,7],[16,6],[4,1]]},{"color":"#615C59","points":[[3,3],[7,15],[8,15],[10,10],[15,8],[15,7]]}];
+		const layers = [{"color":"#FFFFFF","points":[[3.25,0.75],[2.25,0.5],[1.25,0.75],[0.5,1.5],[0.25,2.5],[0.5,3.5],[5,15.75],[5.5,16.75],[6.25,17.25],[7.25,17.5],[8.25,17.25],[9,16.75],[9.5,15.75],[11,11.25],[15.75,9.5],[16.75,9],[17.25,8.25],[17.5,7.25],[17.25,6.25],[16.75,5.5],[15.75,5]]},{"color":"#000000","points":[[2.5,1.75],[1.875,1.625],[1.5,2.125],[1.625,2.875],[6.125,15.625],[6.5,16.125],[7.125,16.375],[7.75,16.125],[8.125,15.5],[10,9.875],[15.625,8],[16.125,7.625],[16.375,7],[16.125,6.375],[15.5,6.125]]}];
 		for (const layer of layers) {
 			const polygon = document.createElementNS(svg.namespaceURI!, "polygon");
 			polygon.setAttribute("points", layer.points.map(p=>p.join(",")).join(" "));

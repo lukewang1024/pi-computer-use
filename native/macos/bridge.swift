@@ -4538,20 +4538,34 @@ final class Bridge {
 	}
 
 	private func foregroundReport(target: PhysicalInputTarget, releasingOwnedKey: Bool = false) -> ForegroundGateReport {
-		var report = readForegroundReport(target: target)
+		var report = readForegroundReport(target: target, releasingOwnedKey: releasingOwnedKey)
 		for _ in 0..<2 {
 			guard shouldReobserveForegroundRead(report, releasingOwnedKey: releasingOwnedKey) else { break }
 			// Only repeat observation; this event has not been posted. A different
 			// foreground application or a resolved wrong window stops immediately.
 			usleep(20_000)
-			report = readForegroundReport(target: target)
+			report = readForegroundReport(target: target, releasingOwnedKey: releasingOwnedKey)
 		}
 		return report
 	}
 
-	private func readForegroundReport(target: PhysicalInputTarget) -> ForegroundGateReport {
+	private func readForegroundReport(target: PhysicalInputTarget, releasingOwnedKey: Bool = false) -> ForegroundGateReport {
+		func exactTargetStillExists() -> Bool? {
+			// Read a complete metadata inventory, including hidden/minimized
+			// windows. A failed/empty inventory never establishes absence.
+			guard target.windowId > 0,
+				let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]], !windows.isEmpty
+			else { return nil }
+			var exists = false
+			for window in windows {
+				guard let id = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value, id > 0 else { return nil }
+				if id == target.windowId { exists = true }
+			}
+			return exists
+		}
 		let firstPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
 		let firstResolution = firstPid.map { focusedWindowResolution(pid: $0, physicalTarget: target) }
+		let firstTargetExists = releasingOwnedKey && firstResolution?.diagnostics["axWindowsCount"] as? Int == 0 ? exactTargetStillExists() : nil
 		let firstFocused = firstResolution?.element
 		let firstActual = ForegroundActualIdentity(pid: firstPid, windowId: firstResolution?.windowId)
 		let firstFocusedMatches = firstFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
@@ -4563,6 +4577,7 @@ final class Bridge {
 		let secondPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
 		let secondTargetIsMain = target.axWindow.flatMap { boolAttribute($0, attribute: kAXMainAttribute as CFString) } ?? false
 		let secondResolution = secondPid.map { focusedWindowResolution(pid: $0, physicalTarget: target) }
+		let secondTargetExists = releasingOwnedKey && secondResolution?.diagnostics["axWindowsCount"] as? Int == 0 ? exactTargetStillExists() : nil
 		let secondFocused = secondResolution?.element
 		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
 		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
@@ -4577,6 +4592,17 @@ final class Bridge {
 			firstDiagnostics: firstResolution?.diagnostics,
 			secondDiagnostics: secondResolution?.diagnostics
 		)
+		func successfulAXWindowCount(_ resolution: FocusedWindowResolution?) -> Int? {
+			guard let diagnostics = resolution?.diagnostics,
+				diagnostics["windowsReadStatus"] as? Int == Int(AXError.success.rawValue),
+				diagnostics["windowsTypeValid"] as? Bool == true else { return nil }
+			return diagnostics["axWindowsCount"] as? Int
+		}
+		if releasingOwnedKey, !firstTargetIsMain, !secondTargetIsMain, provenClosedForegroundTarget(report,
+			first: ForegroundClosedTargetSample(axWindowCount: successfulAXWindowCount(firstResolution), cgTargetExists: firstTargetExists),
+			second: ForegroundClosedTargetSample(axWindowCount: successfulAXWindowCount(secondResolution), cgTargetExists: secondTargetExists)) {
+			report.ownedTargetClosedWithoutReplacement = true
+		}
 		// A shortcut can open its own sheet before key-up. Only balance keys
 		// already owned by this transaction; never authorize new input to it.
 		func isDirectOwnedSheet(_ focused: AXUIElement?) -> Bool {

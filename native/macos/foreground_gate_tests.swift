@@ -61,6 +61,49 @@ private func assertPartial(_ result: [String: Any]?, count: Int, keys: [Int], bu
 @main
 private struct ForegroundGateTests {
 	static func main() {
+		do {
+		// Cmd+W can close the last document on key-down. Independently proven
+		// closure permits only the releases already owned by that transaction.
+		let chord = foregroundKeyChordEvents(code: 13, modifiers: [55])!
+		let original = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId))
+		var closed = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: nil), focused: false, main: false)
+		closed.firstActual = closed.actual
+		let proof = ForegroundClosedTargetSample(axWindowCount: 0, cgTargetExists: false)
+		precondition(provenClosedForegroundTarget(closed, first: proof, second: proof))
+		for sample in [ForegroundClosedTargetSample(axWindowCount: nil, cgTargetExists: false),
+			ForegroundClosedTargetSample(axWindowCount: 1, cgTargetExists: false),
+			ForegroundClosedTargetSample(axWindowCount: 0, cgTargetExists: nil),
+			ForegroundClosedTargetSample(axWindowCount: 0, cgTargetExists: true)] {
+			precondition(!provenClosedForegroundTarget(closed, first: sample, second: proof))
+			precondition(!provenClosedForegroundTarget(closed, first: proof, second: sample))
+		}
+		closed.ownedTargetClosedWithoutReplacement = true
+		let completed = sendSequence(chord, reports: [original, original, closed, closed])
+		precondition(completed.sink == chord && completed.result == nil)
+		precondition(!shouldReobserveForegroundRead(closed, releasingOwnedKey: true))
+		let empty = ForegroundInputDispatchState()
+		precondition(!dispatchForegroundEventIfVerified(closed, event: .keyUp(13, modifiers: []), dispatch: empty, emit: { preconditionFailure() }))
+		let held = ForegroundInputDispatchState()
+		for event in chord.prefix(2) { held.record(event) }
+		for event in [ForegroundInputEvent.keyDown(1, modifiers: [55]), .mouseDown(0), .mouseUp(0), .other, .keyUp(1, modifiers: [55]), .keyUp(13, modifiers: [])] {
+			precondition(!dispatchForegroundEventIfVerified(closed, event: event, dispatch: held, emit: { preconditionFailure() }))
+		}
+		var unproved = closed; unproved.ownedTargetClosedWithoutReplacement = false
+		var racing = closed; racing.frontmostPidStable = false
+		var changed = closed; changed.firstActual = original.actual
+		var foreign = gateReport(ForegroundActualIdentity(pid: 99, windowId: nil), focused: false, main: false)
+		foreign.firstActual = foreign.actual; foreign.ownedTargetClosedWithoutReplacement = true
+		var replaced = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1), focused: false, main: false)
+		replaced.firstActual = replaced.actual; replaced.ownedTargetClosedWithoutReplacement = true
+		var stillMain = gateReport(closed.actual, focused: false, main: true)
+		stillMain.firstActual = stillMain.actual; stillMain.ownedTargetClosedWithoutReplacement = true
+		for invalid in [unproved, racing, changed, foreign, replaced, stillMain] {
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: .keyUp(13, modifiers: [55]), dispatch: held, emit: { preconditionFailure() }))
+		}
+		for invalid in [racing, changed, foreign, replaced, stillMain] {
+			precondition(!provenClosedForegroundTarget(invalid, first: proof, second: proof))
+		}
+		}
 
 		do {
 		// A proven direct child sheet may receive only the remaining releases

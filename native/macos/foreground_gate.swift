@@ -141,6 +141,9 @@ struct ForegroundGateReport {
 	// Only native AX parent checks may establish this identity.
 	var ownedSheetWindowId: UInt32?
 	var ownedSheetTransitionObserved = false
+	// Native producer only: two successful empty AX window inventories and two
+	// exact CG metadata probes proved this target closed without a replacement.
+	var ownedTargetClosedWithoutReplacement = false
 
 	var verified: Bool {
 		target.windowId > 0
@@ -171,13 +174,31 @@ struct ForegroundGateReport {
 		}
 		if let ownedSheetWindowId { output["ownedSheetReleaseWindowId"] = Int(ownedSheetWindowId) }
 		if ownedSheetTransitionObserved { output["ownedSheetTransitionObserved"] = true }
+		if ownedTargetClosedWithoutReplacement { output["ownedTargetClosedWithoutReplacement"] = true }
 		if let firstDiagnostics { output["firstMapping"] = firstDiagnostics }
 		if let secondDiagnostics { output["secondMapping"] = secondDiagnostics }
 		return output
 	}
 }
 
+struct ForegroundClosedTargetSample {
+	// nil means a failed/invalid inventory, never an empty desktop.
+	let axWindowCount: Int?
+	let cgTargetExists: Bool?
+}
+
+func provenClosedForegroundTarget(_ report: ForegroundGateReport,
+	first: ForegroundClosedTargetSample, second: ForegroundClosedTargetSample) -> Bool {
+	report.target.windowId > 0 && !report.targetIsMain && !report.focusedWindowMatches
+		&& report.frontmostPidStable
+		&& report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: nil)
+		&& report.firstActual == report.actual
+		&& first.axWindowCount == 0 && second.axWindowCount == 0
+		&& first.cgTargetExists == false && second.cgTargetExists == false
+}
+
 func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwnedKey: Bool = false) -> Bool {
+	if releasingOwnedKey && report.ownedTargetClosedWithoutReplacement { return false }
 	// This grants another read, never input. The next sample must prove a
 	// stable direct owned sheet before any transaction-owned key is released.
 	if releasingOwnedKey, report.ownedSheetTransitionObserved,
@@ -306,6 +327,15 @@ func dispatchForegroundEventIfVerified(
 		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
 		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: sheetId),
 		report.firstActual == report.actual {
+		ownedRelease = true
+	} else if isOwnedForegroundKeyRelease(event, dispatch: dispatch),
+		report.ownedTargetClosedWithoutReplacement,
+		report.target.windowId > 0, !report.targetIsMain, !report.focusedWindowMatches,
+		report.frontmostPidStable,
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: nil),
+		report.firstActual == report.actual {
+		// Balance only this transaction's already emitted chord. This does not
+		// authorize a new key, pointer event, another window or another app.
 		ownedRelease = true
 	} else {
 		ownedRelease = false

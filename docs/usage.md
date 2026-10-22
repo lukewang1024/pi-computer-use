@@ -53,6 +53,17 @@ inspect_ui({ stateId, ref: "@e12" })
 
 ## Acting and batching
 
+Windows native `scrollX`/`scrollY` are integer small steps in `[-20,20]`, not
+screenshot pixels. Positive values move right/down. A semantic UIA target
+receives the requested number of small increments; physical delivery uses the
+same number of wheel notches. Distance remains application-dependent. Use a few
+steps and check a page/position condition; prefer an observed page control or
+scrollbar for long navigation. UIA receipts retain requested and completed
+increments and readable before/after scroll percentages. Provider error stops
+the remaining increments without pointer fallback or replay. Missing or unchanged
+position evidence leaves the effect unverified; use the returned state to
+reconcile it. Browser, macOS and Linux scroll units are unchanged.
+
 The public action shape is always transactional:
 
 ```ts

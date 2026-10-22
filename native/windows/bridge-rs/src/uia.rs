@@ -903,7 +903,7 @@ mod native {
     }
 
     pub enum ScrollResult {
-        Scrolled,
+        Scrolled(Value),
         NoPattern,
     }
 
@@ -1144,30 +1144,56 @@ mod native {
         x: f64,
         y: f64,
     ) -> Result<ScrollResult, String> {
+        let plan = crate::scroll::ScrollPlan::new(x, y)?;
         let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
         if let Ok(pattern) = unsafe {
             element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
         } {
-            let horizontal = if x > 0.0 {
-                ScrollAmount_SmallIncrement
-            } else if x < 0.0 {
-                ScrollAmount_SmallDecrement
-            } else {
-                ScrollAmount_NoAmount
+            let started = std::time::Instant::now();
+            let percent = |value: Result<f64, windows::core::Error>| value.ok()
+                .filter(|n| n.is_finite() && (0.0..=100.0).contains(n));
+            let before_x = percent(unsafe { pattern.CurrentHorizontalScrollPercent() });
+            let before_y = percent(unsafe { pattern.CurrentVerticalScrollPercent() });
+            let amount = |n: i32| match n.cmp(&0) {
+                std::cmp::Ordering::Greater => ScrollAmount_SmallIncrement,
+                std::cmp::Ordering::Less => ScrollAmount_SmallDecrement,
+                std::cmp::Ordering::Equal => ScrollAmount_NoAmount,
             };
-            let vertical = if y > 0.0 {
-                ScrollAmount_SmallIncrement
-            } else if y < 0.0 {
-                ScrollAmount_SmallDecrement
-            } else {
-                ScrollAmount_NoAmount
+            let dispatched = plan.dispatch(|sx, sy| {
+                let enabled = unsafe { element.CurrentIsEnabled() }
+                    .map_err(|e| format!("Scroll enabled check: {e}"))?.as_bool();
+                if !enabled { return Err("Scroll target became disabled".to_owned()); }
+                unsafe { pattern.Scroll(amount(sx), amount(sy)) }
+                    .map_err(|e| format!("Scroll provider: {e}"))
+            });
+            let after_x = percent(unsafe { pattern.CurrentHorizontalScrollPercent() });
+            let after_y = percent(unsafe { pattern.CurrentVerticalScrollPercent() });
+            let axis_changed = |before: Option<f64>, after: Option<f64>| match (before, after) {
+                (Some(a), Some(b)) => Some((a - b).abs() > f64::EPSILON),
+                _ => None,
             };
-            unsafe {
-                pattern
-                    .Scroll(horizontal, vertical)
-                    .map_err(|e| format!("Scroll: {e}"))?;
-            }
-            return Ok(ScrollResult::Scrolled);
+            let changes = [if plan.x != 0 { axis_changed(before_x, after_x) } else { Some(false) },
+                if plan.y != 0 { axis_changed(before_y, after_y) } else { Some(false) }];
+            let changed = if changes.contains(&Some(true)) { Some(true) }
+                else if changes.contains(&None) { None } else { Some(false) };
+            let verified = plan.verifies_progress((before_x, before_y), (after_x, after_y)) && dispatched.error.is_none();
+            let uncertain = dispatched.error.is_some();
+            return Ok(ScrollResult::Scrolled(serde_json::json!({
+                "outcome": if plan.is_empty() { "didnt" } else if verified { "worked" } else { "unknown" },
+                "performed": { "grounding": "description", "delivery": "ax" },
+                "evidence": { "scroll": {
+                    "unit": "small-step", "requestedX": plan.x, "requestedY": plan.y,
+                    "plannedCalls": plan.len(), "attemptedCalls": dispatched.attempted,
+                    "completedCalls": dispatched.completed,
+                    "before": { "horizontalPercent": before_x, "verticalPercent": before_y },
+                    "after": { "horizontalPercent": after_x, "verticalPercent": after_y },
+                    "positionChanged": changed, "effectVerified": verified,
+                    "elapsedMs": started.elapsed().as_millis(),
+                    "error": dispatched.error
+                } },
+                "inputRetryProhibited": !plan.is_empty() && !verified,
+                "providerCompletionUncertain": uncertain
+            })));
         }
         Ok(ScrollResult::NoPattern)
     }
@@ -1485,7 +1511,7 @@ pub enum SetTextResult {
 }
 #[cfg(not(windows))]
 pub enum ScrollResult {
-    Scrolled,
+    Scrolled(Value),
     NoPattern,
 }
 #[cfg(not(windows))]

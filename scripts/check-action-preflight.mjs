@@ -20,6 +20,16 @@ assert.throws(()=>preflightActionSequence([{action:'click',x:100,y:20}],false,en
 assert.throws(()=>preflightActionSequence([{action:'drag',ref:'@e1',path:[{x:0,y:0},{x:NaN,y:4}]}],false,env),/Invalid point/);
 assert.throws(()=>preflightActionSequence([{action:'keypress',keys:['Enter']}],true,{...env,image:undefined}),/image-bearing/);
 assert.throws(()=>preflightActionSequence([{action:'keypress',keys:['Enter']}],false,env),/requires either ref/);
+// Reject pixel-sized or fractional Windows wheel amounts before any input in
+// the transaction; browser/macOS/Linux amounts keep their existing contract.
+for(const scrollY of [6000,-21,21,0.5,NaN,Infinity,'3']) {
+ assert.throws(()=>preflightActionSequence([{action:'press',ref:'@e1'},{action:'scroll',ref:'@e1',scrollY}],false,env),/integer small steps/);
+}
+for(const scrollY of [-20,-3,0,3,20]) {
+ const prepared=preflightActionSequence([{action:'scroll',ref:'@e1',scrollY}],false,env)[0];
+ assert.equal(prepared.params.scrollY,scrollY);
+}
+assert.equal(preflightActionSequence([{action:'scroll',ref:'@e1',scrollY:6000}],false,{...env,platform:'macos'})[0].params.scrollY,6000);
 for(const action of sequence)assert.equal(canRetryInForeground(action,'unknown',false),false,'unknown delivery must never be retried');
 assert.equal(canRetryInForeground(sequence[1],'didnt',true),false,'headless execution has no foreground retry');
 const failed=describeActionExecution(1,3,'didnt');

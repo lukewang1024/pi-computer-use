@@ -1409,9 +1409,7 @@ fn act_on_ref(
             )
             .map_err(stale_ref_from_uia)?
             {
-                windows_bridge::uia::ScrollResult::Scrolled => Ok(
-                    json!({ "outcome": "unknown", "performed": { "grounding": "description", "delivery": "ax" } }),
-                ),
+                windows_bridge::uia::ScrollResult::Scrolled(receipt) => Ok(receipt),
                 windows_bridge::uia::ScrollResult::NoPattern => {
                     coordinate_fallback(args, parsed, &element, record.pid)
                 }

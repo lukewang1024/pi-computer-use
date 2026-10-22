@@ -281,13 +281,17 @@ pub fn parse_act_request(args: &Value) -> Result<ParsedActRequest, ProtocolError
     } else {
         return Err(invalid("act target must include ref or x/y"));
     };
+    let params = args.get("params").cloned().unwrap_or_else(|| json!({}));
+    if action == "scroll" {
+        crate::scroll::ScrollPlan::from_params(&params).map_err(invalid)?;
+    }
     Ok(ParsedActRequest {
         look_id,
         pid: args.get("pid").and_then(Value::as_u64),
         action,
         policy,
         target,
-        params: args.get("params").cloned().unwrap_or_else(|| json!({})),
+        params,
     })
 }
 
@@ -800,6 +804,8 @@ mod native {
     }
 
     fn scroll(x: i32, y: i32, dx: f64, dy: f64, args: &Value) -> Result<(), ProtocolError> {
+        let plan = crate::scroll::ScrollPlan::new(dx, dy).map_err(invalid)?;
+        if plan.is_empty() { return Ok(()); }
         guard_point(args, x, y)?;
         unsafe { SetCursorPos(x, y) }.map_err(input_failed)?;
         guard_point(args, x, y)?;
@@ -807,13 +813,13 @@ mod native {
         if dy != 0.0 {
             inputs.push(mouse(
                 MOUSEEVENTF_WHEEL,
-                (-dy * 120.0).round() as i32 as u32,
+                plan.wheel_deltas().1 as u32,
             ));
         }
         if dx != 0.0 {
             inputs.push(mouse(
                 MOUSEEVENTF_HWHEEL,
-                (dx * 120.0).round() as i32 as u32,
+                plan.wheel_deltas().0 as u32,
             ));
         }
         if inputs.is_empty() {

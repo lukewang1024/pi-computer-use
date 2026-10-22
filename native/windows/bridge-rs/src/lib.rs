@@ -10,6 +10,7 @@ pub mod pointer_motion;
 pub mod protocol;
 pub mod refs;
 pub mod state;
+pub mod scroll;
 pub mod uia;
 pub mod window;
 

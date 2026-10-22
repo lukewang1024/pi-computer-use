@@ -44,7 +44,14 @@ function clickCount(value: unknown, fallback = 1): number {
 	return Math.max(1, Math.min(3, Math.round(toFiniteNumber(value, fallback))));
 }
 
-function scrollDelta(value: unknown): number {
+function scrollDelta(value: unknown, platform: PlatformName): number {
+	if (platform === "windows") {
+		if (value === undefined) return 0;
+		if (typeof value !== "number" || !Number.isInteger(value) || Math.abs(value) > 20) {
+			throw new Error("Windows native scroll amounts must be integer small steps between -20 and 20, not pixels. Verify page/position progress before scrolling again.");
+		}
+		return value;
+	}
 	return Math.max(-10_000, Math.min(10_000, Math.round(toFiniteNumber(value, 0))));
 }
 
@@ -287,7 +294,7 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 		case "setText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "typeText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus, needsForeground: !env.headless && env.platform === "macos" };
 		case "keypress": return { action: operation, target, params: { keys: keys(action.keys, env.platform) }, establishesFocus: false, usesCurrentFocus, needsForeground: !env.headless && env.platform === "macos" };
-		case "scroll": return { action: operation, target, params: { scrollX: scrollDelta(action.scrollX), scrollY: scrollDelta(action.scrollY) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
+		case "scroll": return { action: operation, target, params: { scrollX: scrollDelta(action.scrollX, env.platform), scrollY: scrollDelta(action.scrollY, env.platform) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "drag": return { action: operation, target, params: { path: path(action.path, env) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "moveMouse": return { action: operation, target, params: pointerMotion(action, env), establishesFocus: false, usesCurrentFocus: false, needsForeground: !env.headless && action.pointerMode === "physical" };
 	}

@@ -82,5 +82,36 @@ try{
   await assert.rejects(()=>call(executeAct,{stateId:observation.details.capture.stateId,actions:[{action:'press',ref}]}));
   assert.equal(dispatches,1,'modifier interruption must not be replayed');
  }
+ // Release verification failures and future native failure codes must retain
+ // quarantine based on their dispatch evidence, including evidence-only replies.
+ for (const code of ['input_interrupted_after_partial_hid', 'future_native_failure']) {
+  for (const evidenceOnly of [false, true]) {
+   await shutdownComputerUseSession();
+   dispatches = 0;
+   backend.act = async () => {
+    dispatches++;
+    const inputDispatch = {eventsDispatched:4,unreleasedKeys:[13],unreleasedMouseButtons:[0],recoveryRequired:true,retrySafe:false};
+    return {outcome:'unknown',performed:{delivery:'hid'},error:{code,message:'Release not verified'},
+     ...(evidenceOnly ? {evidence:{inputStateVerification:{phase:'after_release',inputDispatch}}} : {inputDispatch})};
+   };
+   const roots = await call(executeFind,{text:'Owned fixture'});
+   const observation = await call(executeObserve,{root:roots.details.windows[0].windowRef,mode:'semantic'});
+   const search = await call(executeSearchUi,{stateId:observation.details.capture.stateId,text:'Submit',role:'button'});
+   const ref = search.details.matches[0].ref;
+   const before = observations;
+   const result = await call(executeAct,{stateId:observation.details.capture.stateId,actions:[{action:'press',ref},{action:'press',ref}]});
+   assert.equal(dispatches,1,code+' must stop the remaining action');
+   assert.equal(observations,before,'release uncertainty must not mint successor state');
+   assert.equal(result.details.status,'dispatch_outcome_unknown');
+   assert.equal(result.details.execution.dispatchCompletion,'unknown');
+   assert.equal(result.details.error.code,'foreground_interrupted_after_partial_hid','retain the legacy quarantine code for older Executors');
+   assert.equal(result.details.execution.error.code,code,'retain the exact native cause');
+   assert.deepEqual(result.details.execution.inputDispatch.unreleasedKeys,[13]);
+   assert.deepEqual(result.details.execution.inputDispatch.unreleasedMouseButtons,[0]);
+   assert.equal(result.details.stateId,undefined);
+   await assert.rejects(()=>call(executeAct,{stateId:observation.details.capture.stateId,actions:[{action:'press',ref}]}));
+   assert.equal(dispatches,1,'unknown input must never replay');
+  }
+ }
  console.log('CU public executor unknown-delivery regression passed (new coverage; injected native backend)');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

@@ -387,6 +387,67 @@ func modifierRejectedActResult(details: [String: Any]) -> [String: Any] {
 	return result
 }
 
+struct ForegroundInputStateSample {
+	let sourceState: Int
+	let pressedKeys: [Int]
+	let pressedMouseButtons: [Int]
+
+	var released: Bool { pressedKeys.isEmpty && pressedMouseButtons.isEmpty }
+	var details: [String: Any] {
+		["sourceState": sourceState, "pressedKeys": pressedKeys, "pressedMouseButtons": pressedMouseButtons]
+	}
+}
+
+// Poll only state, never resend an event. A posted key-up/button-up is not an
+// acknowledgement that Quartz has actually released the requested input.
+func waitForForegroundInputRelease(
+	attempts: Int = 4,
+	sample: () -> [ForegroundInputStateSample],
+	pause: () -> Void
+) -> [ForegroundInputStateSample]? {
+	precondition(attempts > 0)
+	var latest: [ForegroundInputStateSample] = []
+	for attempt in 0..<attempts {
+		latest = sample()
+		if latest.count == 2, Set(latest.map(\.sourceState)) == Set([0, 1]), latest.allSatisfy(\.released) { return nil }
+		if attempt + 1 < attempts { pause() }
+	}
+	return latest
+}
+
+func inputStateFailureDetails(
+	phase: String, samples: [ForegroundInputStateSample], dispatch: ForegroundInputDispatchState
+) -> [String: Any] {
+	var inputDispatch = dispatch.details
+	if phase == "after_release" {
+		// These are possibly held inputs, not new ownership. They must never
+		// authorize a key-up/button-up to an unrelated foreground application.
+		inputDispatch["unreleasedKeys"] = dispatch.pressedKeys.union(samples.flatMap(\.pressedKeys)).sorted()
+		inputDispatch["unreleasedMouseButtons"] = dispatch.pressedMouseButtons.union(samples.flatMap(\.pressedMouseButtons)).sorted()
+	}
+	return ["phase": phase, "samples": samples.map(\.details), "inputDispatch": inputDispatch]
+}
+
+func inputStateRejectedActResult(details: [String: Any]) -> [String: Any] {
+	let dispatch = details["inputDispatch"] as? [String: Any] ?? [:]
+	let partial = (dispatch["eventsDispatched"] as? Int ?? 0) > 0
+	var error: [String: Any] = [
+		"code": partial ? "input_interrupted_after_partial_hid" : "input_state_unverified",
+		"message": partial
+			? "Native input failed or its release could not be verified after HID dispatch; do not replay input"
+			: "A requested key or mouse button is already held; no HID event was sent",
+	]
+	if let causeCode = details["causeCode"] { error["causeCode"] = causeCode }
+	var result: [String: Any] = [
+		"outcome": partial ? "unknown" : "didnt",
+		"performed": ["delivery": "hid"],
+		"evidence": ["inputStateVerification": details],
+		"error": error,
+	]
+	if partial { result["inputDispatch"] = dispatch }
+	return result
+}
+
 
 // AX cannot-complete may arrive after modal processing has already taken effect.
 // One attempted native action never authorizes a retry or physical fallback.

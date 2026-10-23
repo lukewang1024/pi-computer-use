@@ -1323,10 +1323,11 @@ function executionTraceFromAct(result: HelperActResult, policy = currentDelivery
 }
 
 function partialHidDispatchFromAct(result: HelperActResult): ExecutionTrace["inputDispatch"] {
-	if (result.outcome !== "unknown" || !["foreground_interrupted_after_partial_hid", "modifier_interrupted_after_partial_hid"].includes(result.error?.code ?? "")) return undefined;
+	if (result.outcome !== "unknown") return undefined;
 	const raw = (result as HelperActResult & { inputDispatch?: unknown }).inputDispatch
 		?? (result.evidence?.foregroundVerification && (result.evidence.foregroundVerification as Record<string, unknown>).inputDispatch)
-		?? (result.evidence?.modifierVerification && (result.evidence.modifierVerification as Record<string, unknown>).inputDispatch);
+		?? (result.evidence?.modifierVerification && (result.evidence.modifierVerification as Record<string, unknown>).inputDispatch)
+		?? (result.evidence?.inputStateVerification && (result.evidence.inputStateVerification as Record<string, unknown>).inputDispatch);
 	if (!raw || typeof raw !== "object") return undefined;
 	const value = raw as Record<string, unknown>;
 	if (value.recoveryRequired !== true || value.retrySafe !== false || typeof value.eventsDispatched !== "number" || value.eventsDispatched <= 0) return undefined;
@@ -2435,12 +2436,14 @@ async function terminalDesktopActionResult(
 	};
 	const unreleasedKeys = execution.inputDispatch?.unreleasedKeys ?? [];
 	const unreleasedButtons = execution.inputDispatch?.unreleasedMouseButtons ?? [];
+	const inputFailure = execution.error?.code === "modifier_interrupted_after_partial_hid" ? "Modifier"
+		: execution.error?.code === "foreground_interrupted_after_partial_hid" ? "Foreground" : "Native input";
 	const result = semanticUnknown
 		? `The AT-SPI semantic action may already have taken effect, but its outcome could not be confirmed. Do not retry this action. Request ${execution.semanticDispatch?.requestId} returned an uncertain mutation error; no physical fallback was sent.`
 		: transportUnknown
 		? `The native outcome of the act_ui request is unknown. Request ${execution.transport?.requestId} ${execution.transport?.requestWriteAttempted ? "had a helper-socket write attempted, but daemon receipt and input delivery are unknown" : "was not written to the helper socket"}. Do not retry this action. Explicit desktop recovery is required before continuing.`
 		: partialInputUnknown
-		? `${code === "modifier_interrupted_after_partial_hid" ? "Modifier" : "Foreground"} verification failed after ${execution.inputDispatch?.eventsDispatched} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
+		? `${inputFailure} verification failed after ${execution.inputDispatch?.eventsDispatched} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
 		: targetClosed
 		? `The action was delivered, and its source root ${target.appName} — ${target.windowTitle} closed before a successor observation could be captured.`
 		: `The action was delivered, but its source root ${target.appName} — ${target.windowTitle} could not be observed afterward: ${message}`;

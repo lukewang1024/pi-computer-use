@@ -155,6 +155,10 @@ private struct ModifierInputDispatchFailure: Error {
 	let details: [String: Any]
 }
 
+private struct InputStateDispatchFailure: Error {
+	let details: [String: Any]
+}
+
 private struct RootAXEvent {
 	let sequence: UInt64
 	let timestamp: TimeInterval
@@ -726,6 +730,8 @@ final class Bridge {
 				return foregroundRejectedActResult(details: failure.details)
 			} catch let failure as ModifierInputDispatchFailure {
 				return modifierRejectedActResult(details: failure.details)
+			} catch let failure as InputStateDispatchFailure {
+				return inputStateRejectedActResult(details: failure.details)
 			} catch let failure as TextInputSourceDispatchFailure {
 				return textInputSourceRejectedActResult(failure.inputDispatch)
 			}
@@ -2313,6 +2319,29 @@ final class Bridge {
 	}
 
 	private func act(_ request: [String: Any]) throws -> [String: Any] {
+		try withInputDispatch { try actOnce(request, dispatch: $0) }
+	}
+
+	private func withInputDispatch(_ perform: (ForegroundInputDispatchState) throws -> [String: Any]) throws -> [String: Any] {
+		let dispatch = ForegroundInputDispatchState()
+		do {
+			return try perform(dispatch)
+		} catch let failure as ForegroundGateFailure { throw failure
+		} catch let failure as ModifierInputDispatchFailure { throw failure
+		} catch let failure as InputStateDispatchFailure { throw failure
+		} catch let failure as TextInputSourceDispatchFailure { throw failure
+		} catch {
+			guard dispatch.eventsDispatched > 0 else { throw error }
+			// An allocation/AX/other error after mouse-down or key-down is still
+			// partial input. Do not let an unlisted error type escape quarantine.
+			throw InputStateDispatchFailure(details: [
+				"phase": "dispatch", "inputDispatch": dispatch.details,
+				"causeCode": (error as? BridgeFailure)?.code ?? "native_input_failed",
+			])
+		}
+	}
+
+	private func actOnce(_ request: [String: Any], dispatch: ForegroundInputDispatchState) throws -> [String: Any] {
 		let action = try stringArg(request, "action")
 		let params = request["params"] as? [String: Any] ?? [:]
 		let validatedKeys = action == "keypress"
@@ -2355,7 +2384,7 @@ final class Bridge {
 		let deferRootDelta = boolArg(request, "deferRootDelta") ?? false
 		let delivery = policy == "background" ? "pid" : ((params["delivery"] as? String) == "pid" ? "pid" : "hid")
 		let physicalTarget: PhysicalInputTarget? = delivery == "hid"
-			? PhysicalInputTarget(pid: pid, windowId: record.windowId, axWindow: record.windowId > 0 ? windowElement(pid: pid, windowId: record.windowId) : nil, dispatchState: ForegroundInputDispatchState())
+			? PhysicalInputTarget(pid: pid, windowId: record.windowId, axWindow: record.windowId > 0 ? windowElement(pid: pid, windowId: record.windowId) : nil, dispatchState: dispatch)
 			: nil
 		var holdsPhysicalInput = false
 		func acquirePhysicalInputIfNeeded() {
@@ -3027,6 +3056,10 @@ final class Bridge {
 				break
 			} catch let failure as ModifierInputDispatchFailure {
 				steps.append(modifierRejectedActResult(details: failure.details))
+				stoppedAt = index
+				break
+			} catch let failure as InputStateDispatchFailure {
+				steps.append(inputStateRejectedActResult(details: failure.details))
 				stoppedAt = index
 				break
 			} catch let failure as TextInputSourceDispatchFailure {
@@ -4677,6 +4710,28 @@ final class Bridge {
 		}
 	}
 
+	private func verifyInputStateReleased(keys: [Int] = [], buttons: [Int] = [], target: PhysicalInputTarget?, delivery: String, beforeDispatch: Bool) throws {
+		guard delivery == "hid", let target else { return }
+		func samples() -> [ForegroundInputStateSample] {
+			[CGEventSourceStateID.combinedSessionState, .hidSystemState].map { state in
+				ForegroundInputStateSample(sourceState: Int(state.rawValue),
+					pressedKeys: keys.filter { CGEventSource.keyState(state, key: CGKeyCode($0)) },
+					pressedMouseButtons: buttons.filter { CGEventSource.buttonState(state, button: CGMouseButton(rawValue: UInt32($0))!) })
+			}
+		}
+		let held: [ForegroundInputStateSample]?
+		if beforeDispatch {
+			let current = samples()
+			held = current.allSatisfy(\.released) ? nil : current
+		} else {
+			held = waitForForegroundInputRelease(sample: samples, pause: { usleep(8_000) })
+		}
+		if let held {
+			throw InputStateDispatchFailure(details: inputStateFailureDetails(
+				phase: beforeDispatch ? "before_dispatch" : "after_release", samples: held, dispatch: target.dispatchState))
+		}
+	}
+
 	private func postMouseMove(to point: CGPoint, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
@@ -4733,6 +4788,7 @@ final class Bridge {
 	private func postMouseClick(at point: CGPoint, pid: Int32, target: PhysicalInputTarget?, button: CGMouseButton = .left, clickCount: Int = 1, delivery: String = "hid") throws {
 		if delivery == "hid" { physicalInputLock.lock() }
 		defer { if delivery == "hid" { physicalInputLock.unlock() } }
+		try verifyInputStateReleased(buttons: [Int(button.rawValue)], target: target, delivery: delivery, beforeDispatch: true)
 		try postMouseMove(to: point, pid: pid, target: target, delivery: delivery)
 		for index in 1...max(1, clickCount) {
 			guard let down = CGEvent(mouseEventSource: nil, mouseType: mouseDownType(for: button), mouseCursorPosition: point, mouseButton: button),
@@ -4745,6 +4801,7 @@ final class Bridge {
 			try postEvent(down, pid: pid, target: target, delivery: delivery)
 			usleep(12_000)
 			try postEvent(up, pid: pid, target: target, delivery: delivery)
+			try verifyInputStateReleased(buttons: [Int(button.rawValue)], target: target, delivery: delivery, beforeDispatch: false)
 			if index < clickCount {
 				usleep(70_000)
 			}
@@ -4757,6 +4814,7 @@ final class Bridge {
 		guard points.count >= 2, let first = points.first else {
 			throw BridgeFailure(message: "Drag requires at least two points", code: "invalid_args")
 		}
+		try verifyInputStateReleased(buttons: [0], target: target, delivery: delivery, beforeDispatch: true)
 		try postMouseMove(to: first, pid: pid, target: target, delivery: delivery)
 		guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: first, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse down event", code: "input_failed")
@@ -4778,6 +4836,7 @@ final class Bridge {
 			throw BridgeFailure(message: "Failed to create mouse up event", code: "input_failed")
 		}
 		try postEvent(up, pid: pid, target: target, delivery: delivery)
+		try verifyInputStateReleased(buttons: [0], target: target, delivery: delivery, beforeDispatch: false)
 	}
 
 	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32, target: PhysicalInputTarget?, delivery: String = "hid") throws {
@@ -4986,8 +5045,11 @@ final class Bridge {
 				if foregroundModifierKeyCodes.contains(keyCode) { event.type = .flagsChanged }
 				events.append(event)
 			}
+			let requestedKeys = [Int(code)] + activeModifierKeyCodes(flags)
+			try verifyInputStateReleased(keys: requestedKeys, target: target, delivery: delivery, beforeDispatch: true)
 			for event in events { try postEvent(event, pid: pid, target: target, delivery: delivery) }
 			usleep(8_000)
+			try verifyInputStateReleased(keys: requestedKeys, target: target, delivery: delivery, beforeDispatch: false)
 			return
 		}
 		guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
@@ -5052,9 +5114,11 @@ final class Bridge {
 			}
 			setUnicodeString(event: down, text: char)
 			setUnicodeString(event: up, text: char)
+			try verifyInputStateReleased(keys: [0], target: target, delivery: delivery, beforeDispatch: true)
 			try postEvent(down, pid: pid, target: target, delivery: delivery)
 			try postEvent(up, pid: pid, target: target, delivery: delivery)
 			usleep(8_000)
+			try verifyInputStateReleased(keys: [0], target: target, delivery: delivery, beforeDispatch: false)
 		}
 	}
 
@@ -5102,9 +5166,11 @@ final class Bridge {
 		else { throw BridgeFailure(message: "Failed to create unicode text event", code: "input_failed") }
 		setUnicodeString(event: down, text: text)
 		setUnicodeString(event: up, text: text)
+		try verifyInputStateReleased(keys: [0], target: target, delivery: delivery, beforeDispatch: true)
 		try postEvent(down, pid: pid, target: target, delivery: delivery)
 		usleep(8_000)
 		try postEvent(up, pid: pid, target: target, delivery: delivery)
+		try verifyInputStateReleased(keys: [0], target: target, delivery: delivery, beforeDispatch: false)
 	}
 
 	/// Prefer physical key codes for characters represented by the US layout.
@@ -5143,6 +5209,28 @@ final class Bridge {
 	// Test-only entry: exercises the real private parser and mapping.
 	// No run loop, capture, permission probe or event posting is invoked.
 	func nativeKeyPreflightTests() throws {
+		// Inject an allocation failure after mouse-down into the actual act
+		// dispatch wrapper. No OS input, capture, permission probe or UI runs.
+		do {
+			_ = try withInputDispatch { dispatch in
+				dispatch.record(.mouseDown(0))
+				throw BridgeFailure(message: "injected allocation failure", code: "input_failed")
+			}
+			preconditionFailure("a partial dispatch failure must not return normally")
+		} catch let failure as InputStateDispatchFailure {
+			let result = inputStateRejectedActResult(details: failure.details)
+			precondition(result["outcome"] as? String == "unknown")
+			let dispatch = result["inputDispatch"] as! [String: Any]
+			precondition(dispatch["unreleasedMouseButtons"] as? [Int] == [0])
+			precondition(dispatch["retrySafe"] as? Bool == false)
+			precondition((result["error"] as? [String: Any])?["causeCode"] as? String == "input_failed")
+		}
+		do {
+			_ = try withInputDispatch { _ in throw BridgeFailure(message: "invalid before input", code: "invalid_args") }
+			preconditionFailure("an invalid request must still fail")
+		} catch let failure as BridgeFailure {
+			precondition(failure.code == "invalid_args", "a zero-dispatch error retains its original contract")
+		}
 		let unmapped = ["🙂", "汉", "é", "e\u{0301}", "\u{0000}"]
 		for key in unmapped {
 			let normalized = try normalizedMacKeypressKeys([key])

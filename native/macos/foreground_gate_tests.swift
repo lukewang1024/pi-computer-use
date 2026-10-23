@@ -62,6 +62,38 @@ private func assertPartial(_ result: [String: Any]?, count: Int, keys: [Int], bu
 private struct ForegroundGateTests {
 	static func main() {
 		do {
+		let up = [0, 1].map { ForegroundInputStateSample(sourceState: $0, pressedKeys: [], pressedMouseButtons: []) }
+		let held = [ForegroundInputStateSample(sourceState: 0, pressedKeys: [], pressedMouseButtons: []),
+			ForegroundInputStateSample(sourceState: 1, pressedKeys: [13], pressedMouseButtons: [])]
+		let idle = ForegroundInputDispatchState()
+		let preflight = inputStateRejectedActResult(details: inputStateFailureDetails(phase: "before_dispatch", samples: held, dispatch: idle))
+		precondition(preflight["outcome"] as? String == "didnt")
+		precondition(preflight["inputDispatch"] == nil && idle.pressedKeys.isEmpty, "a pre-held user key is not owned by the action")
+		// Simulate a complete posted chord whose W key-up was dropped by the
+		// event system. An empty emitted-event ledger is not release proof.
+		let completed = ForegroundInputDispatchState()
+		for event in foregroundKeyChordEvents(code: 13, modifiers: [55])! { completed.record(event) }
+		precondition(completed.pressedKeys.isEmpty)
+		var reads = 0, pauses = 0
+		let failure = waitForForegroundInputRelease(sample: { reads += 1; return held }, pause: { pauses += 1 })!
+		precondition(reads == 4 && pauses == 3, "release verification must be bounded and read-only")
+		let unknown = inputStateRejectedActResult(details: inputStateFailureDetails(phase: "after_release", samples: failure, dispatch: completed))
+		precondition(unknown["outcome"] as? String == "unknown")
+		let report = unknown["inputDispatch"] as! [String: Any]
+		precondition(report["unreleasedKeys"] as? [Int] == [13])
+		precondition(report["recoveryRequired"] as? Bool == true && report["retrySafe"] as? Bool == false)
+		precondition(!isOwnedForegroundKeyRelease(.keyUp(13, modifiers: []), dispatch: completed), "uncertain observed input never creates release authority")
+		reads = 0
+		precondition(waitForForegroundInputRelease(sample: { reads += 1; return reads < 3 ? held : up }, pause: {}) == nil)
+		precondition(reads == 3, "a delayed release may be confirmed without replay")
+		precondition(waitForForegroundInputRelease(sample: { [up[0]] }, pause: {}) != nil, "one source table cannot prove release")
+		let mouse = [0, 1].map { ForegroundInputStateSample(sourceState: $0, pressedKeys: [], pressedMouseButtons: [0]) }
+		let click = ForegroundInputDispatchState(); click.record(.mouseDown(0)); click.record(.mouseUp(0))
+		let mouseFailure = inputStateRejectedActResult(details: inputStateFailureDetails(phase: "after_release", samples: mouse, dispatch: click))
+		precondition((mouseFailure["inputDispatch"] as? [String: Any])?["unreleasedMouseButtons"] as? [Int] == [0])
+		}
+
+		do {
 		// Cmd+W can close the last document on key-down. Independently proven
 		// closure permits only the releases already owned by that transaction.
 		let chord = foregroundKeyChordEvents(code: 13, modifiers: [55])!
@@ -103,6 +135,25 @@ private struct ForegroundGateTests {
 		for invalid in [racing, changed, foreign, replaced, stillMain] {
 			precondition(!provenClosedForegroundTarget(invalid, first: proof, second: proof))
 		}
+		var chordCases = 0, interruptionCases = 0
+		for mask in 0..<16 {
+			let modifiers = [55, 56, 58, 59].enumerated().filter { mask & (1 << $0.offset) != 0 }.map(\.element)
+			for code in 0...127 where !foregroundModifierKeyCodes.contains(code) {
+				let events = foregroundKeyChordEvents(code: code, modifiers: modifiers)!
+				let pressedCount = modifiers.count + 1
+				let reports = Array(repeating: original, count: pressedCount) + Array(repeating: closed, count: events.count - pressedCount)
+				let balanced = sendSequence(events, reports: reports)
+				precondition(balanced.result == nil && balanced.sink == events, "closed-window release must work for every supported chord shape")
+				chordCases += 1
+				for cut in 0..<events.count {
+					let stopped = sendSequence(events, reports: Array(repeating: original, count: cut) + Array(repeating: foreign, count: events.count - cut))
+					precondition(stopped.sink == Array(events.prefix(cut)), "foreground loss must stop without replaying or sending new input")
+					precondition(stopped.result?["outcome"] as? String == (cut == 0 ? "didnt" : "unknown"))
+					interruptionCases += 1
+				}
+			}
+		}
+		print("verified \(chordCases) closed-window chord shapes and \(interruptionCases) interrupted dispatch boundaries without OS input")
 		}
 
 		do {

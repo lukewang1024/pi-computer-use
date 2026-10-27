@@ -155,6 +155,83 @@ private struct ForegroundGateTests {
 		}
 		print("verified \(chordCases) closed-window chord shapes and \(interruptionCases) interrupted dispatch boundaries without OS input")
 		}
+		do {
+		let owned: (Int32?, String?, Int32?, String?, Bool, Bool) -> Bool = { sheetPid, sheetRole, parentPid, parentRole, main, direct in
+			isOwnedModalSheet(targetPid: target.pid, sheetPid: sheetPid, sheetRole: sheetRole,
+				parentPid: parentPid, parentRole: parentRole, parentIsMain: main, directlyOwned: direct)
+		}
+		precondition(owned(target.pid, "AXSheet", target.pid, "AXWindow", true, true))
+		precondition(!owned(nil, "AXSheet", target.pid, "AXWindow", true, true))
+		precondition(!owned(target.pid + 1, "AXSheet", target.pid, "AXWindow", true, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid + 1, "AXWindow", true, true))
+		precondition(!owned(target.pid, "AXWindow", target.pid, "AXWindow", true, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid, "AXSheet", true, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid, "AXWindow", false, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid, "AXWindow", true, false))
+		let correct = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId)
+		var sheet = gateReport(correct, main: false)
+		precondition(!sheet.verified, "an arbitrary non-main window remains ineligible")
+		sheet.targetIsOwnedModalSheet = true
+		precondition(sheet.verified)
+		let escape: [ForegroundInputEvent] = [.keyDown(53, modifiers: []), .keyUp(53, modifiers: [])]
+		precondition(sendSequence(escape, reports: [sheet, sheet]).sink == escape)
+		for event in [ForegroundInputEvent.mouseDown(0), .mouseUp(0), .other] {
+			precondition(!dispatchForegroundEventIfVerified(sheet, event: event, dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		}
+		var wrongWindow = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1), main: false)
+		wrongWindow.targetIsOwnedModalSheet = true
+		var noFocus = gateReport(correct, focused: false, main: false)
+		noFocus.targetIsOwnedModalSheet = true
+		var racing = gateReport(correct, main: false, pidStable: false)
+		racing.targetIsOwnedModalSheet = true
+		for invalid in [wrongWindow, noFocus, racing] {
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: escape[0], dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		}
+		// Escape may dismiss the sheet on key-down. Only balance keys already
+		// owned by this transaction back to its independently proven main parent.
+		let parent = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 10)
+		var returned = gateReport(parent, focused: false, main: false)
+		returned.firstActual = parent
+		returned.ownedModalParentWindowId = parent.windowId
+		let completed = sendSequence(escape, reports: [sheet, returned])
+		precondition(completed.sink == escape && completed.result == nil)
+		let held = ForegroundInputDispatchState()
+		held.record(escape[0])
+		for event in [ForegroundInputEvent.keyDown(4, modifiers: []), .keyUp(4, modifiers: []), .mouseUp(0), .other] {
+			precondition(!dispatchForegroundEventIfVerified(returned, event: event, dispatch: held, emit: { preconditionFailure() }))
+		}
+		precondition(!dispatchForegroundEventIfVerified(returned, event: escape[1], dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		var missingParent = returned
+		missingParent.ownedModalParentWindowId = nil
+		var changedParent = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 11), focused: false, main: false)
+		changedParent.firstActual = parent
+		changedParent.ownedModalParentWindowId = parent.windowId
+		var changedPid = gateReport(ForegroundActualIdentity(pid: target.pid + 1, windowId: target.windowId + 10), focused: false, main: false)
+		changedPid.firstActual = parent
+		changedPid.ownedModalParentWindowId = parent.windowId
+		var unstable = returned
+		unstable.frontmostPidStable = false
+		var changedSample = returned
+		changedSample.firstActual = correct
+		precondition(!shouldReobserveForegroundRead(changedSample, releasingOwnedKey: true))
+		var closingTransition = changedSample
+		closingTransition.ownedModalParentTransitionObserved = true
+		precondition(!shouldReobserveForegroundRead(closingTransition))
+		precondition(shouldReobserveForegroundRead(closingTransition, releasingOwnedKey: true))
+		precondition(!dispatchForegroundEventIfVerified(closingTransition, event: escape[1], dispatch: held, emit: { preconditionFailure() }))
+		var foreignTransition = closingTransition
+		foreignTransition.frontmostPidStable = false
+		precondition(!shouldReobserveForegroundRead(foreignTransition, releasingOwnedKey: true))
+		foreignTransition = closingTransition
+		foreignTransition.ownedModalParentWindowId = target.windowId + 11
+		precondition(!shouldReobserveForegroundRead(foreignTransition, releasingOwnedKey: true))
+		for invalid in [missingParent, changedParent, changedPid, unstable, changedSample] {
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: escape[1], dispatch: held, emit: { preconditionFailure() }))
+		}
+		let chord = foregroundKeyChordEvents(code: 53, modifiers: [55, 56])!
+		let chordDone = sendSequence(chord, reports: Array(repeating: sheet, count: 3) + Array(repeating: returned, count: 3))
+		precondition(chordDone.sink == chord && chordDone.result == nil)
+		}
 
 		do {
 		// A proven direct child sheet may receive only the remaining releases

@@ -140,11 +140,17 @@ private struct LookRecord {
 	var appMenuElementRefs: Set<String> = []
 }
 
+private final class OwnedModalParentBinding {
+	var element: AXUIElement?
+	var identity: ForegroundTargetIdentity?
+}
+
 private struct PhysicalInputTarget {
 	let pid: Int32
 	let windowId: UInt32
 	let axWindow: AXUIElement?
 	let dispatchState: ForegroundInputDispatchState
+	let ownedModalParent = OwnedModalParentBinding()
 }
 
 private struct ForegroundGateFailure: Error {
@@ -4582,6 +4588,23 @@ final class Bridge {
 		return report
 	}
 
+	private func directMainParentOfSheet(_ sheet: AXUIElement?, pid: Int32) -> AXUIElement? {
+		guard let sheet,
+			let parent = copyAttribute(sheet, attribute: kAXParentAttribute as CFString).flatMap(asAXElement)
+		else { return nil }
+		var sheetPid: pid_t = 0
+		var parentPid: pid_t = 0
+		guard AXUIElementGetPid(sheet, &sheetPid) == .success,
+			AXUIElementGetPid(parent, &parentPid) == .success,
+			isOwnedModalSheet(targetPid: pid, sheetPid: sheetPid,
+				sheetRole: stringAttribute(sheet, attribute: kAXRoleAttribute as CFString),
+				parentPid: parentPid, parentRole: stringAttribute(parent, attribute: kAXRoleAttribute as CFString),
+				parentIsMain: boolAttribute(parent, attribute: kAXMainAttribute as CFString) == true,
+				directlyOwned: sheetElements(of: parent).contains { sameElement($0, sheet) })
+		else { return nil }
+		return parent
+	}
+
 	private func readForegroundReport(target: PhysicalInputTarget, releasingOwnedKey: Bool = false) -> ForegroundGateReport {
 		func exactTargetStillExists() -> Bool? {
 			// Read a complete metadata inventory, including hidden/minimized
@@ -4604,6 +4627,9 @@ final class Bridge {
 		let firstFocusedMatches = firstFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
 		let firstWindowMatches = firstActual.pid == target.pid && firstActual.windowId == target.windowId
 		let firstTargetIsMain = target.axWindow.flatMap { boolAttribute($0, attribute: kAXMainAttribute as CFString) } ?? false
+		let firstParent = firstTargetIsMain ? nil : directMainParentOfSheet(target.axWindow, pid: target.pid)
+		let firstParentResolution = target.ownedModalParent.identity == nil
+			? firstParent.map { focusedWindowResolution(pid: target.pid, focused: $0) } : nil
 		// Re-read the PID, focused AX window, mapped window identity, and main state
 		// after the first AX walk. The final PID read catches visible activation
 		// races immediately before emit; this cannot make the OS operation atomic.
@@ -4614,6 +4640,9 @@ final class Bridge {
 		let secondFocused = secondResolution?.element
 		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
 		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
+		let secondParent = secondTargetIsMain ? nil : directMainParentOfSheet(target.axWindow, pid: target.pid)
+		let secondParentResolution = target.ownedModalParent.identity == nil
+			? secondParent.map { focusedWindowResolution(pid: target.pid, focused: $0) } : nil
 		let emitPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
 		var report = ForegroundGateReport(
 			target: ForegroundTargetIdentity(pid: target.pid, windowId: target.windowId),
@@ -4635,6 +4664,46 @@ final class Bridge {
 			first: ForegroundClosedTargetSample(axWindowCount: successfulAXWindowCount(firstResolution), cgTargetExists: firstTargetExists),
 			second: ForegroundClosedTargetSample(axWindowCount: successfulAXWindowCount(secondResolution), cgTargetExists: secondTargetExists)) {
 			report.ownedTargetClosedWithoutReplacement = true
+		}
+		// A native sheet is normally not AXMain. It still needs the same two
+		// exact focused AX/CG mappings, plus a stable direct main-window owner.
+		if firstWindowMatches, firstFocusedMatches, secondFocusedMatches,
+			report.actual.windowId == target.windowId, report.frontmostPidStable,
+			let firstParent, let secondParent, sameElement(firstParent, secondParent) {
+			if let bound = target.ownedModalParent.element {
+				report.targetIsOwnedModalSheet = sameElement(bound, firstParent)
+			} else if let firstId = firstParentResolution?.windowId,
+				let secondId = secondParentResolution?.windowId,
+				firstId > 0, firstId == secondId, firstId != target.windowId {
+				target.ownedModalParent.element = firstParent
+				target.ownedModalParent.identity = ForegroundTargetIdentity(pid: target.pid, windowId: firstId)
+				report.targetIsOwnedModalSheet = true
+			}
+		}
+		// Escape can close the sheet on key-down. Balance only this transaction's
+		// held keys, after two fresh exact mappings back to its previously proven
+		// main parent. This does not authorize new keys or pointer input there.
+		if let parent = target.ownedModalParent.element,
+			let identity = target.ownedModalParent.identity,
+			identity.pid == target.pid, identity.windowId != target.windowId,
+			firstActual == secondActual,
+			secondActual == ForegroundActualIdentity(pid: identity.pid, windowId: identity.windowId),
+			report.frontmostPidStable,
+			let firstFocused, let secondFocused,
+			sameElement(firstFocused, parent), sameElement(secondFocused, parent),
+			boolAttribute(firstFocused, attribute: kAXMainAttribute as CFString) == true,
+			boolAttribute(secondFocused, attribute: kAXMainAttribute as CFString) == true {
+			report.ownedModalParentWindowId = identity.windowId
+		}
+		if let parent = target.ownedModalParent.element,
+			let identity = target.ownedModalParent.identity,
+			firstFocusedMatches, firstWindowMatches, report.frontmostPidStable,
+			secondActual == ForegroundActualIdentity(pid: identity.pid, windowId: identity.windowId),
+			identity.pid == target.pid, identity.windowId != target.windowId,
+			let secondFocused, sameElement(secondFocused, parent),
+			boolAttribute(secondFocused, attribute: kAXMainAttribute as CFString) == true {
+			report.ownedModalParentWindowId = identity.windowId
+			report.ownedModalParentTransitionObserved = true
 		}
 		// A shortcut can open its own sheet before key-up. Only balance keys
 		// already owned by this transaction; never authorize new input to it.

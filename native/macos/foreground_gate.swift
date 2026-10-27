@@ -134,6 +134,8 @@ struct ForegroundGateReport {
 	let actual: ForegroundActualIdentity
 	let focusedWindowMatches: Bool
 	let targetIsMain: Bool
+	// Established twice from native AX role, direct ownership and a main parent.
+	var targetIsOwnedModalSheet = false
 	var frontmostPidStable = true
 	var firstActual: ForegroundActualIdentity?
 	var firstDiagnostics: [String: Any]?
@@ -144,13 +146,16 @@ struct ForegroundGateReport {
 	// Native producer only: two successful empty AX window inventories and two
 	// exact CG metadata probes proved this target closed without a replacement.
 	var ownedTargetClosedWithoutReplacement = false
+	// Only a transaction's own key-ups may return to this previously bound parent.
+	var ownedModalParentWindowId: UInt32?
+	var ownedModalParentTransitionObserved = false
 
 	var verified: Bool {
 		target.windowId > 0
 			&& actual.pid == target.pid
 			&& actual.windowId == target.windowId
 			&& focusedWindowMatches
-			&& targetIsMain
+			&& (targetIsMain || targetIsOwnedModalSheet)
 			&& frontmostPidStable
 	}
 
@@ -163,6 +168,7 @@ struct ForegroundGateReport {
 				"windowId": actual.windowId.map { Int($0) } as Any? ?? NSNull(),
 				"focusedWindowMatches": focusedWindowMatches,
 				"targetIsMain": targetIsMain,
+				"targetIsOwnedModalSheet": targetIsOwnedModalSheet,
 				"frontmostPidStable": frontmostPidStable,
 			],
 		]
@@ -173,6 +179,8 @@ struct ForegroundGateReport {
 			]
 		}
 		if let ownedSheetWindowId { output["ownedSheetReleaseWindowId"] = Int(ownedSheetWindowId) }
+		if let ownedModalParentWindowId { output["ownedModalParentReleaseWindowId"] = Int(ownedModalParentWindowId) }
+		if ownedModalParentTransitionObserved { output["ownedModalParentTransitionObserved"] = true }
 		if ownedSheetTransitionObserved { output["ownedSheetTransitionObserved"] = true }
 		if ownedTargetClosedWithoutReplacement { output["ownedTargetClosedWithoutReplacement"] = true }
 		if let firstDiagnostics { output["firstMapping"] = firstDiagnostics }
@@ -197,8 +205,27 @@ func provenClosedForegroundTarget(_ report: ForegroundGateReport,
 		&& first.cgTargetExists == false && second.cgTargetExists == false
 }
 
+func isOwnedModalSheet(
+	targetPid: Int32, sheetPid: Int32?, sheetRole: String?,
+	parentPid: Int32?, parentRole: String?, parentIsMain: Bool, directlyOwned: Bool
+) -> Bool {
+	targetPid > 0 && sheetPid == targetPid && parentPid == targetPid
+		&& sheetRole == "AXSheet" && parentRole == "AXWindow"
+		&& parentIsMain && directlyOwned
+}
+
 func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwnedKey: Bool = false) -> Bool {
 	if releasingOwnedKey && report.ownedTargetClosedWithoutReplacement { return false }
+	// A closing sheet can disappear between the two samples. Another read may
+	// prove its bound parent; the mixed sample itself never authorizes input.
+	if releasingOwnedKey, report.ownedModalParentTransitionObserved,
+		report.target.windowId > 0, report.frontmostPidStable,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.actual.pid == report.target.pid,
+		let parentId = report.ownedModalParentWindowId, parentId > 0,
+		parentId != report.target.windowId, report.actual.windowId == parentId {
+		return true
+	}
 	// This grants another read, never input. The next sample must prove a
 	// stable direct owned sheet before any transaction-owned key is released.
 	if releasingOwnedKey, report.ownedSheetTransitionObserved,
@@ -337,10 +364,24 @@ func dispatchForegroundEventIfVerified(
 		// Balance only this transaction's already emitted chord. This does not
 		// authorize a new key, pointer event, another window or another app.
 		ownedRelease = true
+	} else if isOwnedForegroundKeyRelease(event, dispatch: dispatch),
+		let parentId = report.ownedModalParentWindowId,
+		parentId > 0, parentId != report.target.windowId,
+		report.target.windowId > 0, report.frontmostPidStable,
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: parentId),
+		report.firstActual == report.actual {
+		ownedRelease = true
 	} else {
 		ownedRelease = false
 	}
-	guard report.verified || ownedRelease else { return false }
+	let keyboardEvent: Bool
+	switch event {
+	case .keyDown, .keyUp: keyboardEvent = true
+	default: keyboardEvent = false
+	}
+	// The new modal-sheet eligibility is for keyboard input. Pointer delivery
+	// retains its existing main-window requirement.
+	guard (report.verified && (report.targetIsMain || keyboardEvent)) || ownedRelease else { return false }
 	emit()
 	dispatch.record(event)
 	return true

@@ -239,6 +239,22 @@ func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwne
 		if let pid = actual.pid, pid != report.target.pid { return false }
 		if let windowId = actual.windowId, windowId != report.target.windowId { return false }
 	}
+	// Leaving fullscreen can change AX/CG geometry between samples without
+	// changing the window. Only an owned key-up may request another bounded
+	// read after the second sample uniquely rebinds that same main window.
+	// This mixed report still fails verification and never authorizes input.
+	if releasingOwnedKey, !report.verified,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: nil),
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.firstDiagnostics?["mappingStage"] as? String == "no_valid_cg_candidate",
+		report.firstDiagnostics?["ambiguous"] as? Bool == false,
+		(report.firstDiagnostics?["validCandidateIds"] as? [Int])?.isEmpty == true,
+		report.secondDiagnostics?["mappingStage"] as? String == "focused_element_unique_pairing",
+		report.secondDiagnostics?["ambiguous"] as? Bool == false,
+		report.secondDiagnostics?["validCandidateIds"] as? [Int] == [Int(report.target.windowId)] {
+		return true
+	}
 	let transientRead = [report.firstDiagnostics, report.secondDiagnostics].contains { $0?["mappingStage"] as? String == "ax_read_failed" }
 	return !report.verified && report.frontmostPidStable && report.actual.pid == report.target.pid && transientRead
 }

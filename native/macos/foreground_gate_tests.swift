@@ -453,6 +453,50 @@ private struct ForegroundGateTests {
 		transient.firstActual = ForegroundActualIdentity(pid: correct.pid, windowId: 999)
 		transient.secondDiagnostics = ["mappingStage": "ax_read_failed"]
 		precondition(!shouldReobserveForegroundRead(transient), "a resolved wrong first window cannot be hidden by a later transient read")
+		do {
+		// Recorded fullscreen Esc: down was delivered, then AX/CG geometry
+		// briefly stopped pairing before the same main window rebound.
+		func geometryTransition(_ actual: ForegroundActualIdentity, main: Bool = true) -> ForegroundGateReport {
+			var report = gateReport(actual, focused: false, main: main)
+			report.firstActual = ForegroundActualIdentity(pid: target.pid, windowId: nil)
+			report.firstDiagnostics = ["mappingStage": "no_valid_cg_candidate", "ambiguous": false, "validCandidateIds": [Int]()]
+			report.secondDiagnostics = ["mappingStage": "focused_element_unique_pairing", "ambiguous": false, "validCandidateIds": [Int(target.windowId)]]
+			return report
+		}
+		let resizing = geometryTransition(correct)
+		let down = ForegroundInputEvent.keyDown(53, modifiers: [])
+		let up = ForegroundInputEvent.keyUp(53, modifiers: [])
+		let held = ForegroundInputDispatchState()
+		var emitted: [ForegroundInputEvent] = []
+		precondition(dispatchForegroundEventIfVerified(gateReport(correct), event: down, dispatch: held, emit: { emitted.append(down) }))
+		precondition(!shouldReobserveForegroundRead(resizing), "new input cannot use the release-only geometry recheck")
+		precondition(shouldReobserveForegroundRead(resizing, releasingOwnedKey: isOwnedForegroundKeyRelease(up, dispatch: held)))
+		precondition(!dispatchForegroundEventIfVerified(resizing, event: up, dispatch: held, emit: { preconditionFailure() }), "mixed samples never authorize even an owned key-up")
+		precondition(held.pressedKeys == Set([53]) && emitted == [down])
+		let persistentFailure = foregroundRejectedActResult(details: foregroundFailureDetails(report: resizing, dispatch: held))
+		assertPartial(persistentFailure, count: 1, keys: [53])
+		precondition(!isOwnedForegroundKeyRelease(up, dispatch: ForegroundInputDispatchState()))
+		precondition(!isOwnedForegroundKeyRelease(.mouseUp(0), dispatch: held))
+		var rejected: [ForegroundGateReport] = []
+		var changed = resizing
+		changed.frontmostPidStable = false; rejected.append(changed)
+		changed = geometryTransition(correct, main: false); rejected.append(changed)
+		changed = resizing; changed.firstActual = ForegroundActualIdentity(pid: target.pid + 1, windowId: nil); rejected.append(changed)
+		changed = resizing; changed.firstActual = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1); rejected.append(changed)
+		changed = geometryTransition(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1)); rejected.append(changed)
+		changed = resizing; changed.firstDiagnostics?["ambiguous"] = true; rejected.append(changed)
+		changed = resizing; changed.firstDiagnostics?["validCandidateIds"] = [Int(target.windowId + 1)]; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics?["ambiguous"] = true; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics?["validCandidateIds"] = [Int(target.windowId), Int(target.windowId + 1)]; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics?["mappingStage"] = "no_valid_cg_candidate"; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics = nil; rejected.append(changed)
+		for invalid in rejected {
+			precondition(!shouldReobserveForegroundRead(invalid, releasingOwnedKey: true))
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: up, dispatch: held, emit: { preconditionFailure() }))
+		}
+		precondition(dispatchForegroundEventIfVerified(gateReport(correct), event: up, dispatch: held, emit: { emitted.append(up) }), "a later fully verified read may release the held key exactly once")
+		precondition(emitted == [down, up] && held.pressedKeys.isEmpty)
+		}
 		let boundFrame = CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 800, height: 600))
 		let candidate = FocusedCGCandidateSnapshot(windowId: target.windowId, ownerPid: target.pid, frame: boundFrame, title: "Owned", isOnscreen: true)
 		func bound(_ matches: Bool = true, role: String = "AXWindow", frame: CGRect? = CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 800, height: 600)), candidates: [FocusedCGCandidateSnapshot]? = nil) -> FocusedMappingDecision? {

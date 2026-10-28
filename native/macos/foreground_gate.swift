@@ -327,33 +327,98 @@ final class ForegroundInputDispatchState {
 	private var modifierKeys = Set<Int>()
 	var pressedKeys: Set<Int> { pressedKeyCodes.union(modifierKeys) }
 	private(set) var pressedMouseButtons = Set<Int>()
+	private(set) var ownedKeys = Set<Int>()
+	private(set) var ownedMouseButtons = Set<Int>()
+	private var pressOrder: [ForegroundInputEvent] = []
+	private var recovery: [String: Any]?
+	var hasHeldInput: Bool { !pressedKeys.isEmpty || !pressedMouseButtons.isEmpty }
 
 	func record(_ event: ForegroundInputEvent) {
 		eventsDispatched += 1
 		switch event {
 		case let .keyDown(code, modifiers):
+			if !pressedKeys.contains(code) { pressOrder.append(.keyDown(code, modifiers: [])) }
 			pressedKeyCodes.insert(code)
 			modifierKeys = Set(modifiers)
+			ownedKeys.formUnion(modifiers)
+			ownedKeys.insert(code)
 		case let .keyUp(code, modifiers):
 			pressedKeyCodes.remove(code)
+			pressOrder.removeAll { if case let .keyDown(key, _) = $0 { return key == code }; return false }
 			// Flags describe modifier state on this event. Releasing the base
 			// key while Control remains in its flags does not release Control.
 			modifierKeys = Set(modifiers)
-		case let .mouseDown(button): pressedMouseButtons.insert(button)
-		case let .mouseUp(button): pressedMouseButtons.remove(button)
+		case let .mouseDown(button):
+			if !pressedMouseButtons.contains(button) { pressOrder.append(.mouseDown(button)) }
+			pressedMouseButtons.insert(button)
+			ownedMouseButtons.insert(button)
+		case let .mouseUp(button):
+			pressedMouseButtons.remove(button)
+			pressOrder.removeAll { $0 == .mouseDown(button) }
 		case .other: break
 		}
 	}
 
+	/// Only releases, in reverse acquisition order. A failed release stops cleanup;
+	/// it must not release modifiers underneath a still-held base key/button.
+	var pendingReleases: [ForegroundInputEvent] {
+		var keys = pressedKeys
+		var buttons = pressedMouseButtons
+		var output: [ForegroundInputEvent] = []
+		for event in pressOrder.reversed() {
+			switch event {
+			case let .keyDown(code, _) where keys.remove(code) != nil:
+				output.append(.keyUp(code, modifiers: keys.intersection(foregroundModifierKeyCodes).sorted()))
+			case let .mouseDown(button) where buttons.remove(button) != nil:
+				output.append(.mouseUp(button))
+			default: break
+			}
+		}
+		return output
+	}
+
+	func settle(release: (ForegroundInputEvent) -> Bool, verify: () -> ForegroundInputReleaseVerification) {
+		let before = eventsDispatched
+		for event in pendingReleases {
+			guard release(event) else { break }
+		}
+		let verification = verify()
+		let heldKeys = pressedKeys.union(verification.heldKeys)
+		let heldButtons = pressedMouseButtons.union(verification.heldMouseButtons)
+		let verified = verification.complete && heldKeys.isEmpty && heldButtons.isEmpty
+		recovery = [
+			"schemaVersion": 1, "scope": "native_transaction",
+			"status": verified ? "verified" : "blocked",
+			"nativeOperationStopped": true, "inputReplayed": false,
+			"verification": "system_input_state",
+			"operationEventsDispatched": before,
+			"releaseEventsDispatched": eventsDispatched - before,
+			"verifiedKeys": ownedKeys.sorted(), "verifiedMouseButtons": ownedMouseButtons.sorted(),
+			"unreleasedKeys": heldKeys.sorted(), "unreleasedMouseButtons": heldButtons.sorted(),
+		]
+	}
+
 	var details: [String: Any] {
-		[
+		var output: [String: Any] = [
 			"eventsDispatched": eventsDispatched,
 			"unreleasedKeys": pressedKeys.sorted(),
 			"unreleasedMouseButtons": pressedMouseButtons.sorted(),
-			"recoveryRequired": eventsDispatched > 0,
+			"recoveryRequired": eventsDispatched > 0 && (recovery?["status"] as? String) != "verified",
 			"retrySafe": eventsDispatched == 0,
 		]
+		if let recovery {
+			output["inputRecovery"] = recovery
+			output["unreleasedKeys"] = recovery["unreleasedKeys"]
+			output["unreleasedMouseButtons"] = recovery["unreleasedMouseButtons"]
+		}
+		return output
 	}
+}
+
+struct ForegroundInputReleaseVerification {
+	let complete: Bool
+	var heldKeys = Set<Int>()
+	var heldMouseButtons = Set<Int>()
 }
 
 func unownedForegroundModifiers(observed: Set<Int>, dispatch: ForegroundInputDispatchState) -> Set<Int> {
@@ -436,10 +501,13 @@ func foregroundRejectedActResult(details: [String: Any]) -> [String: Any] {
 	let inputDispatch = details["inputDispatch"] as? [String: Any] ?? [:]
 	let eventsDispatched = inputDispatch["eventsDispatched"] as? Int ?? 0
 	let partial = eventsDispatched > 0
+	let recovered = inputDispatch["recoveryRequired"] as? Bool == false
 	let error: [String: Any] = partial
 		? [
 			"code": "foreground_interrupted_after_partial_hid",
-			"message": "Foreground verification failed after HID events were dispatched; do not retry, and recover the desktop explicitly",
+			"message": recovered
+				? "Foreground verification interrupted input; owned input was verified released. Reobserve the desktop; do not replay the action"
+				: "Foreground verification failed after HID events were dispatched; do not retry, and recover the desktop explicitly",
 		]
 		: [
 			"code": "foreground_target_unverified",

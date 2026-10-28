@@ -108,6 +108,26 @@ One action is represented by an array of length one. A multi-action transaction 
 
 The bridge resolves model intent; the backend/helper owns grounding, preflight, delivery, and evidence. Accessibility capabilities choose an initial strategy but are not treated as proof that the intended result occurred. Editable-region clicks establish foreground focus for following unscoped keyboard steps in the same transaction. Raw coordinates are tied to the image-bearing state that produced them. Web-backed editable controls use atomic keyboard events and web-backed buttons use pointer events so application state receives normal input events rather than only a changed AX value. A helper result reports `worked`, `didnt`, or `unknown`, including evidence and shallow root changes where available.
 
+On macOS, physical input has an action-local ownership ledger. A down event is
+refused if that key or button is already held, and its balancing up event is
+allocated before dispatch. Every exceptional exit after HID dispatch attempts
+only the transaction's pending releases, in reverse acquisition order, while
+holding the physical-input lock. Releases still require the existing foreground
+or directly owned modal checks. Cleanup stops at the first refused release and
+never retries the interrupted click, drag, shortcut, or text.
+
+A terminal native reply may include an `inputRecovery` receipt. It establishes
+that the native operation has stopped and that two consecutive system-state
+samples show all transaction-owned keys and buttons released. Only a complete,
+internally consistent receipt permits `inputDispatch.recoveryRequired: false`.
+The application outcome stays `unknown`, the rest of the action list is skipped,
+and the old observation is invalidated. The caller must use `find_roots` and
+`observe_ui` before continuing; successful input cleanup is not successful task
+execution. Missing, blocked, or inconsistent receipts retain desktop quarantine.
+A lost response or crashed helper cannot establish this receipt and continues
+to require explicit recovery. Recovery never closes an arbitrary dialog or
+changes the user's availability/consent policy.
+
 With `headless: true`, the background boundary is strict: Pi must never activate or raise an application, change the user's focused window, move the global cursor, post raw input, or display the agent cursor. With `headless: false` (the default), credible semantic activation may begin in the background, editable clicks preserve the focus they establish for following unscoped keyboard input, and keyboard input with a checked `didnt` result may retry in the foreground because the first attempt proved side-effect-free. Focus-preserving native keyboard requests must not raise or re-focus the window between semantic activation and HID delivery; canvas editors such as PowerPoint otherwise collapse an inner text editor back to placeholder selection. Ambiguous pointer outcomes are never replayed. With `cursor_overlay: true`, non-headless macOS background pointer actions enqueue a click-through agent cursor animation to the native grounded point without delaying delivery; foreground HID actions use only the physical cursor.
 
 The agent-facing `act_ui.headless` flag determines whether foreground execution is prohibited. Fallback-capable multi-action calls execute one checked action at a time, retain click-established focus, and stop on a checked `didnt`; strict-headless calls retain native transactional batching.

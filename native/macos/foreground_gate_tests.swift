@@ -648,6 +648,66 @@ private struct ForegroundGateTests {
             }
             precondition(!pointerTextFocusChanged(e), "invalid focus/geometry cannot establish effect")
         }
-		print("native foreground gate tests passed")
+		do {
+		let dispatch = ForegroundInputDispatchState()
+		let correct = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId))
+		for event in [ForegroundInputEvent.keyDown(59, modifiers: [59]), .keyDown(4, modifiers: [59]), .mouseDown(0)] {
+			precondition(dispatchForegroundEventIfVerified(correct, event: event, dispatch: dispatch, emit: {}))
+		}
+		var releases: [ForegroundInputEvent] = []
+		dispatch.settle(release: { event in
+			dispatchForegroundEventIfVerified(correct, event: event, dispatch: dispatch, emit: { releases.append(event) })
+		}, verify: { ForegroundInputReleaseVerification(complete: true) })
+		precondition(releases == [.mouseUp(0), .keyUp(4, modifiers: [59]), .keyUp(59, modifiers: [])])
+		precondition(!dispatch.hasHeldInput)
+		precondition(dispatch.details["recoveryRequired"] as? Bool == false)
+		precondition(dispatch.details["retrySafe"] as? Bool == false, "cleanup cannot authorize replay")
+		let receipt = dispatch.details["inputRecovery"] as! [String: Any]
+		precondition(receipt["status"] as? String == "verified")
+		precondition(receipt["operationEventsDispatched"] as? Int == 3)
+		precondition(receipt["releaseEventsDispatched"] as? Int == 3)
+		precondition(receipt["verifiedKeys"] as? [Int] == [4, 59])
+		precondition(receipt["verifiedMouseButtons"] as? [Int] == [0])
+		precondition(receipt["inputReplayed"] as? Bool == false)
+		}
+		do {
+		// Focus loss to an unrelated app cannot be "fixed" by blind releases.
+		let dispatch = ForegroundInputDispatchState()
+		dispatch.record(.keyDown(59, modifiers: [59]))
+		dispatch.record(.keyDown(4, modifiers: [59]))
+		let foreign = gateReport(ForegroundActualIdentity(pid: target.pid + 1, windowId: 1))
+		var attempted: [ForegroundInputEvent] = []
+		dispatch.settle(release: { event in
+			attempted.append(event)
+			return dispatchForegroundEventIfVerified(foreign, event: event, dispatch: dispatch, emit: { preconditionFailure("foreign input") })
+		}, verify: { ForegroundInputReleaseVerification(complete: true) })
+		precondition(attempted == [.keyUp(4, modifiers: [59])], "failed base release stops before modifier release")
+		precondition(dispatch.eventsDispatched == 2)
+		precondition(dispatch.details["recoveryRequired"] as? Bool == true)
+		precondition(dispatch.pressedKeys == [4, 59])
+		}
+		do {
+		// A release acknowledgement alone cannot clear quarantine while the OS
+		// still reports a held button, or when the native read is incomplete.
+		for verification in [ForegroundInputReleaseVerification(complete: true, heldMouseButtons: [0]),
+			ForegroundInputReleaseVerification(complete: false)] {
+			let dispatch = ForegroundInputDispatchState()
+			dispatch.record(.mouseDown(0))
+			dispatch.settle(release: { event in dispatch.record(event); return true }, verify: { verification })
+			precondition(!dispatch.hasHeldInput)
+			precondition(dispatch.details["recoveryRequired"] as? Bool == true)
+		}
+		}
+		do {
+		// A completed click followed by a refused second down has no stuck
+		// input. Verify state and reobserve instead of requiring a human reset.
+		let dispatch = ForegroundInputDispatchState()
+		for event in [ForegroundInputEvent.other, .mouseDown(0), .mouseUp(0)] { dispatch.record(event) }
+		dispatch.settle(release: { _ in preconditionFailure("no owned input remains") },
+			verify: { ForegroundInputReleaseVerification(complete: true) })
+		precondition(dispatch.details["recoveryRequired"] as? Bool == false)
+		precondition(dispatch.eventsDispatched == 3)
+		}
+		print("native foreground gate and owned-input recovery tests passed")
 	}
 }

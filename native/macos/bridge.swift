@@ -151,6 +151,13 @@ private struct PhysicalInputTarget {
 	let axWindow: AXUIElement?
 	let dispatchState: ForegroundInputDispatchState
 	let ownedModalParent = OwnedModalParentBinding()
+	let releases = PhysicalInputReleaseEvents()
+}
+
+private final class PhysicalInputReleaseEvents {
+	var keys: [Int: CGEvent] = [:]
+	var buttons: [Int: CGEvent] = [:]
+	var lastPointerLocation: CGPoint?
 }
 
 private struct ForegroundGateFailure: Error {
@@ -2400,6 +2407,7 @@ final class Bridge {
 			}
 		}
 		defer { if holdsPhysicalInput { physicalInputLock.unlock() } }
+		return try withPhysicalInputTransaction(target: physicalTarget) {
 		var performed: [String: Any] = ["delivery": delivery]
 		var element: AXUIElement?
 		var isApplicationMenuElement = false
@@ -3008,6 +3016,76 @@ final class Bridge {
 		var response: [String: Any] = ["outcome": outcome, "performed": performed]
 		if !evidence.isEmpty { response["evidence"] = evidence }
 		return finish(response)
+		}
+	}
+
+	/// Every exit after a physical write settles this transaction before the
+	/// native lock is released. Cleanup never resumes the interrupted action.
+	private func withPhysicalInputTransaction(target: PhysicalInputTarget?, body: () throws -> [String: Any]) throws -> [String: Any] {
+		do {
+			let result = try body()
+			if target?.dispatchState.hasHeldInput == true {
+				throw BridgeFailure(message: "Native action ended with owned input still held", code: "native_input_interrupted_after_partial_hid")
+			}
+			return result
+		} catch {
+			guard let target, target.dispatchState.eventsDispatched > 0 else { throw error }
+			physicalInputLock.lock()
+			defer { physicalInputLock.unlock() }
+			target.dispatchState.settle(release: { step in
+				let event: CGEvent?
+				switch step {
+				case let .keyUp(code, modifiers):
+					event = target.releases.keys[code]
+					event?.flags = self.flagsForModifierKeyCodes(modifiers)
+				case let .mouseUp(button):
+					event = target.releases.buttons[button]
+					if let point = target.releases.lastPointerLocation { event?.location = point }
+				default: return false
+				}
+				guard let event else { return false }
+				do { try self.postEvent(event, pid: target.pid, target: target); return true }
+				catch { return false }
+			}, verify: { self.verifyReleasedInput(target.dispatchState) })
+			let dispatch = target.dispatchState.details
+			if let failure = error as? ForegroundGateFailure {
+				var details = failure.details
+				details["inputDispatch"] = dispatch
+				return foregroundRejectedActResult(details: details)
+			}
+			if let failure = error as? ModifierInputDispatchFailure {
+				var details = failure.details
+				details["inputDispatch"] = dispatch
+				return modifierRejectedActResult(details: details)
+			}
+			if error is TextInputSourceDispatchFailure { return textInputSourceRejectedActResult(dispatch) }
+			let failure = error as? BridgeFailure
+			return ["outcome": "unknown", "performed": ["delivery": "hid"],
+				"inputDispatch": dispatch,
+				"error": ["code": "native_input_interrupted_after_partial_hid",
+					"message": failure?.message ?? error.localizedDescription,
+					"causeCode": failure?.code ?? "internal_error"]]
+		}
+	}
+
+	private func verifyReleasedInput(_ dispatch: ForegroundInputDispatchState) -> ForegroundInputReleaseVerification {
+		// Posting an up event is not proof that the OS consumed it. Require two
+		// consecutive neutral samples for every key/button touched by this action.
+		var neutralSamples = 0
+		var heldKeys = Set<Int>()
+		var heldButtons = Set<Int>()
+		for _ in 0..<6 {
+			heldKeys = []
+			heldButtons = []
+			for source in [CGEventSourceStateID.hidSystemState, .combinedSessionState] {
+				for key in dispatch.ownedKeys where CGEventSource.keyState(source, key: CGKeyCode(key)) { heldKeys.insert(key) }
+				for button in dispatch.ownedMouseButtons where CGEventSource.buttonState(source, button: CGMouseButton(rawValue: UInt32(button))!) { heldButtons.insert(button) }
+			}
+			neutralSamples = heldKeys.isEmpty && heldButtons.isEmpty ? neutralSamples + 1 : 0
+			if neutralSamples == 2 { return ForegroundInputReleaseVerification(complete: true) }
+			usleep(10_000)
+		}
+		return ForegroundInputReleaseVerification(complete: false, heldKeys: heldKeys, heldMouseButtons: heldButtons)
 	}
 
 	private func actBatch(_ request: [String: Any]) throws -> [String: Any] {
@@ -4561,6 +4639,29 @@ final class Bridge {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
 		let inputEvent = foregroundInputEvent(event)
+		// Refuse to acquire a key/button that was held before this transaction.
+		// Prepare its exact balancing event before posting the down event.
+		var release: CGEvent?
+		switch inputEvent {
+		case let .keyDown(code, _) where !target.dispatchState.pressedKeys.contains(code):
+			guard ![CGEventSourceStateID.hidSystemState, .combinedSessionState].contains(where: { CGEventSource.keyState($0, key: CGKeyCode(code)) }) else {
+				throw BridgeFailure(message: "A key is already held outside this action; no down event was sent", code: "input_state_unverified")
+			}
+			release = event.copy()
+			release?.type = foregroundModifierKeyCodes.contains(code) ? .flagsChanged : .keyUp
+		case let .mouseDown(button) where !target.dispatchState.pressedMouseButtons.contains(button):
+			guard let nativeButton = CGMouseButton(rawValue: UInt32(button)),
+				![CGEventSourceStateID.hidSystemState, .combinedSessionState].contains(where: { CGEventSource.buttonState($0, button: nativeButton) }) else {
+				throw BridgeFailure(message: "A mouse button is already held outside this action; no down event was sent", code: "input_state_unverified")
+			}
+			release = event.copy()
+			release?.type = mouseUpType(for: nativeButton)
+		case .keyDown, .mouseDown:
+			throw BridgeFailure(message: "Duplicate down event in a physical input transaction", code: "input_state_unverified")
+		default: break
+		}
+		if case .keyDown = inputEvent, release == nil { throw BridgeFailure(message: "Could not prepare key release", code: "input_failed") }
+		if case .mouseDown = inputEvent, release == nil { throw BridgeFailure(message: "Could not prepare mouse release", code: "input_failed") }
 		let report = foregroundReport(
 			target: target,
 			releasingOwnedKey: isOwnedForegroundKeyRelease(inputEvent, dispatch: target.dispatchState),
@@ -4577,6 +4678,20 @@ final class Bridge {
 			recordPostedInputEvent()
 		}) else {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState))
+		}
+		switch inputEvent {
+		case let .keyDown(code, _): target.releases.keys[code] = release
+		case let .keyUp(code, _): target.releases.keys.removeValue(forKey: code)
+		case let .mouseDown(button): target.releases.buttons[button] = release
+		case let .mouseUp(button): target.releases.buttons.removeValue(forKey: button)
+		case .other: break
+		}
+		switch event.type {
+		case .mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+			.leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+			.leftMouseUp, .rightMouseUp, .otherMouseUp:
+			target.releases.lastPointerLocation = event.location
+		default: break
 		}
 	}
 
@@ -4779,6 +4894,20 @@ final class Bridge {
 		if flags.contains(.maskAlternate) { keyCodes.append(58) }
 		if flags.contains(.maskControl) { keyCodes.append(59) }
 		return keyCodes
+	}
+
+	private func flagsForModifierKeyCodes(_ keys: [Int]) -> CGEventFlags {
+		var flags = CGEventFlags()
+		for key in keys {
+			switch key {
+			case 55: flags.insert(.maskCommand)
+			case 56: flags.insert(.maskShift)
+			case 58: flags.insert(.maskAlternate)
+			case 59: flags.insert(.maskControl)
+			default: break
+			}
+		}
+		return flags
 	}
 
 	private func verifyModifierState(target: PhysicalInputTarget) throws {

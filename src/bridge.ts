@@ -3,6 +3,7 @@ import { cachedOutlineCompleteness } from "./outline.ts";
 import { CdpNavigationFailure, ManagedLaunchNavigationFailure } from "./navigation-failure.ts";
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
 import { serializeFocusContext } from "./focus-context.ts";
+import { verifiedNativeInputRecovery, type NativeInputRecovery } from "./input-recovery.ts";
 import { navigateWithPerformance, readBrowserMetrics, summarizeBrowserPerformance, type BrowserMetricsRead } from "./browser-performance.ts";
 import { ManagedBrowser, managedBrowserOcclusionArgs } from "./managed-browser.ts";
 import { waitForBrowserStartup } from "./browser-startup.ts";
@@ -73,11 +74,12 @@ interface ExecutionTrace {
 	inputDispatch?: {
 		outcome: "unknown";
 		kind: "partial_hid";
-		eventsDispatched: number;
+		eventsDispatched?: number;
 		unreleasedKeys: number[];
 		unreleasedMouseButtons: number[];
-		recoveryRequired: true;
+		recoveryRequired: boolean;
 		retrySafe: false;
+		inputRecovery?: NativeInputRecovery;
 	};
 	/** Native terminal reply, distinct from whether the intended UI effect was observed. */
 	dispatchCompletion?: "returned" | "unknown";
@@ -1309,7 +1311,7 @@ function executionTraceFromAct(result: HelperActResult, policy = currentDelivery
 	const inputDispatch = partialHidDispatchFromAct(result);
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
-		dispatchCompletion: inputDispatch ? "unknown" : "returned",
+		dispatchCompletion: inputDispatch?.recoveryRequired ? "unknown" : "returned",
 		effectVerification: result.outcome === "worked" ? "observed" : result.outcome === "didnt" ? "not_observed" : "unverified",
 		performed: result.performed,
 		evidence: result.evidence,
@@ -1328,18 +1330,21 @@ function partialHidDispatchFromAct(result: HelperActResult): ExecutionTrace["inp
 		?? (result.evidence?.foregroundVerification && (result.evidence.foregroundVerification as Record<string, unknown>).inputDispatch)
 		?? (result.evidence?.modifierVerification && (result.evidence.modifierVerification as Record<string, unknown>).inputDispatch)
 		?? (result.evidence?.inputStateVerification && (result.evidence.inputStateVerification as Record<string, unknown>).inputDispatch);
-	if (!raw || typeof raw !== "object") return undefined;
-	const value = raw as Record<string, unknown>;
-	if (value.recoveryRequired !== true || value.retrySafe !== false || typeof value.eventsDispatched !== "number" || value.eventsDispatched <= 0) return undefined;
+	const knownPartial = ["foreground_interrupted_after_partial_hid", "modifier_interrupted_after_partial_hid", "native_input_interrupted_after_partial_hid", "input_interrupted_after_partial_hid", "input_source_changed"].includes(result.error?.code ?? "");
+	if (raw === undefined && !knownPartial) return undefined;
+	// Recognized partial input without a valid ledger cannot drop quarantine.
+	const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
 	const integerArray = (candidate: unknown): number[] => Array.isArray(candidate) ? candidate.filter((item): item is number => Number.isInteger(item)) : [];
+	const inputRecovery = verifiedNativeInputRecovery(value);
 	return {
 		outcome: "unknown",
 		kind: "partial_hid",
-		eventsDispatched: value.eventsDispatched,
+		eventsDispatched: Number.isSafeInteger(value.eventsDispatched) && (value.eventsDispatched as number) > 0 ? value.eventsDispatched as number : undefined,
 		unreleasedKeys: integerArray(value.unreleasedKeys),
 		unreleasedMouseButtons: integerArray(value.unreleasedMouseButtons),
-		recoveryRequired: true,
+		recoveryRequired: !inputRecovery,
 		retrySafe: false,
+		...(inputRecovery ? { inputRecovery } : {}),
 	};
 }
 
@@ -2317,12 +2322,13 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	const outcomes = steps.map((step) => step.outcome);
 	const outcome: ActOutcome = outcomes.includes("didnt") ? "didnt" : outcomes.includes("unknown") ? "unknown" : "worked";
 	const fallback = steps.find((step) => step.escalatedToForeground);
+	const dispatchUnconfirmed = steps.some(step => step.transport || step.semanticDispatch || step.inputDispatch?.recoveryRequired);
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
-		dispatchCompletion: steps.some(step => step.transport || step.inputDispatch || step.semanticDispatch) ? "unknown" : "returned",
+		dispatchCompletion: dispatchUnconfirmed ? "unknown" : "returned",
 		effectVerification: outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified",
 		steps,
-		actionCount: steps.some((step) => step.transport || step.inputDispatch || step.semanticDispatch) ? undefined : steps.length,
+		actionCount: dispatchUnconfirmed ? undefined : steps.length,
 		stoppedAt: steps.findIndex((step) => step.outcome !== "worked") >= 0 ? steps.findIndex((step) => step.outcome !== "worked") : undefined,
 		rootDelta: steps.flatMap((step) => step.rootDelta ?? []),
 		transport: steps.find((step) => step.transport)?.transport,
@@ -2377,6 +2383,7 @@ async function terminalDesktopActionResult(
 	let exactRootAvailable: boolean | undefined = confirmedRootAbsent ? false : undefined;
 	const transportUnknown = execution.transport?.outcome === "unknown";
 	const partialInputUnknown = execution.inputDispatch?.outcome === "unknown";
+	const inputRecovered = partialInputUnknown && execution.inputDispatch?.recoveryRequired === false;
 	const semanticUnknown = execution.semanticDispatch?.outcome === "unknown";
 	const dispatchUnknown = transportUnknown || partialInputUnknown || semanticUnknown;
 	if (!dispatchUnknown && !confirmedRootAbsent) {
@@ -2415,7 +2422,8 @@ async function terminalDesktopActionResult(
 		}
 	}
 	const status = dispatchUnknown ? "dispatch_outcome_unknown" : targetClosed ? "target_closed" : "post_action_observation_failed";
-	const code = semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (execution.error?.code === "modifier_interrupted_after_partial_hid" ? "modifier_interrupted_after_partial_hid" : "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
+	const partialCode = inputRecovered ? execution.error?.code : execution.error?.code === "modifier_interrupted_after_partial_hid" ? "modifier_interrupted_after_partial_hid" : "foreground_interrupted_after_partial_hid";
+	const code = semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (partialCode ?? "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
 	clearDesktopOperationState(operationState());
 	const details: TerminalDesktopActionDetails = {
@@ -2442,13 +2450,17 @@ async function terminalDesktopActionResult(
 		? `The AT-SPI semantic action may already have taken effect, but its outcome could not be confirmed. Do not retry this action. Request ${execution.semanticDispatch?.requestId} returned an uncertain mutation error; no physical fallback was sent.`
 		: transportUnknown
 		? `The native outcome of the act_ui request is unknown. Request ${execution.transport?.requestId} ${execution.transport?.requestWriteAttempted ? "had a helper-socket write attempted, but daemon receipt and input delivery are unknown" : "was not written to the helper socket"}. Do not retry this action. Explicit desktop recovery is required before continuing.`
+		: inputRecovered
+		? `The native action stopped after partial input. Its outcome remains unknown; do not replay it. Transaction-owned input was verified released by the helper. No manual desktop reset is required for this interruption.`
 		: partialInputUnknown
-		? `${inputFailure} verification failed after ${execution.inputDispatch?.eventsDispatched} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
+		? `${inputFailure} verification failed after ${execution.inputDispatch?.eventsDispatched ?? "an unconfirmed number of"} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
 		: targetClosed
 		? `The action was delivered, and its source root ${target.appName} — ${target.windowTitle} closed before a successor observation could be captured.`
 		: `The action was delivered, but its source root ${target.appName} — ${target.windowTitle} could not be observed afterward: ${message}`;
 	return {
-		content: [{ type: "text", text: dispatchUnknown
+		content: [{ type: "text", text: inputRecovered && !transportUnknown && !semanticUnknown
+			? `${result}\nNo successor state was created. Call find_roots, then observe_ui to inspect the actual result and obtain fresh state and refs before continuing.`
+			: dispatchUnknown
 			? `${result}\nNo successor state was created. Keep writes quarantined and perform explicit desktop recovery before any further CU call.`
 			: `${result}\nNo successor state was created. Call find_roots, then observe_ui to continue.` }],
 		details,

@@ -134,6 +134,8 @@ struct ForegroundGateReport {
 	let actual: ForegroundActualIdentity
 	let focusedWindowMatches: Bool
 	let targetIsMain: Bool
+	// Established twice from native AX role, direct ownership and a main parent.
+	var targetIsOwnedModalSheet = false
 	var frontmostPidStable = true
 	var firstActual: ForegroundActualIdentity?
 	var firstDiagnostics: [String: Any]?
@@ -144,13 +146,19 @@ struct ForegroundGateReport {
 	// Native producer only: two successful empty AX window inventories and two
 	// exact CG metadata probes proved this target closed without a replacement.
 	var ownedTargetClosedWithoutReplacement = false
+	// Pointer releases additionally require both native AX owner directions.
+	var ownedMouseSheetWindowId: UInt32?
+	var ownedMouseSheetTransitionObserved = false
+	// Only a transaction's own key-ups may return to this previously bound parent.
+	var ownedModalParentWindowId: UInt32?
+	var ownedModalParentTransitionObserved = false
 
 	var verified: Bool {
 		target.windowId > 0
 			&& actual.pid == target.pid
 			&& actual.windowId == target.windowId
 			&& focusedWindowMatches
-			&& targetIsMain
+			&& (targetIsMain || targetIsOwnedModalSheet)
 			&& frontmostPidStable
 	}
 
@@ -163,6 +171,7 @@ struct ForegroundGateReport {
 				"windowId": actual.windowId.map { Int($0) } as Any? ?? NSNull(),
 				"focusedWindowMatches": focusedWindowMatches,
 				"targetIsMain": targetIsMain,
+				"targetIsOwnedModalSheet": targetIsOwnedModalSheet,
 				"frontmostPidStable": frontmostPidStable,
 			],
 		]
@@ -173,6 +182,10 @@ struct ForegroundGateReport {
 			]
 		}
 		if let ownedSheetWindowId { output["ownedSheetReleaseWindowId"] = Int(ownedSheetWindowId) }
+		if let ownedMouseSheetWindowId { output["ownedMouseSheetReleaseWindowId"] = Int(ownedMouseSheetWindowId) }
+		if ownedMouseSheetTransitionObserved { output["ownedMouseSheetTransitionObserved"] = true }
+		if let ownedModalParentWindowId { output["ownedModalParentReleaseWindowId"] = Int(ownedModalParentWindowId) }
+		if ownedModalParentTransitionObserved { output["ownedModalParentTransitionObserved"] = true }
 		if ownedSheetTransitionObserved { output["ownedSheetTransitionObserved"] = true }
 		if ownedTargetClosedWithoutReplacement { output["ownedTargetClosedWithoutReplacement"] = true }
 		if let firstDiagnostics { output["firstMapping"] = firstDiagnostics }
@@ -197,8 +210,39 @@ func provenClosedForegroundTarget(_ report: ForegroundGateReport,
 		&& first.cgTargetExists == false && second.cgTargetExists == false
 }
 
-func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwnedKey: Bool = false) -> Bool {
+func isOwnedModalSheet(
+	targetPid: Int32, sheetPid: Int32?, sheetRole: String?,
+	parentPid: Int32?, parentRole: String?, parentIsMain: Bool, directlyOwned: Bool
+) -> Bool {
+	targetPid > 0 && sheetPid == targetPid && parentPid == targetPid
+		&& sheetRole == "AXSheet" && parentRole == "AXWindow"
+		&& parentIsMain && directlyOwned
+}
+
+func shouldReobserveForegroundRead(
+	_ report: ForegroundGateReport, releasingOwnedKey: Bool = false,
+	releasingOwnedMouseButton: Bool = false
+) -> Bool {
 	if releasingOwnedKey && report.ownedTargetClosedWithoutReplacement { return false }
+	// A click can open its direct child sheet on mouse-down. Only an already
+	// held button may request a fresh stable ownership read before mouse-up.
+	if releasingOwnedMouseButton, report.ownedMouseSheetTransitionObserved,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.actual.pid == report.target.pid,
+		let sheetId = report.actual.windowId, sheetId > 0, sheetId != report.target.windowId {
+		return true
+	}
+	// A closing sheet can disappear between the two samples. Another read may
+	// prove its bound parent; the mixed sample itself never authorizes input.
+	if releasingOwnedKey, report.ownedModalParentTransitionObserved,
+		report.target.windowId > 0, report.frontmostPidStable,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.actual.pid == report.target.pid,
+		let parentId = report.ownedModalParentWindowId, parentId > 0,
+		parentId != report.target.windowId, report.actual.windowId == parentId {
+		return true
+	}
 	// This grants another read, never input. The next sample must prove a
 	// stable direct owned sheet before any transaction-owned key is released.
 	if releasingOwnedKey, report.ownedSheetTransitionObserved,
@@ -211,6 +255,22 @@ func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwne
 	for actual in [report.firstActual, report.actual].compactMap({ $0 }) {
 		if let pid = actual.pid, pid != report.target.pid { return false }
 		if let windowId = actual.windowId, windowId != report.target.windowId { return false }
+	}
+	// Leaving fullscreen can change AX/CG geometry between samples without
+	// changing the window. Only an owned key-up may request another bounded
+	// read after the second sample uniquely rebinds that same main window.
+	// This mixed report still fails verification and never authorizes input.
+	if releasingOwnedKey, !report.verified,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: nil),
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.firstDiagnostics?["mappingStage"] as? String == "no_valid_cg_candidate",
+		report.firstDiagnostics?["ambiguous"] as? Bool == false,
+		(report.firstDiagnostics?["validCandidateIds"] as? [Int])?.isEmpty == true,
+		report.secondDiagnostics?["mappingStage"] as? String == "focused_element_unique_pairing",
+		report.secondDiagnostics?["ambiguous"] as? Bool == false,
+		report.secondDiagnostics?["validCandidateIds"] as? [Int] == [Int(report.target.windowId)] {
+		return true
 	}
 	let transientRead = [report.firstDiagnostics, report.secondDiagnostics].contains { $0?["mappingStage"] as? String == "ax_read_failed" }
 	return !report.verified && report.frontmostPidStable && report.actual.pid == report.target.pid && transientRead
@@ -267,33 +327,98 @@ final class ForegroundInputDispatchState {
 	private var modifierKeys = Set<Int>()
 	var pressedKeys: Set<Int> { pressedKeyCodes.union(modifierKeys) }
 	private(set) var pressedMouseButtons = Set<Int>()
+	private(set) var ownedKeys = Set<Int>()
+	private(set) var ownedMouseButtons = Set<Int>()
+	private var pressOrder: [ForegroundInputEvent] = []
+	private var recovery: [String: Any]?
+	var hasHeldInput: Bool { !pressedKeys.isEmpty || !pressedMouseButtons.isEmpty }
 
 	func record(_ event: ForegroundInputEvent) {
 		eventsDispatched += 1
 		switch event {
 		case let .keyDown(code, modifiers):
+			if !pressedKeys.contains(code) { pressOrder.append(.keyDown(code, modifiers: [])) }
 			pressedKeyCodes.insert(code)
 			modifierKeys = Set(modifiers)
+			ownedKeys.formUnion(modifiers)
+			ownedKeys.insert(code)
 		case let .keyUp(code, modifiers):
 			pressedKeyCodes.remove(code)
+			pressOrder.removeAll { if case let .keyDown(key, _) = $0 { return key == code }; return false }
 			// Flags describe modifier state on this event. Releasing the base
 			// key while Control remains in its flags does not release Control.
 			modifierKeys = Set(modifiers)
-		case let .mouseDown(button): pressedMouseButtons.insert(button)
-		case let .mouseUp(button): pressedMouseButtons.remove(button)
+		case let .mouseDown(button):
+			if !pressedMouseButtons.contains(button) { pressOrder.append(.mouseDown(button)) }
+			pressedMouseButtons.insert(button)
+			ownedMouseButtons.insert(button)
+		case let .mouseUp(button):
+			pressedMouseButtons.remove(button)
+			pressOrder.removeAll { $0 == .mouseDown(button) }
 		case .other: break
 		}
 	}
 
+	/// Only releases, in reverse acquisition order. A failed release stops cleanup;
+	/// it must not release modifiers underneath a still-held base key/button.
+	var pendingReleases: [ForegroundInputEvent] {
+		var keys = pressedKeys
+		var buttons = pressedMouseButtons
+		var output: [ForegroundInputEvent] = []
+		for event in pressOrder.reversed() {
+			switch event {
+			case let .keyDown(code, _) where keys.remove(code) != nil:
+				output.append(.keyUp(code, modifiers: keys.intersection(foregroundModifierKeyCodes).sorted()))
+			case let .mouseDown(button) where buttons.remove(button) != nil:
+				output.append(.mouseUp(button))
+			default: break
+			}
+		}
+		return output
+	}
+
+	func settle(release: (ForegroundInputEvent) -> Bool, verify: () -> ForegroundInputReleaseVerification) {
+		let before = eventsDispatched
+		for event in pendingReleases {
+			guard release(event) else { break }
+		}
+		let verification = verify()
+		let heldKeys = pressedKeys.union(verification.heldKeys)
+		let heldButtons = pressedMouseButtons.union(verification.heldMouseButtons)
+		let verified = verification.complete && heldKeys.isEmpty && heldButtons.isEmpty
+		recovery = [
+			"schemaVersion": 1, "scope": "native_transaction",
+			"status": verified ? "verified" : "blocked",
+			"nativeOperationStopped": true, "inputReplayed": false,
+			"verification": "system_input_state",
+			"operationEventsDispatched": before,
+			"releaseEventsDispatched": eventsDispatched - before,
+			"verifiedKeys": ownedKeys.sorted(), "verifiedMouseButtons": ownedMouseButtons.sorted(),
+			"unreleasedKeys": heldKeys.sorted(), "unreleasedMouseButtons": heldButtons.sorted(),
+		]
+	}
+
 	var details: [String: Any] {
-		[
+		var output: [String: Any] = [
 			"eventsDispatched": eventsDispatched,
 			"unreleasedKeys": pressedKeys.sorted(),
 			"unreleasedMouseButtons": pressedMouseButtons.sorted(),
-			"recoveryRequired": eventsDispatched > 0,
+			"recoveryRequired": eventsDispatched > 0 && (recovery?["status"] as? String) != "verified",
 			"retrySafe": eventsDispatched == 0,
 		]
+		if let recovery {
+			output["inputRecovery"] = recovery
+			output["unreleasedKeys"] = recovery["unreleasedKeys"]
+			output["unreleasedMouseButtons"] = recovery["unreleasedMouseButtons"]
+		}
+		return output
 	}
+}
+
+struct ForegroundInputReleaseVerification {
+	let complete: Bool
+	var heldKeys = Set<Int>()
+	var heldMouseButtons = Set<Int>()
 }
 
 func unownedForegroundModifiers(observed: Set<Int>, dispatch: ForegroundInputDispatchState) -> Set<Int> {
@@ -311,6 +436,11 @@ func isOwnedForegroundKeyRelease(_ event: ForegroundInputEvent, dispatch: Foregr
 	return dispatch.pressedKeys.contains(code)
 		&& Set(modifiers).count == modifiers.count
 		&& Set(modifiers) == dispatch.pressedKeys.intersection(foregroundModifierKeyCodes).subtracting([code])
+}
+
+func isOwnedForegroundMouseRelease(_ event: ForegroundInputEvent, dispatch: ForegroundInputDispatchState) -> Bool {
+	guard case let .mouseUp(button) = event else { return false }
+	return dispatch.pressedMouseButtons.contains(button)
 }
 
 @discardableResult
@@ -337,10 +467,31 @@ func dispatchForegroundEventIfVerified(
 		// Balance only this transaction's already emitted chord. This does not
 		// authorize a new key, pointer event, another window or another app.
 		ownedRelease = true
+	} else if isOwnedForegroundKeyRelease(event, dispatch: dispatch),
+		let parentId = report.ownedModalParentWindowId,
+		parentId > 0, parentId != report.target.windowId,
+		report.target.windowId > 0, report.frontmostPidStable,
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: parentId),
+		report.firstActual == report.actual {
+		ownedRelease = true
+	} else if isOwnedForegroundMouseRelease(event, dispatch: dispatch),
+		let sheetId = report.ownedMouseSheetWindowId,
+		sheetId > 0, sheetId != report.target.windowId,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: sheetId),
+		report.firstActual == report.actual {
+		ownedRelease = true
 	} else {
 		ownedRelease = false
 	}
-	guard report.verified || ownedRelease else { return false }
+	let keyboardEvent: Bool
+	switch event {
+	case .keyDown, .keyUp: keyboardEvent = true
+	default: keyboardEvent = false
+	}
+	// Starting pointer input retains its main-window requirement. A sheet can
+	// receive only a button-up already owned by this exact transaction.
+	guard (report.verified && (report.targetIsMain || keyboardEvent)) || ownedRelease else { return false }
 	emit()
 	dispatch.record(event)
 	return true
@@ -350,10 +501,13 @@ func foregroundRejectedActResult(details: [String: Any]) -> [String: Any] {
 	let inputDispatch = details["inputDispatch"] as? [String: Any] ?? [:]
 	let eventsDispatched = inputDispatch["eventsDispatched"] as? Int ?? 0
 	let partial = eventsDispatched > 0
+	let recovered = inputDispatch["recoveryRequired"] as? Bool == false
 	let error: [String: Any] = partial
 		? [
 			"code": "foreground_interrupted_after_partial_hid",
-			"message": "Foreground verification failed after HID events were dispatched; do not retry, and recover the desktop explicitly",
+			"message": recovered
+				? "Foreground verification interrupted input; owned input was verified released. Reobserve the desktop; do not replay the action"
+				: "Foreground verification failed after HID events were dispatched; do not retry, and recover the desktop explicitly",
 		]
 		: [
 			"code": "foreground_target_unverified",

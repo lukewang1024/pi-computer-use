@@ -155,6 +155,83 @@ private struct ForegroundGateTests {
 		}
 		print("verified \(chordCases) closed-window chord shapes and \(interruptionCases) interrupted dispatch boundaries without OS input")
 		}
+		do {
+		let owned: (Int32?, String?, Int32?, String?, Bool, Bool) -> Bool = { sheetPid, sheetRole, parentPid, parentRole, main, direct in
+			isOwnedModalSheet(targetPid: target.pid, sheetPid: sheetPid, sheetRole: sheetRole,
+				parentPid: parentPid, parentRole: parentRole, parentIsMain: main, directlyOwned: direct)
+		}
+		precondition(owned(target.pid, "AXSheet", target.pid, "AXWindow", true, true))
+		precondition(!owned(nil, "AXSheet", target.pid, "AXWindow", true, true))
+		precondition(!owned(target.pid + 1, "AXSheet", target.pid, "AXWindow", true, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid + 1, "AXWindow", true, true))
+		precondition(!owned(target.pid, "AXWindow", target.pid, "AXWindow", true, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid, "AXSheet", true, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid, "AXWindow", false, true))
+		precondition(!owned(target.pid, "AXSheet", target.pid, "AXWindow", true, false))
+		let correct = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId)
+		var sheet = gateReport(correct, main: false)
+		precondition(!sheet.verified, "an arbitrary non-main window remains ineligible")
+		sheet.targetIsOwnedModalSheet = true
+		precondition(sheet.verified)
+		let escape: [ForegroundInputEvent] = [.keyDown(53, modifiers: []), .keyUp(53, modifiers: [])]
+		precondition(sendSequence(escape, reports: [sheet, sheet]).sink == escape)
+		for event in [ForegroundInputEvent.mouseDown(0), .mouseUp(0), .other] {
+			precondition(!dispatchForegroundEventIfVerified(sheet, event: event, dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		}
+		var wrongWindow = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1), main: false)
+		wrongWindow.targetIsOwnedModalSheet = true
+		var noFocus = gateReport(correct, focused: false, main: false)
+		noFocus.targetIsOwnedModalSheet = true
+		var racing = gateReport(correct, main: false, pidStable: false)
+		racing.targetIsOwnedModalSheet = true
+		for invalid in [wrongWindow, noFocus, racing] {
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: escape[0], dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		}
+		// Escape may dismiss the sheet on key-down. Only balance keys already
+		// owned by this transaction back to its independently proven main parent.
+		let parent = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 10)
+		var returned = gateReport(parent, focused: false, main: false)
+		returned.firstActual = parent
+		returned.ownedModalParentWindowId = parent.windowId
+		let completed = sendSequence(escape, reports: [sheet, returned])
+		precondition(completed.sink == escape && completed.result == nil)
+		let held = ForegroundInputDispatchState()
+		held.record(escape[0])
+		for event in [ForegroundInputEvent.keyDown(4, modifiers: []), .keyUp(4, modifiers: []), .mouseUp(0), .other] {
+			precondition(!dispatchForegroundEventIfVerified(returned, event: event, dispatch: held, emit: { preconditionFailure() }))
+		}
+		precondition(!dispatchForegroundEventIfVerified(returned, event: escape[1], dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		var missingParent = returned
+		missingParent.ownedModalParentWindowId = nil
+		var changedParent = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 11), focused: false, main: false)
+		changedParent.firstActual = parent
+		changedParent.ownedModalParentWindowId = parent.windowId
+		var changedPid = gateReport(ForegroundActualIdentity(pid: target.pid + 1, windowId: target.windowId + 10), focused: false, main: false)
+		changedPid.firstActual = parent
+		changedPid.ownedModalParentWindowId = parent.windowId
+		var unstable = returned
+		unstable.frontmostPidStable = false
+		var changedSample = returned
+		changedSample.firstActual = correct
+		precondition(!shouldReobserveForegroundRead(changedSample, releasingOwnedKey: true))
+		var closingTransition = changedSample
+		closingTransition.ownedModalParentTransitionObserved = true
+		precondition(!shouldReobserveForegroundRead(closingTransition))
+		precondition(shouldReobserveForegroundRead(closingTransition, releasingOwnedKey: true))
+		precondition(!dispatchForegroundEventIfVerified(closingTransition, event: escape[1], dispatch: held, emit: { preconditionFailure() }))
+		var foreignTransition = closingTransition
+		foreignTransition.frontmostPidStable = false
+		precondition(!shouldReobserveForegroundRead(foreignTransition, releasingOwnedKey: true))
+		foreignTransition = closingTransition
+		foreignTransition.ownedModalParentWindowId = target.windowId + 11
+		precondition(!shouldReobserveForegroundRead(foreignTransition, releasingOwnedKey: true))
+		for invalid in [missingParent, changedParent, changedPid, unstable, changedSample] {
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: escape[1], dispatch: held, emit: { preconditionFailure() }))
+		}
+		let chord = foregroundKeyChordEvents(code: 53, modifiers: [55, 56])!
+		let chordDone = sendSequence(chord, reports: Array(repeating: sheet, count: 3) + Array(repeating: returned, count: 3))
+		precondition(chordDone.sink == chord && chordDone.result == nil)
+		}
 
 		do {
 		// A proven direct child sheet may receive only the remaining releases
@@ -202,6 +279,74 @@ private struct ForegroundGateTests {
 		}
 		}
 		let correct = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId)
+		do {
+		// Insert Picture opened an owned native picker after mouse-down. Balance
+		// that transaction's button only after stable, bidirectional AX ownership.
+		let original = gateReport(correct)
+		let child = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 20)
+		var sheet = gateReport(child, focused: false)
+		sheet.firstActual = child
+		sheet.ownedMouseSheetWindowId = child.windowId
+		let click: [ForegroundInputEvent] = [.other, .mouseDown(0), .mouseUp(0)]
+		let completed = sendSequence(click, reports: [original, original, sheet])
+		precondition(completed.sink == click && completed.result == nil)
+		let held = ForegroundInputDispatchState()
+		held.record(.mouseDown(0))
+		precondition(isOwnedForegroundMouseRelease(.mouseUp(0), dispatch: held))
+		for event in [ForegroundInputEvent.mouseUp(1), .mouseDown(0), .other, .keyDown(1, modifiers: []), .keyUp(1, modifiers: [])] {
+			precondition(!isOwnedForegroundMouseRelease(event, dispatch: held))
+			precondition(!dispatchForegroundEventIfVerified(sheet, event: event, dispatch: held, emit: { preconditionFailure() }))
+		}
+		precondition(!dispatchForegroundEventIfVerified(sheet, event: .mouseUp(0), dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		var keyProofOnly = sheet
+		keyProofOnly.ownedMouseSheetWindowId = nil
+		keyProofOnly.ownedSheetWindowId = child.windowId
+		var racing = sheet
+		racing.frontmostPidStable = false
+		var differentSamples = sheet
+		differentSamples.firstActual = correct
+		var wrongOwner = gateReport(ForegroundActualIdentity(pid: target.pid + 1, windowId: child.windowId), focused: false)
+		wrongOwner.firstActual = wrongOwner.actual
+		wrongOwner.ownedMouseSheetWindowId = child.windowId
+		var wrongSheet = sheet
+		wrongSheet.ownedMouseSheetWindowId = target.windowId + 21
+		var notMain = gateReport(child, focused: false, main: false)
+		notMain.firstActual = child
+		notMain.ownedMouseSheetWindowId = child.windowId
+		for invalid in [keyProofOnly, racing, differentSamples, wrongOwner, wrongSheet, notMain] {
+			let rejected = sendSequence(click, reports: [original, original, invalid])
+			precondition(rejected.sink == Array(click.prefix(2)))
+			assertPartial(rejected.result, count: 2, keys: [], buttons: [0])
+		}
+		var transition = sheet
+		transition.ownedMouseSheetWindowId = nil
+		transition.firstActual = correct
+		transition.ownedMouseSheetTransitionObserved = true
+		precondition(!shouldReobserveForegroundRead(transition))
+		precondition(shouldReobserveForegroundRead(transition, releasingOwnedMouseButton: true))
+		precondition(!dispatchForegroundEventIfVerified(transition, event: .mouseUp(0), dispatch: held, emit: { preconditionFailure() }))
+		var noProof = transition
+		noProof.ownedMouseSheetTransitionObserved = false
+		noProof.ownedSheetTransitionObserved = true
+		var foreign = transition
+		foreign.frontmostPidStable = false
+		var nonMainTransition = gateReport(child, focused: false, main: false)
+		nonMainTransition.firstActual = correct
+		nonMainTransition.ownedMouseSheetTransitionObserved = true
+		for invalid in [noProof, foreign, nonMainTransition] {
+			precondition(!shouldReobserveForegroundRead(invalid, releasingOwnedMouseButton: true))
+		}
+		// A double-click must stop before any new down in the newly opened sheet.
+		let doubleClick = click + [.mouseDown(0), .mouseUp(0)]
+		let stopped = sendSequence(doubleClick, reports: [original, original, sheet, sheet, sheet])
+		precondition(stopped.sink == click)
+		assertPartial(stopped.result, count: 3, keys: [], buttons: [])
+		let empty = ForegroundInputDispatchState()
+		empty.record(.mouseDown(0))
+		precondition(dispatchForegroundEventIfVerified(sheet, event: .mouseUp(0), dispatch: empty, emit: {}))
+		precondition(empty.pressedMouseButtons.isEmpty)
+		precondition(!dispatchForegroundEventIfVerified(sheet, event: .mouseUp(0), dispatch: empty, emit: { preconditionFailure() }))
+		}
 		precondition(dispatches(gateReport(correct)))
 
 		// A different window in the same process is not the requested target.
@@ -376,6 +521,50 @@ private struct ForegroundGateTests {
 		transient.firstActual = ForegroundActualIdentity(pid: correct.pid, windowId: 999)
 		transient.secondDiagnostics = ["mappingStage": "ax_read_failed"]
 		precondition(!shouldReobserveForegroundRead(transient), "a resolved wrong first window cannot be hidden by a later transient read")
+		do {
+		// Recorded fullscreen Esc: down was delivered, then AX/CG geometry
+		// briefly stopped pairing before the same main window rebound.
+		func geometryTransition(_ actual: ForegroundActualIdentity, main: Bool = true) -> ForegroundGateReport {
+			var report = gateReport(actual, focused: false, main: main)
+			report.firstActual = ForegroundActualIdentity(pid: target.pid, windowId: nil)
+			report.firstDiagnostics = ["mappingStage": "no_valid_cg_candidate", "ambiguous": false, "validCandidateIds": [Int]()]
+			report.secondDiagnostics = ["mappingStage": "focused_element_unique_pairing", "ambiguous": false, "validCandidateIds": [Int(target.windowId)]]
+			return report
+		}
+		let resizing = geometryTransition(correct)
+		let down = ForegroundInputEvent.keyDown(53, modifiers: [])
+		let up = ForegroundInputEvent.keyUp(53, modifiers: [])
+		let held = ForegroundInputDispatchState()
+		var emitted: [ForegroundInputEvent] = []
+		precondition(dispatchForegroundEventIfVerified(gateReport(correct), event: down, dispatch: held, emit: { emitted.append(down) }))
+		precondition(!shouldReobserveForegroundRead(resizing), "new input cannot use the release-only geometry recheck")
+		precondition(shouldReobserveForegroundRead(resizing, releasingOwnedKey: isOwnedForegroundKeyRelease(up, dispatch: held)))
+		precondition(!dispatchForegroundEventIfVerified(resizing, event: up, dispatch: held, emit: { preconditionFailure() }), "mixed samples never authorize even an owned key-up")
+		precondition(held.pressedKeys == Set([53]) && emitted == [down])
+		let persistentFailure = foregroundRejectedActResult(details: foregroundFailureDetails(report: resizing, dispatch: held))
+		assertPartial(persistentFailure, count: 1, keys: [53])
+		precondition(!isOwnedForegroundKeyRelease(up, dispatch: ForegroundInputDispatchState()))
+		precondition(!isOwnedForegroundKeyRelease(.mouseUp(0), dispatch: held))
+		var rejected: [ForegroundGateReport] = []
+		var changed = resizing
+		changed.frontmostPidStable = false; rejected.append(changed)
+		changed = geometryTransition(correct, main: false); rejected.append(changed)
+		changed = resizing; changed.firstActual = ForegroundActualIdentity(pid: target.pid + 1, windowId: nil); rejected.append(changed)
+		changed = resizing; changed.firstActual = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1); rejected.append(changed)
+		changed = geometryTransition(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 1)); rejected.append(changed)
+		changed = resizing; changed.firstDiagnostics?["ambiguous"] = true; rejected.append(changed)
+		changed = resizing; changed.firstDiagnostics?["validCandidateIds"] = [Int(target.windowId + 1)]; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics?["ambiguous"] = true; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics?["validCandidateIds"] = [Int(target.windowId), Int(target.windowId + 1)]; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics?["mappingStage"] = "no_valid_cg_candidate"; rejected.append(changed)
+		changed = resizing; changed.secondDiagnostics = nil; rejected.append(changed)
+		for invalid in rejected {
+			precondition(!shouldReobserveForegroundRead(invalid, releasingOwnedKey: true))
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: up, dispatch: held, emit: { preconditionFailure() }))
+		}
+		precondition(dispatchForegroundEventIfVerified(gateReport(correct), event: up, dispatch: held, emit: { emitted.append(up) }), "a later fully verified read may release the held key exactly once")
+		precondition(emitted == [down, up] && held.pressedKeys.isEmpty)
+		}
 		let boundFrame = CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 800, height: 600))
 		let candidate = FocusedCGCandidateSnapshot(windowId: target.windowId, ownerPid: target.pid, frame: boundFrame, title: "Owned", isOnscreen: true)
 		func bound(_ matches: Bool = true, role: String = "AXWindow", frame: CGRect? = CGRect(origin: CGPoint(x: 100, y: 100), size: CGSize(width: 800, height: 600)), candidates: [FocusedCGCandidateSnapshot]? = nil) -> FocusedMappingDecision? {
@@ -459,6 +648,66 @@ private struct ForegroundGateTests {
             }
             precondition(!pointerTextFocusChanged(e), "invalid focus/geometry cannot establish effect")
         }
-		print("native foreground gate tests passed")
+		do {
+		let dispatch = ForegroundInputDispatchState()
+		let correct = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId))
+		for event in [ForegroundInputEvent.keyDown(59, modifiers: [59]), .keyDown(4, modifiers: [59]), .mouseDown(0)] {
+			precondition(dispatchForegroundEventIfVerified(correct, event: event, dispatch: dispatch, emit: {}))
+		}
+		var releases: [ForegroundInputEvent] = []
+		dispatch.settle(release: { event in
+			dispatchForegroundEventIfVerified(correct, event: event, dispatch: dispatch, emit: { releases.append(event) })
+		}, verify: { ForegroundInputReleaseVerification(complete: true) })
+		precondition(releases == [.mouseUp(0), .keyUp(4, modifiers: [59]), .keyUp(59, modifiers: [])])
+		precondition(!dispatch.hasHeldInput)
+		precondition(dispatch.details["recoveryRequired"] as? Bool == false)
+		precondition(dispatch.details["retrySafe"] as? Bool == false, "cleanup cannot authorize replay")
+		let receipt = dispatch.details["inputRecovery"] as! [String: Any]
+		precondition(receipt["status"] as? String == "verified")
+		precondition(receipt["operationEventsDispatched"] as? Int == 3)
+		precondition(receipt["releaseEventsDispatched"] as? Int == 3)
+		precondition(receipt["verifiedKeys"] as? [Int] == [4, 59])
+		precondition(receipt["verifiedMouseButtons"] as? [Int] == [0])
+		precondition(receipt["inputReplayed"] as? Bool == false)
+		}
+		do {
+		// Focus loss to an unrelated app cannot be "fixed" by blind releases.
+		let dispatch = ForegroundInputDispatchState()
+		dispatch.record(.keyDown(59, modifiers: [59]))
+		dispatch.record(.keyDown(4, modifiers: [59]))
+		let foreign = gateReport(ForegroundActualIdentity(pid: target.pid + 1, windowId: 1))
+		var attempted: [ForegroundInputEvent] = []
+		dispatch.settle(release: { event in
+			attempted.append(event)
+			return dispatchForegroundEventIfVerified(foreign, event: event, dispatch: dispatch, emit: { preconditionFailure("foreign input") })
+		}, verify: { ForegroundInputReleaseVerification(complete: true) })
+		precondition(attempted == [.keyUp(4, modifiers: [59])], "failed base release stops before modifier release")
+		precondition(dispatch.eventsDispatched == 2)
+		precondition(dispatch.details["recoveryRequired"] as? Bool == true)
+		precondition(dispatch.pressedKeys == [4, 59])
+		}
+		do {
+		// A release acknowledgement alone cannot clear quarantine while the OS
+		// still reports a held button, or when the native read is incomplete.
+		for verification in [ForegroundInputReleaseVerification(complete: true, heldMouseButtons: [0]),
+			ForegroundInputReleaseVerification(complete: false)] {
+			let dispatch = ForegroundInputDispatchState()
+			dispatch.record(.mouseDown(0))
+			dispatch.settle(release: { event in dispatch.record(event); return true }, verify: { verification })
+			precondition(!dispatch.hasHeldInput)
+			precondition(dispatch.details["recoveryRequired"] as? Bool == true)
+		}
+		}
+		do {
+		// A completed click followed by a refused second down has no stuck
+		// input. Verify state and reobserve instead of requiring a human reset.
+		let dispatch = ForegroundInputDispatchState()
+		for event in [ForegroundInputEvent.other, .mouseDown(0), .mouseUp(0)] { dispatch.record(event) }
+		dispatch.settle(release: { _ in preconditionFailure("no owned input remains") },
+			verify: { ForegroundInputReleaseVerification(complete: true) })
+		precondition(dispatch.details["recoveryRequired"] as? Bool == false)
+		precondition(dispatch.eventsDispatched == 3)
+		}
+		print("native foreground gate and owned-input recovery tests passed")
 	}
 }

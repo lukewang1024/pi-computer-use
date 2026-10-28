@@ -140,11 +140,24 @@ private struct LookRecord {
 	var appMenuElementRefs: Set<String> = []
 }
 
+private final class OwnedModalParentBinding {
+	var element: AXUIElement?
+	var identity: ForegroundTargetIdentity?
+}
+
 private struct PhysicalInputTarget {
 	let pid: Int32
 	let windowId: UInt32
 	let axWindow: AXUIElement?
 	let dispatchState: ForegroundInputDispatchState
+	let ownedModalParent = OwnedModalParentBinding()
+	let releases = PhysicalInputReleaseEvents()
+}
+
+private final class PhysicalInputReleaseEvents {
+	var keys: [Int: CGEvent] = [:]
+	var buttons: [Int: CGEvent] = [:]
+	var lastPointerLocation: CGPoint?
 }
 
 private struct ForegroundGateFailure: Error {
@@ -2394,6 +2407,7 @@ final class Bridge {
 			}
 		}
 		defer { if holdsPhysicalInput { physicalInputLock.unlock() } }
+		return try withPhysicalInputTransaction(target: physicalTarget) {
 		var performed: [String: Any] = ["delivery": delivery]
 		var element: AXUIElement?
 		var isApplicationMenuElement = false
@@ -3002,6 +3016,81 @@ final class Bridge {
 		var response: [String: Any] = ["outcome": outcome, "performed": performed]
 		if !evidence.isEmpty { response["evidence"] = evidence }
 		return finish(response)
+		}
+	}
+
+	/// Every exit after a physical write settles this transaction before the
+	/// native lock is released. Cleanup never resumes the interrupted action.
+	private func withPhysicalInputTransaction(target: PhysicalInputTarget?, body: () throws -> [String: Any]) throws -> [String: Any] {
+		do {
+			let result = try body()
+			if target?.dispatchState.hasHeldInput == true {
+				throw BridgeFailure(message: "Native action ended with owned input still held", code: "native_input_interrupted_after_partial_hid")
+			}
+			return result
+		} catch {
+			guard let target, target.dispatchState.eventsDispatched > 0 else { throw error }
+			physicalInputLock.lock()
+			defer { physicalInputLock.unlock() }
+			target.dispatchState.settle(release: { step in
+				let event: CGEvent?
+				switch step {
+				case let .keyUp(code, modifiers):
+					event = target.releases.keys[code]
+					event?.flags = self.flagsForModifierKeyCodes(modifiers)
+				case let .mouseUp(button):
+					event = target.releases.buttons[button]
+					if let point = target.releases.lastPointerLocation { event?.location = point }
+				default: return false
+				}
+				guard let event else { return false }
+				do { try self.postEvent(event, pid: target.pid, target: target); return true }
+				catch { return false }
+			}, verify: { self.verifyReleasedInput(target.dispatchState) })
+			let dispatch = target.dispatchState.details
+			if let failure = error as? ForegroundGateFailure {
+				var details = failure.details
+				details["inputDispatch"] = dispatch
+				return foregroundRejectedActResult(details: details)
+			}
+			if let failure = error as? ModifierInputDispatchFailure {
+				var details = failure.details
+				details["inputDispatch"] = dispatch
+				return modifierRejectedActResult(details: details)
+			}
+			if let failure = error as? InputStateDispatchFailure {
+				var details = failure.details
+				details["inputDispatch"] = dispatch
+				return inputStateRejectedActResult(details: details)
+			}
+			if error is TextInputSourceDispatchFailure { return textInputSourceRejectedActResult(dispatch) }
+			let failure = error as? BridgeFailure
+			return ["outcome": "unknown", "performed": ["delivery": "hid"],
+				"inputDispatch": dispatch,
+				"error": ["code": "native_input_interrupted_after_partial_hid",
+					"message": failure?.message ?? error.localizedDescription,
+					"causeCode": failure?.code ?? "internal_error"]]
+		}
+	}
+
+	private func verifyReleasedInput(_ dispatch: ForegroundInputDispatchState) -> ForegroundInputReleaseVerification {
+		// Posting an up event is not proof that the OS consumed it. Require two
+		// consecutive neutral samples for every key/button touched by this action.
+		var neutralSamples = 0
+		var heldKeys = Set<Int>()
+		var heldButtons = Set<Int>()
+		for _ in 0..<6 {
+			heldKeys = []
+			heldButtons = []
+			for source in [CGEventSourceStateID.hidSystemState, .combinedSessionState] {
+				for key in dispatch.ownedKeys where CGEventSource.keyState(source, key: CGKeyCode(key)) { heldKeys.insert(key) }
+				for button in dispatch.ownedMouseButtons where CGEventSource.buttonState(source, button: CGMouseButton(rawValue: UInt32(button))!) { heldButtons.insert(button) }
+			}
+			neutralSamples = heldKeys.isEmpty && heldButtons.isEmpty ? neutralSamples + 1 : 0
+			if neutralSamples == 2 { return ForegroundInputReleaseVerification(complete: true) }
+			usleep(10_000)
+		}
+		return ForegroundInputReleaseVerification(complete: false, heldKeys: heldKeys, heldMouseButtons: heldButtons)
 	}
 
 	private func actBatch(_ request: [String: Any]) throws -> [String: Any] {
@@ -4555,7 +4644,34 @@ final class Bridge {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
 		let inputEvent = foregroundInputEvent(event)
-		let report = foregroundReport(target: target, releasingOwnedKey: isOwnedForegroundKeyRelease(inputEvent, dispatch: target.dispatchState))
+		// Refuse to acquire a key/button that was held before this transaction.
+		// Prepare its exact balancing event before posting the down event.
+		var release: CGEvent?
+		switch inputEvent {
+		case let .keyDown(code, _) where !target.dispatchState.pressedKeys.contains(code):
+			guard ![CGEventSourceStateID.hidSystemState, .combinedSessionState].contains(where: { CGEventSource.keyState($0, key: CGKeyCode(code)) }) else {
+				throw BridgeFailure(message: "A key is already held outside this action; no down event was sent", code: "input_state_unverified")
+			}
+			release = event.copy()
+			release?.type = foregroundModifierKeyCodes.contains(code) ? .flagsChanged : .keyUp
+		case let .mouseDown(button) where !target.dispatchState.pressedMouseButtons.contains(button):
+			guard let nativeButton = CGMouseButton(rawValue: UInt32(button)),
+				![CGEventSourceStateID.hidSystemState, .combinedSessionState].contains(where: { CGEventSource.buttonState($0, button: nativeButton) }) else {
+				throw BridgeFailure(message: "A mouse button is already held outside this action; no down event was sent", code: "input_state_unverified")
+			}
+			release = event.copy()
+			release?.type = mouseUpType(for: nativeButton)
+		case .keyDown, .mouseDown:
+			throw BridgeFailure(message: "Duplicate down event in a physical input transaction", code: "input_state_unverified")
+		default: break
+		}
+		if case .keyDown = inputEvent, release == nil { throw BridgeFailure(message: "Could not prepare key release", code: "input_failed") }
+		if case .mouseDown = inputEvent, release == nil { throw BridgeFailure(message: "Could not prepare mouse release", code: "input_failed") }
+		let report = foregroundReport(
+			target: target,
+			releasingOwnedKey: isOwnedForegroundKeyRelease(inputEvent, dispatch: target.dispatchState),
+			releasingOwnedMouseButton: isOwnedForegroundMouseRelease(inputEvent, dispatch: target.dispatchState)
+		)
 		// Never turn an ordinary click into Control-click or take ownership of
 		// a user's held modifier. Inspect both source tables before every event;
 		// modifiers pressed by this exact action are the only allowed exception.
@@ -4568,18 +4684,53 @@ final class Bridge {
 		}) else {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: target.dispatchState))
 		}
+		switch inputEvent {
+		case let .keyDown(code, _): target.releases.keys[code] = release
+		case let .keyUp(code, _): target.releases.keys.removeValue(forKey: code)
+		case let .mouseDown(button): target.releases.buttons[button] = release
+		case let .mouseUp(button): target.releases.buttons.removeValue(forKey: button)
+		case .other: break
+		}
+		switch event.type {
+		case .mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+			.leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+			.leftMouseUp, .rightMouseUp, .otherMouseUp:
+			target.releases.lastPointerLocation = event.location
+		default: break
+		}
 	}
 
-	private func foregroundReport(target: PhysicalInputTarget, releasingOwnedKey: Bool = false) -> ForegroundGateReport {
+	private func foregroundReport(
+		target: PhysicalInputTarget, releasingOwnedKey: Bool = false,
+		releasingOwnedMouseButton: Bool = false
+	) -> ForegroundGateReport {
 		var report = readForegroundReport(target: target, releasingOwnedKey: releasingOwnedKey)
 		for _ in 0..<2 {
-			guard shouldReobserveForegroundRead(report, releasingOwnedKey: releasingOwnedKey) else { break }
+			guard shouldReobserveForegroundRead(report, releasingOwnedKey: releasingOwnedKey,
+				releasingOwnedMouseButton: releasingOwnedMouseButton) else { break }
 			// Only repeat observation; this event has not been posted. A different
 			// foreground application or a resolved wrong window stops immediately.
 			usleep(20_000)
 			report = readForegroundReport(target: target, releasingOwnedKey: releasingOwnedKey)
 		}
 		return report
+	}
+
+	private func directMainParentOfSheet(_ sheet: AXUIElement?, pid: Int32) -> AXUIElement? {
+		guard let sheet,
+			let parent = copyAttribute(sheet, attribute: kAXParentAttribute as CFString).flatMap(asAXElement)
+		else { return nil }
+		var sheetPid: pid_t = 0
+		var parentPid: pid_t = 0
+		guard AXUIElementGetPid(sheet, &sheetPid) == .success,
+			AXUIElementGetPid(parent, &parentPid) == .success,
+			isOwnedModalSheet(targetPid: pid, sheetPid: sheetPid,
+				sheetRole: stringAttribute(sheet, attribute: kAXRoleAttribute as CFString),
+				parentPid: parentPid, parentRole: stringAttribute(parent, attribute: kAXRoleAttribute as CFString),
+				parentIsMain: boolAttribute(parent, attribute: kAXMainAttribute as CFString) == true,
+				directlyOwned: sheetElements(of: parent).contains { sameElement($0, sheet) })
+		else { return nil }
+		return parent
 	}
 
 	private func readForegroundReport(target: PhysicalInputTarget, releasingOwnedKey: Bool = false) -> ForegroundGateReport {
@@ -4604,6 +4755,9 @@ final class Bridge {
 		let firstFocusedMatches = firstFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
 		let firstWindowMatches = firstActual.pid == target.pid && firstActual.windowId == target.windowId
 		let firstTargetIsMain = target.axWindow.flatMap { boolAttribute($0, attribute: kAXMainAttribute as CFString) } ?? false
+		let firstParent = firstTargetIsMain ? nil : directMainParentOfSheet(target.axWindow, pid: target.pid)
+		let firstParentResolution = target.ownedModalParent.identity == nil
+			? firstParent.map { focusedWindowResolution(pid: target.pid, focused: $0) } : nil
 		// Re-read the PID, focused AX window, mapped window identity, and main state
 		// after the first AX walk. The final PID read catches visible activation
 		// races immediately before emit; this cannot make the OS operation atomic.
@@ -4614,6 +4768,9 @@ final class Bridge {
 		let secondFocused = secondResolution?.element
 		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
 		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
+		let secondParent = secondTargetIsMain ? nil : directMainParentOfSheet(target.axWindow, pid: target.pid)
+		let secondParentResolution = target.ownedModalParent.identity == nil
+			? secondParent.map { focusedWindowResolution(pid: target.pid, focused: $0) } : nil
 		let emitPid = NSWorkspace.shared.frontmostApplication.map { Int32($0.processIdentifier) }
 		var report = ForegroundGateReport(
 			target: ForegroundTargetIdentity(pid: target.pid, windowId: target.windowId),
@@ -4636,12 +4793,58 @@ final class Bridge {
 			second: ForegroundClosedTargetSample(axWindowCount: successfulAXWindowCount(secondResolution), cgTargetExists: secondTargetExists)) {
 			report.ownedTargetClosedWithoutReplacement = true
 		}
+		// A native sheet is normally not AXMain. It still needs the same two
+		// exact focused AX/CG mappings, plus a stable direct main-window owner.
+		if firstWindowMatches, firstFocusedMatches, secondFocusedMatches,
+			report.actual.windowId == target.windowId, report.frontmostPidStable,
+			let firstParent, let secondParent, sameElement(firstParent, secondParent) {
+			if let bound = target.ownedModalParent.element {
+				report.targetIsOwnedModalSheet = sameElement(bound, firstParent)
+			} else if let firstId = firstParentResolution?.windowId,
+				let secondId = secondParentResolution?.windowId,
+				firstId > 0, firstId == secondId, firstId != target.windowId {
+				target.ownedModalParent.element = firstParent
+				target.ownedModalParent.identity = ForegroundTargetIdentity(pid: target.pid, windowId: firstId)
+				report.targetIsOwnedModalSheet = true
+			}
+		}
+		// Escape can close the sheet on key-down. Balance only this transaction's
+		// held keys, after two fresh exact mappings back to its previously proven
+		// main parent. This does not authorize new keys or pointer input there.
+		if let parent = target.ownedModalParent.element,
+			let identity = target.ownedModalParent.identity,
+			identity.pid == target.pid, identity.windowId != target.windowId,
+			firstActual == secondActual,
+			secondActual == ForegroundActualIdentity(pid: identity.pid, windowId: identity.windowId),
+			report.frontmostPidStable,
+			let firstFocused, let secondFocused,
+			sameElement(firstFocused, parent), sameElement(secondFocused, parent),
+			boolAttribute(firstFocused, attribute: kAXMainAttribute as CFString) == true,
+			boolAttribute(secondFocused, attribute: kAXMainAttribute as CFString) == true {
+			report.ownedModalParentWindowId = identity.windowId
+		}
+		if let parent = target.ownedModalParent.element,
+			let identity = target.ownedModalParent.identity,
+			firstFocusedMatches, firstWindowMatches, report.frontmostPidStable,
+			secondActual == ForegroundActualIdentity(pid: identity.pid, windowId: identity.windowId),
+			identity.pid == target.pid, identity.windowId != target.windowId,
+			let secondFocused, sameElement(secondFocused, parent),
+			boolAttribute(secondFocused, attribute: kAXMainAttribute as CFString) == true {
+			report.ownedModalParentWindowId = identity.windowId
+			report.ownedModalParentTransitionObserved = true
+		}
 		// A shortcut can open its own sheet before key-up. Only balance keys
 		// already owned by this transaction; never authorize new input to it.
 		func isDirectOwnedSheet(_ focused: AXUIElement?) -> Bool {
 			guard let focused, let parentWindow = target.axWindow,
 				stringAttribute(focused, attribute: kAXRoleAttribute as CFString) == "AXSheet",
 				let parent = copyAttribute(focused, attribute: kAXParentAttribute as CFString).flatMap(asAXElement)
+			else { return false }
+			return sameElement(parent, parentWindow)
+		}
+		func isDirectOwnedMouseSheet(_ focused: AXUIElement?) -> Bool {
+			guard let parentWindow = target.axWindow,
+				let parent = directMainParentOfSheet(focused, pid: target.pid)
 			else { return false }
 			return sameElement(parent, parentWindow)
 		}
@@ -4652,12 +4855,20 @@ final class Bridge {
 			let firstFocused, let secondFocused, sameElement(firstFocused, secondFocused),
 			NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
 			report.ownedSheetWindowId = sheetId
+			if isDirectOwnedMouseSheet(firstFocused), isDirectOwnedMouseSheet(secondFocused),
+				NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
+				report.ownedMouseSheetWindowId = sheetId
+			}
 		}
 		if firstFocusedMatches && firstWindowMatches, report.targetIsMain, report.frontmostPidStable,
 			secondActual.pid == target.pid, let sheetId = secondActual.windowId,
 			sheetId > 0, sheetId != target.windowId, isDirectOwnedSheet(secondFocused),
 			NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
 			report.ownedSheetTransitionObserved = true
+			if isDirectOwnedMouseSheet(secondFocused),
+				NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
+				report.ownedMouseSheetTransitionObserved = true
+			}
 		}
 		return report
 	}
@@ -4688,6 +4899,20 @@ final class Bridge {
 		if flags.contains(.maskAlternate) { keyCodes.append(58) }
 		if flags.contains(.maskControl) { keyCodes.append(59) }
 		return keyCodes
+	}
+
+	private func flagsForModifierKeyCodes(_ keys: [Int]) -> CGEventFlags {
+		var flags = CGEventFlags()
+		for key in keys {
+			switch key {
+			case 55: flags.insert(.maskCommand)
+			case 56: flags.insert(.maskShift)
+			case 58: flags.insert(.maskAlternate)
+			case 59: flags.insert(.maskControl)
+			default: break
+			}
+		}
+		return flags
 	}
 
 	private func verifyModifierState(target: PhysicalInputTarget) throws {
@@ -5209,6 +5434,23 @@ final class Bridge {
 	// Test-only entry: exercises the real private parser and mapping.
 	// No run loop, capture, permission probe or event posting is invoked.
 	func nativeKeyPreflightTests() throws {
+		// A returned input-state failure can be reconciled by the transaction
+		// scope without losing its cause. No OS input or AX query is issued.
+		do {
+			let dispatch = ForegroundInputDispatchState()
+			dispatch.record(.other)
+			let target = PhysicalInputTarget(pid: 1, windowId: 1, axWindow: nil, dispatchState: dispatch)
+			let result = try withPhysicalInputTransaction(target: target) {
+				throw InputStateDispatchFailure(details: ["phase": "dispatch", "causeCode": "injected-native-failure"])
+			}
+			precondition(result["outcome"] as? String == "unknown")
+			let error = result["error"] as! [String: Any]
+			precondition(error["code"] as? String == "input_interrupted_after_partial_hid")
+			precondition(error["causeCode"] as? String == "injected-native-failure")
+			let input = result["inputDispatch"] as! [String: Any]
+			precondition(input["recoveryRequired"] as? Bool == false)
+			precondition(input["retrySafe"] as? Bool == false)
+		}
 		// Inject an allocation failure after mouse-down into the actual act
 		// dispatch wrapper. No OS input, capture, permission probe or UI runs.
 		do {

@@ -2422,7 +2422,8 @@ async function terminalDesktopActionResult(
 		}
 	}
 	const status = dispatchUnknown ? "dispatch_outcome_unknown" : targetClosed ? "target_closed" : "post_action_observation_failed";
-	const code = semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (execution.error?.code ?? "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
+	const partialCode = inputRecovered ? execution.error?.code : execution.error?.code === "modifier_interrupted_after_partial_hid" ? "modifier_interrupted_after_partial_hid" : "foreground_interrupted_after_partial_hid";
+	const code = semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (partialCode ?? "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
 	clearDesktopOperationState(operationState());
 	const details: TerminalDesktopActionDetails = {
@@ -2452,7 +2453,7 @@ async function terminalDesktopActionResult(
 		: inputRecovered
 		? `The native action stopped after partial input. Its outcome remains unknown; do not replay it. Transaction-owned input was verified released by the helper. No manual desktop reset is required for this interruption.`
 		: partialInputUnknown
-		? `${code === "modifier_interrupted_after_partial_hid" ? "Modifier verification failed" : code === "foreground_interrupted_after_partial_hid" ? "Foreground verification failed" : "Native input stopped"} after ${execution.inputDispatch?.eventsDispatched ?? "an unconfirmed number of"} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
+		? `${inputFailure} verification failed after ${execution.inputDispatch?.eventsDispatched ?? "an unconfirmed number of"} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
 		: targetClosed
 		? `The action was delivered, and its source root ${target.appName} — ${target.windowTitle} closed before a successor observation could be captured.`
 		: `The action was delivered, but its source root ${target.appName} — ${target.windowTitle} could not be observed afterward: ${message}`;

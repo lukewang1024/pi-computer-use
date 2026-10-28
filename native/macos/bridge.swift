@@ -3058,6 +3058,11 @@ final class Bridge {
 				details["inputDispatch"] = dispatch
 				return modifierRejectedActResult(details: details)
 			}
+			if let failure = error as? InputStateDispatchFailure {
+				var details = failure.details
+				details["inputDispatch"] = dispatch
+				return inputStateRejectedActResult(details: details)
+			}
 			if error is TextInputSourceDispatchFailure { return textInputSourceRejectedActResult(dispatch) }
 			let failure = error as? BridgeFailure
 			return ["outcome": "unknown", "performed": ["delivery": "hid"],
@@ -5429,6 +5434,23 @@ final class Bridge {
 	// Test-only entry: exercises the real private parser and mapping.
 	// No run loop, capture, permission probe or event posting is invoked.
 	func nativeKeyPreflightTests() throws {
+		// A returned input-state failure can be reconciled by the transaction
+		// scope without losing its cause. No OS input or AX query is issued.
+		do {
+			let dispatch = ForegroundInputDispatchState()
+			dispatch.record(.other)
+			let target = PhysicalInputTarget(pid: 1, windowId: 1, axWindow: nil, dispatchState: dispatch)
+			let result = try withPhysicalInputTransaction(target: target) {
+				throw InputStateDispatchFailure(details: ["phase": "dispatch", "causeCode": "injected-native-failure"])
+			}
+			precondition(result["outcome"] as? String == "unknown")
+			let error = result["error"] as! [String: Any]
+			precondition(error["code"] as? String == "input_interrupted_after_partial_hid")
+			precondition(error["causeCode"] as? String == "injected-native-failure")
+			let input = result["inputDispatch"] as! [String: Any]
+			precondition(input["recoveryRequired"] as? Bool == false)
+			precondition(input["retrySafe"] as? Bool == false)
+		}
 		// Inject an allocation failure after mouse-down into the actual act
 		// dispatch wrapper. No OS input, capture, permission probe or UI runs.
 		do {

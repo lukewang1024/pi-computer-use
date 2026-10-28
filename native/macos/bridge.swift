@@ -4561,7 +4561,11 @@ final class Bridge {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
 		let inputEvent = foregroundInputEvent(event)
-		let report = foregroundReport(target: target, releasingOwnedKey: isOwnedForegroundKeyRelease(inputEvent, dispatch: target.dispatchState))
+		let report = foregroundReport(
+			target: target,
+			releasingOwnedKey: isOwnedForegroundKeyRelease(inputEvent, dispatch: target.dispatchState),
+			releasingOwnedMouseButton: isOwnedForegroundMouseRelease(inputEvent, dispatch: target.dispatchState)
+		)
 		// Never turn an ordinary click into Control-click or take ownership of
 		// a user's held modifier. Inspect both source tables before every event;
 		// modifiers pressed by this exact action are the only allowed exception.
@@ -4576,10 +4580,14 @@ final class Bridge {
 		}
 	}
 
-	private func foregroundReport(target: PhysicalInputTarget, releasingOwnedKey: Bool = false) -> ForegroundGateReport {
+	private func foregroundReport(
+		target: PhysicalInputTarget, releasingOwnedKey: Bool = false,
+		releasingOwnedMouseButton: Bool = false
+	) -> ForegroundGateReport {
 		var report = readForegroundReport(target: target, releasingOwnedKey: releasingOwnedKey)
 		for _ in 0..<2 {
-			guard shouldReobserveForegroundRead(report, releasingOwnedKey: releasingOwnedKey) else { break }
+			guard shouldReobserveForegroundRead(report, releasingOwnedKey: releasingOwnedKey,
+				releasingOwnedMouseButton: releasingOwnedMouseButton) else { break }
 			// Only repeat observation; this event has not been posted. A different
 			// foreground application or a resolved wrong window stops immediately.
 			usleep(20_000)
@@ -4714,6 +4722,12 @@ final class Bridge {
 			else { return false }
 			return sameElement(parent, parentWindow)
 		}
+		func isDirectOwnedMouseSheet(_ focused: AXUIElement?) -> Bool {
+			guard let parentWindow = target.axWindow,
+				let parent = directMainParentOfSheet(focused, pid: target.pid)
+			else { return false }
+			return sameElement(parent, parentWindow)
+		}
 		if firstActual == secondActual, firstActual.pid == target.pid,
 			let sheetId = secondActual.windowId, sheetId > 0, sheetId != target.windowId,
 			report.frontmostPidStable, report.targetIsMain,
@@ -4721,12 +4735,20 @@ final class Bridge {
 			let firstFocused, let secondFocused, sameElement(firstFocused, secondFocused),
 			NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
 			report.ownedSheetWindowId = sheetId
+			if isDirectOwnedMouseSheet(firstFocused), isDirectOwnedMouseSheet(secondFocused),
+				NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
+				report.ownedMouseSheetWindowId = sheetId
+			}
 		}
 		if firstFocusedMatches && firstWindowMatches, report.targetIsMain, report.frontmostPidStable,
 			secondActual.pid == target.pid, let sheetId = secondActual.windowId,
 			sheetId > 0, sheetId != target.windowId, isDirectOwnedSheet(secondFocused),
 			NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
 			report.ownedSheetTransitionObserved = true
+			if isDirectOwnedMouseSheet(secondFocused),
+				NSWorkspace.shared.frontmostApplication.map({ Int32($0.processIdentifier) }) == target.pid {
+				report.ownedMouseSheetTransitionObserved = true
+			}
 		}
 		return report
 	}

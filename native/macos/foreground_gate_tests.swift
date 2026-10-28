@@ -279,6 +279,74 @@ private struct ForegroundGateTests {
 		}
 		}
 		let correct = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId)
+		do {
+		// Insert Picture opened an owned native picker after mouse-down. Balance
+		// that transaction's button only after stable, bidirectional AX ownership.
+		let original = gateReport(correct)
+		let child = ForegroundActualIdentity(pid: target.pid, windowId: target.windowId + 20)
+		var sheet = gateReport(child, focused: false)
+		sheet.firstActual = child
+		sheet.ownedMouseSheetWindowId = child.windowId
+		let click: [ForegroundInputEvent] = [.other, .mouseDown(0), .mouseUp(0)]
+		let completed = sendSequence(click, reports: [original, original, sheet])
+		precondition(completed.sink == click && completed.result == nil)
+		let held = ForegroundInputDispatchState()
+		held.record(.mouseDown(0))
+		precondition(isOwnedForegroundMouseRelease(.mouseUp(0), dispatch: held))
+		for event in [ForegroundInputEvent.mouseUp(1), .mouseDown(0), .other, .keyDown(1, modifiers: []), .keyUp(1, modifiers: [])] {
+			precondition(!isOwnedForegroundMouseRelease(event, dispatch: held))
+			precondition(!dispatchForegroundEventIfVerified(sheet, event: event, dispatch: held, emit: { preconditionFailure() }))
+		}
+		precondition(!dispatchForegroundEventIfVerified(sheet, event: .mouseUp(0), dispatch: ForegroundInputDispatchState(), emit: { preconditionFailure() }))
+		var keyProofOnly = sheet
+		keyProofOnly.ownedMouseSheetWindowId = nil
+		keyProofOnly.ownedSheetWindowId = child.windowId
+		var racing = sheet
+		racing.frontmostPidStable = false
+		var differentSamples = sheet
+		differentSamples.firstActual = correct
+		var wrongOwner = gateReport(ForegroundActualIdentity(pid: target.pid + 1, windowId: child.windowId), focused: false)
+		wrongOwner.firstActual = wrongOwner.actual
+		wrongOwner.ownedMouseSheetWindowId = child.windowId
+		var wrongSheet = sheet
+		wrongSheet.ownedMouseSheetWindowId = target.windowId + 21
+		var notMain = gateReport(child, focused: false, main: false)
+		notMain.firstActual = child
+		notMain.ownedMouseSheetWindowId = child.windowId
+		for invalid in [keyProofOnly, racing, differentSamples, wrongOwner, wrongSheet, notMain] {
+			let rejected = sendSequence(click, reports: [original, original, invalid])
+			precondition(rejected.sink == Array(click.prefix(2)))
+			assertPartial(rejected.result, count: 2, keys: [], buttons: [0])
+		}
+		var transition = sheet
+		transition.ownedMouseSheetWindowId = nil
+		transition.firstActual = correct
+		transition.ownedMouseSheetTransitionObserved = true
+		precondition(!shouldReobserveForegroundRead(transition))
+		precondition(shouldReobserveForegroundRead(transition, releasingOwnedMouseButton: true))
+		precondition(!dispatchForegroundEventIfVerified(transition, event: .mouseUp(0), dispatch: held, emit: { preconditionFailure() }))
+		var noProof = transition
+		noProof.ownedMouseSheetTransitionObserved = false
+		noProof.ownedSheetTransitionObserved = true
+		var foreign = transition
+		foreign.frontmostPidStable = false
+		var nonMainTransition = gateReport(child, focused: false, main: false)
+		nonMainTransition.firstActual = correct
+		nonMainTransition.ownedMouseSheetTransitionObserved = true
+		for invalid in [noProof, foreign, nonMainTransition] {
+			precondition(!shouldReobserveForegroundRead(invalid, releasingOwnedMouseButton: true))
+		}
+		// A double-click must stop before any new down in the newly opened sheet.
+		let doubleClick = click + [.mouseDown(0), .mouseUp(0)]
+		let stopped = sendSequence(doubleClick, reports: [original, original, sheet, sheet, sheet])
+		precondition(stopped.sink == click)
+		assertPartial(stopped.result, count: 3, keys: [], buttons: [])
+		let empty = ForegroundInputDispatchState()
+		empty.record(.mouseDown(0))
+		precondition(dispatchForegroundEventIfVerified(sheet, event: .mouseUp(0), dispatch: empty, emit: {}))
+		precondition(empty.pressedMouseButtons.isEmpty)
+		precondition(!dispatchForegroundEventIfVerified(sheet, event: .mouseUp(0), dispatch: empty, emit: { preconditionFailure() }))
+		}
 		precondition(dispatches(gateReport(correct)))
 
 		// A different window in the same process is not the requested target.

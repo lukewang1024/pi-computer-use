@@ -146,6 +146,9 @@ struct ForegroundGateReport {
 	// Native producer only: two successful empty AX window inventories and two
 	// exact CG metadata probes proved this target closed without a replacement.
 	var ownedTargetClosedWithoutReplacement = false
+	// Pointer releases additionally require both native AX owner directions.
+	var ownedMouseSheetWindowId: UInt32?
+	var ownedMouseSheetTransitionObserved = false
 	// Only a transaction's own key-ups may return to this previously bound parent.
 	var ownedModalParentWindowId: UInt32?
 	var ownedModalParentTransitionObserved = false
@@ -179,6 +182,8 @@ struct ForegroundGateReport {
 			]
 		}
 		if let ownedSheetWindowId { output["ownedSheetReleaseWindowId"] = Int(ownedSheetWindowId) }
+		if let ownedMouseSheetWindowId { output["ownedMouseSheetReleaseWindowId"] = Int(ownedMouseSheetWindowId) }
+		if ownedMouseSheetTransitionObserved { output["ownedMouseSheetTransitionObserved"] = true }
 		if let ownedModalParentWindowId { output["ownedModalParentReleaseWindowId"] = Int(ownedModalParentWindowId) }
 		if ownedModalParentTransitionObserved { output["ownedModalParentTransitionObserved"] = true }
 		if ownedSheetTransitionObserved { output["ownedSheetTransitionObserved"] = true }
@@ -214,8 +219,20 @@ func isOwnedModalSheet(
 		&& parentIsMain && directlyOwned
 }
 
-func shouldReobserveForegroundRead(_ report: ForegroundGateReport, releasingOwnedKey: Bool = false) -> Bool {
+func shouldReobserveForegroundRead(
+	_ report: ForegroundGateReport, releasingOwnedKey: Bool = false,
+	releasingOwnedMouseButton: Bool = false
+) -> Bool {
 	if releasingOwnedKey && report.ownedTargetClosedWithoutReplacement { return false }
+	// A click can open its direct child sheet on mouse-down. Only an already
+	// held button may request a fresh stable ownership read before mouse-up.
+	if releasingOwnedMouseButton, report.ownedMouseSheetTransitionObserved,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.actual.pid == report.target.pid,
+		let sheetId = report.actual.windowId, sheetId > 0, sheetId != report.target.windowId {
+		return true
+	}
 	// A closing sheet can disappear between the two samples. Another read may
 	// prove its bound parent; the mixed sample itself never authorizes input.
 	if releasingOwnedKey, report.ownedModalParentTransitionObserved,
@@ -356,6 +373,11 @@ func isOwnedForegroundKeyRelease(_ event: ForegroundInputEvent, dispatch: Foregr
 		&& Set(modifiers) == dispatch.pressedKeys.intersection(foregroundModifierKeyCodes).subtracting([code])
 }
 
+func isOwnedForegroundMouseRelease(_ event: ForegroundInputEvent, dispatch: ForegroundInputDispatchState) -> Bool {
+	guard case let .mouseUp(button) = event else { return false }
+	return dispatch.pressedMouseButtons.contains(button)
+}
+
 @discardableResult
 func dispatchForegroundEventIfVerified(
 	_ report: ForegroundGateReport,
@@ -387,6 +409,13 @@ func dispatchForegroundEventIfVerified(
 		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: parentId),
 		report.firstActual == report.actual {
 		ownedRelease = true
+	} else if isOwnedForegroundMouseRelease(event, dispatch: dispatch),
+		let sheetId = report.ownedMouseSheetWindowId,
+		sheetId > 0, sheetId != report.target.windowId,
+		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: sheetId),
+		report.firstActual == report.actual {
+		ownedRelease = true
 	} else {
 		ownedRelease = false
 	}
@@ -395,8 +424,8 @@ func dispatchForegroundEventIfVerified(
 	case .keyDown, .keyUp: keyboardEvent = true
 	default: keyboardEvent = false
 	}
-	// The new modal-sheet eligibility is for keyboard input. Pointer delivery
-	// retains its existing main-window requirement.
+	// Starting pointer input retains its main-window requirement. A sheet can
+	// receive only a button-up already owned by this exact transaction.
 	guard (report.verified && (report.targetIsMain || keyboardEvent)) || ownedRelease else { return false }
 	emit()
 	dispatch.record(event)

@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const source=fs.readFileSync(path.join(root,'native/macos/bridge.swift'),'utf8');
 const begin=source.indexOf('    private func pointerTextFocusSnapshot(');
-const end=source.indexOf('\n\t// AXFocused on individual nodes',begin);
+const end=source.indexOf('\n\t// Some web editors expose their active keyboard proxy',begin);
 assert(begin>=0&&end>begin);
 const method=source.slice(begin,end).replaceAll('AXUIElementCreateApplication','TestAXUIElementCreateApplication');
 const declaration=source.slice(source.indexOf('private struct PointerTextFocusSnapshot {'),source.indexOf('final class Bridge {'));

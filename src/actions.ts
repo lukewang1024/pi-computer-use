@@ -318,7 +318,8 @@ export function canRetryInForeground(action: PreparedAction, outcome: "worked" |
 	return !headless && outcome === "didnt" && (action.action === "typeText" || action.action === "keypress");
 }
 
-export function outcomeAfterCheck(current: "worked" | "didnt" | "unknown", check: "verified" | "preexisting" | "failed"): "worked" | "didnt" | "unknown" {
+export function outcomeAfterCheck(current: "worked" | "didnt" | "unknown", check: "verified" | "preexisting" | "failed" | "unverified"): "worked" | "didnt" | "unknown" {
+	if (check === "unverified") return current === "didnt" ? "didnt" : "unknown";
 	if (check === "verified") return "worked";
 	if (check === "failed") return "didnt";
 	return current;

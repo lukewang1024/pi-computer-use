@@ -3413,19 +3413,34 @@ final class Bridge {
 		}
 
 		var lastCount = 0
+		var incomplete = false
 		repeat {
 			let changeGeneration = rootChangeGeneration(pid: pid)
-			let collected = collectDescendantsWithContext(startingAt: rootElement, maxDepth: 12, maxNodes: 2000)
-			let descendants = scopeExact ? Array(collected.prefix(1)) : collected
-			lastCount = descendants.count
-			if let match = descendants.first(where: { matches($0.element) }) {
-				if waitForGone {
-					waitForRootChange(pid: pid, since: changeGeneration, until: deadline)
-					continue
-				}
+			var containsWebArea = false
+			let scan = scanCondition(
+				root: AXDescendant(element: rootElement, depth: 0, insideWebArea: false, axVisible: true),
+				maxNodes: scopeExact ? 1 : 2000,
+				identity: { AnyHashable(ObjectIdentifier($0.element)) },
+				children: { candidate -> [AXDescendant]? in
+					if scopeExact { return [] }
+					var value: CFTypeRef?
+					let status = AXUIElementCopyAttributeValue(candidate.element, kAXChildrenAttribute as CFString, &value)
+					if status == .attributeUnsupported || status == .noValue { return [] }
+					guard status == .success, let children = value as? [AXUIElement] else { return nil }
+					let insideWebArea = candidate.insideWebArea || self.stringAttribute(candidate.element, attribute: kAXRoleAttribute as CFString) == "AXWebArea"
+					return children.map { AXDescendant(element: $0, depth: candidate.depth + 1, insideWebArea: insideWebArea, axVisible: true) }
+				},
+				matches: { candidate in
+					if self.stringAttribute(candidate.element, attribute: kAXRoleAttribute as CFString) == "AXWebArea" { containsWebArea = true }
+					return matches(candidate.element)
+				},
+				withinBudget: { Date() < deadline }
+			)
+			lastCount = scan.nodeCount
+			incomplete = scan.satisfies(gone: waitForGone) == nil
+			if !waitForGone, let match = scan.match {
 				let candidateRole = self.stringAttribute(match.element, attribute: kAXRoleAttribute as CFString) ?? ""
 				let isBrowser = isBrowser(pid: pid)
-				let containsWebArea = descendants.contains { self.stringAttribute($0.element, attribute: kAXRoleAttribute as CFString) == "AXWebArea" }
 				return [
 					"found": true,
 					"target": self.elementPayload(
@@ -3436,13 +3451,18 @@ final class Bridge {
 					"nodeCount": lastCount,
 				]
 			}
-			if waitForGone {
+			if waitForGone, scan.satisfies(gone: true) == true {
 				return ["found": true, "gone": true, "nodeCount": lastCount]
 			}
 			waitForRootChange(pid: pid, since: changeGeneration, until: deadline)
 		} while Date() < deadline
 
-		return ["found": false, "timedOut": true, "nodeCount": lastCount]
+		var result: [String: Any] = ["found": false, "timedOut": true, "nodeCount": lastCount]
+		if incomplete {
+			result["incomplete"] = true
+			result["reason"] = "condition_tree_incomplete"
+		}
+		return result
 	}
 
 	private func hitTestElement(at point: CGPoint) -> AXUIElement? {

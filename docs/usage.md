@@ -72,8 +72,8 @@ act_ui({ stateId, actions: [{ action: "press", ref: "@e12" }] })
 
 When an action has an observable completion signal, attach it to the same
 transaction. Pi waits through the platform change-notification path and marks
-the execution `didnt` with `postcondition_failed` if the application swallowed
-the delivered event:
+the execution `didnt` with `postcondition_failed` when the requested condition
+is not observed before its deadline:
 
 ```js
 act_ui({
@@ -82,6 +82,12 @@ act_ui({
   expect: { text: "Archive completed", until: "present", timeoutMs: 3000 }
 })
 ```
+
+macOS condition reads traverse deep controls within a node and time budget.
+An incomplete read cannot prove absence: `wait_for` retains `incomplete` and
+`act_ui` reports `postcondition_unverified`, with verification `unverified`.
+The delivered action remains separate evidence; do not repeat it because the
+condition could not be checked. An exact `ref` can restrict the read to one control.
 
 Verification reports `verified`, `preexisting`, or `failed`. A preexisting
 condition means the requested end state holds, but is not evidence that the

@@ -353,6 +353,7 @@ func foregroundKeyChordEvents(code: Int, modifiers: [Int]) -> [ForegroundInputEv
 }
 
 final class ForegroundInputDispatchState {
+	let transactionId = UUID().uuidString
 	private(set) var eventsDispatched = 0
 	private var pressedKeyCodes = Set<Int>()
 	private var modifierKeys = Set<Int>()
@@ -474,13 +475,29 @@ func isOwnedForegroundMouseRelease(_ event: ForegroundInputEvent, dispatch: Fore
 	return dispatch.pressedMouseButtons.contains(button)
 }
 
+/// Cleanup balances only events acquired by this transaction. Foreground
+/// admission protects new input; it must not strand an already-held input.
+@discardableResult
+func dispatchOwnedInputCleanup(_ event: ForegroundInputEvent,
+	dispatch: ForegroundInputDispatchState, emit: () throws -> Void) rethrows -> Bool {
+	guard isOwnedForegroundKeyRelease(event, dispatch: dispatch)
+		|| isOwnedForegroundMouseRelease(event, dispatch: dispatch) else { return false }
+	try emit()
+	dispatch.record(event)
+	return true
+}
+
+func ownedCleanupModifierCodes(observed: Set<Int>, owned: Set<Int>, remaining: Set<Int>) -> Set<Int> {
+	observed.subtracting(owned).union(remaining)
+}
+
 @discardableResult
 func dispatchForegroundEventIfVerified(
 	_ report: ForegroundGateReport,
 	event: ForegroundInputEvent,
 	dispatch: ForegroundInputDispatchState,
-	emit: () -> Void
-) -> Bool {
+	emit: () throws -> Void
+) rethrows -> Bool {
 	let ownedRelease: Bool
 	if isOwnedForegroundKeyRelease(event, dispatch: dispatch),
 		let id = report.createdWindowReleaseId,
@@ -530,7 +547,7 @@ func dispatchForegroundEventIfVerified(
 	// Starting pointer input retains its main-window requirement. A sheet can
 	// receive only a button-up already owned by this exact transaction.
 	guard (report.verified && (report.targetIsMain || keyboardEvent)) || ownedRelease else { return false }
-	emit()
+	try emit()
 	dispatch.record(event)
 	return true
 }

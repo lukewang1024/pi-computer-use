@@ -152,6 +152,10 @@ struct ForegroundGateReport {
 	// Only a transaction's own key-ups may return to this previously bound parent.
 	var ownedModalParentWindowId: UInt32?
 	var ownedModalParentTransitionObserved = false
+	// A complete pre-dispatch inventory and two native focus/inventory reads
+	// establish a newly created same-app window. Only owned key-ups may use it.
+	var createdWindowReleaseId: UInt32?
+	var createdWindowTransitionObserved = false
 
 	var verified: Bool {
 		target.windowId > 0
@@ -186,6 +190,8 @@ struct ForegroundGateReport {
 		if ownedMouseSheetTransitionObserved { output["ownedMouseSheetTransitionObserved"] = true }
 		if let ownedModalParentWindowId { output["ownedModalParentReleaseWindowId"] = Int(ownedModalParentWindowId) }
 		if ownedModalParentTransitionObserved { output["ownedModalParentTransitionObserved"] = true }
+		if let createdWindowReleaseId { output["createdWindowReleaseId"] = Int(createdWindowReleaseId) }
+		if createdWindowTransitionObserved { output["createdWindowTransitionObserved"] = true }
 		if ownedSheetTransitionObserved { output["ownedSheetTransitionObserved"] = true }
 		if ownedTargetClosedWithoutReplacement { output["ownedTargetClosedWithoutReplacement"] = true }
 		if let firstDiagnostics { output["firstMapping"] = firstDiagnostics }
@@ -198,6 +204,24 @@ struct ForegroundClosedTargetSample {
 	// nil means a failed/invalid inventory, never an empty desktop.
 	let axWindowCount: Int?
 	let cgTargetExists: Bool?
+}
+
+func provenCreatedForegroundWindow(_ report: ForegroundGateReport,
+	baseline: Set<UInt32>?, first: Set<UInt32>?, second: Set<UInt32>?,
+	allowTransition: Bool = false) -> UInt32? {
+	guard report.target.windowId > 0, report.frontmostPidStable,
+		report.actual.pid == report.target.pid,
+		let id = report.actual.windowId, id > 0, id != report.target.windowId,
+		let baseline, baseline.contains(report.target.windowId), !baseline.contains(id),
+		let first, let second,
+		first.contains(report.target.windowId), second.contains(report.target.windowId),
+		second.contains(id) else { return nil }
+	if report.firstActual == report.actual, first.contains(id) { return id }
+	if allowTransition,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId) {
+		return id
+	}
+	return nil
 }
 
 func provenClosedForegroundTarget(_ report: ForegroundGateReport,
@@ -224,6 +248,13 @@ func shouldReobserveForegroundRead(
 	releasingOwnedMouseButton: Bool = false
 ) -> Bool {
 	if releasingOwnedKey && report.ownedTargetClosedWithoutReplacement { return false }
+	if releasingOwnedKey, report.createdWindowTransitionObserved,
+		report.frontmostPidStable, report.target.windowId > 0,
+		report.firstActual == ForegroundActualIdentity(pid: report.target.pid, windowId: report.target.windowId),
+		report.actual.pid == report.target.pid,
+		let id = report.actual.windowId, id > 0, id != report.target.windowId {
+		return true
+	}
 	// A click can open its direct child sheet on mouse-down. Only an already
 	// held button may request a fresh stable ownership read before mouse-up.
 	if releasingOwnedMouseButton, report.ownedMouseSheetTransitionObserved,
@@ -452,6 +483,13 @@ func dispatchForegroundEventIfVerified(
 ) -> Bool {
 	let ownedRelease: Bool
 	if isOwnedForegroundKeyRelease(event, dispatch: dispatch),
+		let id = report.createdWindowReleaseId,
+		id > 0, id != report.target.windowId, report.target.windowId > 0,
+		report.frontmostPidStable,
+		report.actual == ForegroundActualIdentity(pid: report.target.pid, windowId: id),
+		report.firstActual == report.actual {
+		ownedRelease = true
+	} else if isOwnedForegroundKeyRelease(event, dispatch: dispatch),
 		let sheetId = report.ownedSheetWindowId,
 		sheetId > 0, sheetId != report.target.windowId,
 		report.target.windowId > 0, report.targetIsMain, report.frontmostPidStable,

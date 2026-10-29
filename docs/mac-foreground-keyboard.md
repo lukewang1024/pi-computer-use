@@ -73,3 +73,13 @@ If the two observations straddle the original-window to direct-sheet transition,
 only a pending transaction-owned key release can request up to two further
 read-only samples. The transition sample does not permit HID dispatch. A fresh
 stable owned-sheet proof is still mandatory before releasing the key.
+
+Some applications open a separate top-level panel rather than an AXSheet. A
+transaction records a complete same-process CG window inventory before dispatch,
+including hidden windows. Its remaining owned key-ups may reach a newly created
+window only when two fresh native focus mappings identify that exact window in
+the same foreground process, both current inventories contain it and the source
+window, and it was absent before dispatch. Missing inventories, pre-existing
+windows, changed processes and mixed focus samples do not authorize a release.
+A mixed source-to-new-window sample permits only another bounded read. This rule
+does not authorize new key-downs, pointer events or keys from an earlier action.

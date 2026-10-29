@@ -145,11 +145,17 @@ private final class OwnedModalParentBinding {
 	var identity: ForegroundTargetIdentity?
 }
 
+private final class PhysicalInputWindowBaseline {
+	var captured = false
+	var ids: Set<UInt32>?
+}
+
 private struct PhysicalInputTarget {
 	let pid: Int32
 	let windowId: UInt32
 	let axWindow: AXUIElement?
 	let dispatchState: ForegroundInputDispatchState
+	let initialWindows = PhysicalInputWindowBaseline()
 	let ownedModalParent = OwnedModalParentBinding()
 	let releases = PhysicalInputReleaseEvents()
 }
@@ -2296,6 +2302,21 @@ final class Bridge {
 			guard let owner = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, owner == pid else { continue }
 			guard let windowId = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { continue }
 			ids.insert(windowId)
+		}
+		return ids
+	}
+
+	// Release authority needs a complete inventory, including hidden windows.
+	// Missing metadata must not make a pre-existing window appear newly created.
+	private func inputWindowInventory(pid: Int32) -> Set<UInt32>? {
+		guard let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]],
+			!entries.isEmpty else { return nil }
+		var ids = Set<UInt32>()
+		for entry in entries {
+			guard let owner = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else { return nil }
+			guard owner == pid else { continue }
+			guard let id = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value, id > 0 else { return nil }
+			ids.insert(id)
 		}
 		return ids
 	}
@@ -4636,6 +4657,12 @@ final class Bridge {
 			throw ForegroundGateFailure(details: foregroundFailureDetails(report: report, dispatch: ForegroundInputDispatchState()))
 		}
 		let inputEvent = foregroundInputEvent(event)
+		// Callers hold physicalInputLock here. Capture once immediately before
+		// this transaction's first HID event, never before waiting for that lock.
+		if !target.initialWindows.captured {
+			target.initialWindows.ids = inputWindowInventory(pid: target.pid)
+			target.initialWindows.captured = true
+		}
 		// Refuse to acquire a key/button that was held before this transaction.
 		// Prepare its exact balancing event before posting the down event.
 		var release: CGEvent?
@@ -4744,6 +4771,7 @@ final class Bridge {
 		let firstTargetExists = releasingOwnedKey && firstResolution?.diagnostics["axWindowsCount"] as? Int == 0 ? exactTargetStillExists() : nil
 		let firstFocused = firstResolution?.element
 		let firstActual = ForegroundActualIdentity(pid: firstPid, windowId: firstResolution?.windowId)
+		let firstWindowIds = releasingOwnedKey ? inputWindowInventory(pid: target.pid) : nil
 		let firstFocusedMatches = firstFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
 		let firstWindowMatches = firstActual.pid == target.pid && firstActual.windowId == target.windowId
 		let firstTargetIsMain = target.axWindow.flatMap { boolAttribute($0, attribute: kAXMainAttribute as CFString) } ?? false
@@ -4759,6 +4787,7 @@ final class Bridge {
 		let secondTargetExists = releasingOwnedKey && secondResolution?.diagnostics["axWindowsCount"] as? Int == 0 ? exactTargetStillExists() : nil
 		let secondFocused = secondResolution?.element
 		let secondActual = ForegroundActualIdentity(pid: secondPid, windowId: secondResolution?.windowId)
+		let secondWindowIds = releasingOwnedKey ? inputWindowInventory(pid: target.pid) : nil
 		let secondFocusedMatches = secondFocused.flatMap { focused in target.axWindow.map { sameElement(focused, $0) } } ?? false
 		let secondParent = secondTargetIsMain ? nil : directMainParentOfSheet(target.axWindow, pid: target.pid)
 		let secondParentResolution = target.ownedModalParent.identity == nil
@@ -4774,6 +4803,15 @@ final class Bridge {
 			firstDiagnostics: firstResolution?.diagnostics,
 			secondDiagnostics: secondResolution?.diagnostics
 		)
+		if releasingOwnedKey {
+			report.createdWindowReleaseId = provenCreatedForegroundWindow(report,
+				baseline: target.initialWindows.ids, first: firstWindowIds, second: secondWindowIds)
+			if report.createdWindowReleaseId == nil {
+				report.createdWindowTransitionObserved = provenCreatedForegroundWindow(report,
+					baseline: target.initialWindows.ids, first: firstWindowIds, second: secondWindowIds,
+					allowTransition: true) != nil
+			}
+		}
 		func successfulAXWindowCount(_ resolution: FocusedWindowResolution?) -> Int? {
 			guard let diagnostics = resolution?.diagnostics,
 				diagnostics["windowsReadStatus"] as? Int == Int(AXError.success.rawValue),

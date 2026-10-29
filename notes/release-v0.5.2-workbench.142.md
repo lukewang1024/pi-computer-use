@@ -5,6 +5,7 @@
 - Record a complete pre-dispatch window inventory, including hidden windows, to distinguish a newly created same-app panel from unrelated existing windows.
 - Permit only the current transaction's remaining key-ups after two exact native focus and window-inventory checks; a mixed transition requests another bounded read.
 - Keep unknown delivery, input-state verification and quarantine intact when the release cannot be proved. Never replay the shortcut or release input owned by an earlier action.
+- Move macOS package and release jobs to the supported macOS 15 runner as the macOS 14 runner retires.
 
 ## Validation
 

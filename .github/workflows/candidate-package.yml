@@ -85,7 +85,9 @@ jobs:
   package:
     name: Assemble and validate exact candidate
     needs: native
-    runs-on: macos-15
+    # Use the standard Intel pool after hosted arm64 allocation failures.
+    # Universal builds and verification still cover both macOS architectures.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v7
         with:

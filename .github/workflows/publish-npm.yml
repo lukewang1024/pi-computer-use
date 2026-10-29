@@ -37,7 +37,7 @@ env:
 
 jobs:
   build-signed-helper:
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
@@ -413,7 +413,7 @@ jobs:
           fi
 
   publish-release:
-    runs-on: macos-14
+    runs-on: macos-15
     needs: validate-release
     permissions:
       actions: read

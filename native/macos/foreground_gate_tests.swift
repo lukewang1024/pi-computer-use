@@ -62,6 +62,79 @@ private func assertPartial(_ result: [String: Any]?, count: Int, keys: [Int], bu
 private struct ForegroundGateTests {
 	static func main() {
 		do {
+		// TextEdit's Cmd+O opens a top-level panel, not an AXSheet. An exact
+		// pre-dispatch inventory excludes unrelated pre-existing same-app windows.
+		let source = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: target.windowId))
+		let panelId = target.windowId + 1
+		let baseline: Set<UInt32> = [target.windowId, target.windowId + 2]
+		let current = baseline.union([panelId])
+		var panel = gateReport(ForegroundActualIdentity(pid: target.pid, windowId: panelId), focused: false, main: false)
+		panel.firstActual = panel.actual
+		precondition(provenCreatedForegroundWindow(panel, baseline: baseline, first: current, second: current) == panelId)
+		let inventories: [(Set<UInt32>?, Set<UInt32>?, Set<UInt32>?)] = [
+			(nil, current, current), ([], current, current), (current, current, current),
+			(baseline, nil, current), (baseline, current, nil),
+			(baseline, baseline, current), (baseline, current, baseline),
+			(baseline, [panelId], current), (baseline, current, [panelId])
+		]
+		for sample in inventories {
+			precondition(provenCreatedForegroundWindow(panel, baseline: sample.0, first: sample.1, second: sample.2) == nil)
+		}
+		var transition = panel; transition.firstActual = source.actual
+		precondition(provenCreatedForegroundWindow(transition, baseline: baseline, first: baseline, second: current) == nil)
+		transition.createdWindowTransitionObserved = provenCreatedForegroundWindow(transition,
+			baseline: baseline, first: baseline, second: current, allowTransition: true) != nil
+		precondition(shouldReobserveForegroundRead(transition, releasingOwnedKey: true))
+		precondition(!shouldReobserveForegroundRead(transition))
+		precondition(!shouldReobserveForegroundRead(transition, releasingOwnedMouseButton: true))
+		panel.createdWindowReleaseId = panelId
+		var racing = panel; racing.frontmostPidStable = false
+		var foreign = gateReport(ForegroundActualIdentity(pid: target.pid + 1, windowId: panelId), focused: false, main: false)
+		foreign.firstActual = foreign.actual; foreign.createdWindowReleaseId = panelId
+		var changed = panel; changed.firstActual = ForegroundActualIdentity(pid: target.pid, windowId: panelId + 1)
+		var missing = panel; missing.createdWindowReleaseId = nil
+		var wrong = panel; wrong.createdWindowReleaseId = panelId + 1
+		for invalid in [racing, foreign, changed] {
+			precondition(provenCreatedForegroundWindow(invalid, baseline: baseline, first: current, second: current) == nil)
+		}
+		let chord = foregroundKeyChordEvents(code: 31, modifiers: [55])!
+		precondition(sendSequence(chord, reports: [source, source, panel, panel]).result == nil)
+		let held = ForegroundInputDispatchState()
+		for event in chord.prefix(2) { held.record(event) }
+		held.record(.mouseDown(0))
+		for invalid in [racing, foreign, changed, missing, wrong, transition] {
+			precondition(!dispatchForegroundEventIfVerified(invalid, event: .keyUp(31, modifiers: [55]), dispatch: held, emit: { preconditionFailure() }))
+		}
+		for event in [ForegroundInputEvent.keyDown(1, modifiers: [55]), .keyUp(1, modifiers: [55]),
+			.keyUp(31, modifiers: []), .mouseDown(0), .mouseUp(0), .other] {
+			precondition(!dispatchForegroundEventIfVerified(panel, event: event, dispatch: held, emit: { preconditionFailure() }))
+		}
+		let empty = ForegroundInputDispatchState()
+		precondition(!dispatchForegroundEventIfVerified(panel, event: .keyUp(31, modifiers: []), dispatch: empty, emit: { preconditionFailure() }))
+		var cases = 0
+		for mask in 0..<16 {
+			let modifiers = [55, 56, 58, 59].enumerated().filter { mask & (1 << $0.offset) != 0 }.map(\.element)
+			for code in 0...127 where !foregroundModifierKeyCodes.contains(code) {
+				let events = foregroundKeyChordEvents(code: code, modifiers: modifiers)!
+				let downCount = modifiers.count + 1
+				let balanced = sendSequence(events, reports: Array(repeating: source, count: downCount) + Array(repeating: panel, count: events.count - downCount))
+				precondition(balanced.sink == events && balanced.result == nil)
+				cases += 1
+			}
+		}
+		let interrupted = ForegroundInputDispatchState()
+		for event in chord.prefix(2) { interrupted.record(event) }
+		var releases: [ForegroundInputEvent] = []
+		interrupted.settle(release: { event in
+			dispatchForegroundEventIfVerified(panel, event: event, dispatch: interrupted, emit: { releases.append(event) })
+		}, verify: { ForegroundInputReleaseVerification(complete: true) })
+		precondition(releases == Array(chord.suffix(2)))
+		let recovery = interrupted.details["inputRecovery"] as? [String: Any]
+		precondition(recovery?["status"] as? String == "verified")
+		precondition(recovery?["releaseEventsDispatched"] as? Int == 2)
+		print("verified \(cases) new-window chord shapes, owned cleanup and fail-closed inventories without OS input")
+		}
+		do {
 		let up = [0, 1].map { ForegroundInputStateSample(sourceState: $0, pressedKeys: [], pressedMouseButtons: []) }
 		let held = [ForegroundInputStateSample(sourceState: 0, pressedKeys: [], pressedMouseButtons: []),
 			ForegroundInputStateSample(sourceState: 1, pressedKeys: [13], pressedMouseButtons: [])]

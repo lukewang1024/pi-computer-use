@@ -3684,16 +3684,8 @@ final class Bridge {
 	}
 
 	private func isElement(_ element: AXUIElement, descendantOf ancestor: AXUIElement) -> Bool {
-		var current: AXUIElement? = element
-		var depth = 0
-		while let candidate = current, depth < 20 {
-			if sameElement(candidate, ancestor) {
-				return true
-			}
-			current = parentElement(candidate)
-			depth += 1
-		}
-		return false
+		nativeElementHasAncestor(element, ancestor: ancestor,
+			equivalent: sameElement, parent: parentElement)
 	}
 
 	private func hasAncestorRole(_ element: AXUIElement, role: String) -> Bool {

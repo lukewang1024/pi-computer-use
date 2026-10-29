@@ -81,6 +81,11 @@ interface ExecutionTrace {
 		retrySafe: false;
 		inputRecovery?: NativeInputRecovery;
 	};
+	batchFailure?: {
+		failedStepIndex: number;
+		returnedPrefixActions: number;
+		causeCode?: string;
+	};
 	/** Native terminal reply, distinct from whether the intended UI effect was observed. */
 	dispatchCompletion?: "returned" | "unknown";
 	effectVerification?: "observed" | "not_observed" | "unverified";
@@ -2311,7 +2316,33 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 	const steps: ExecutionTrace[] = [];
 	const actionState: ActionState = { currentFocus: false };
 	for (const action of actions) {
-		const step = await dispatchUiAction(action, target, look, headless, actionState, signal);
+		// A successful Cancel/Close can retire the exact source root. Never
+		// dispatch the remainder against that root or discard its returned prefix.
+		if (steps.length > 0 && await exactRootAvailability(target) === false) {
+			const execution = aggregateExecutions(steps);
+			execution.stoppedAt = steps.length - 1;
+			execution.rootDelta = [...(execution.rootDelta ?? []), {
+				change: "closed", kind: "window", pid: target.pid,
+				ref: target.windowRef, title: target.windowTitle,
+				metadata: { source: "between_action_identity_probe" },
+			}];
+			return execution;
+		}
+		let step: ExecutionTrace;
+		try {
+			step = await dispatchUiAction(action, target, look, headless, actionState, signal);
+		} catch (error) {
+			if (steps.length === 0) throw error;
+			// The failure is not a cleanup receipt. Retain the returned prefix,
+			// stop the batch and quarantine unconfirmed completion conservatively.
+			const causeCode = error instanceof Error ? (error as Error & { code?: unknown }).code : undefined;
+			step = executionTrace("act", currentRuntimeMode(), {
+				outcome: "unknown", dispatchCompletion: "unknown", effectVerification: "unverified",
+				error: { code: "batch_step_unconfirmed", message: error instanceof Error ? error.message : String(error) },
+				batchFailure: { failedStepIndex: steps.length, returnedPrefixActions: steps.length,
+					causeCode: typeof causeCode === "string" ? causeCode : undefined },
+			});
+		}
 		steps.push(step);
 		if (step.outcome !== "worked") break;
 	}
@@ -2322,7 +2353,7 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	const outcomes = steps.map((step) => step.outcome);
 	const outcome: ActOutcome = outcomes.includes("didnt") ? "didnt" : outcomes.includes("unknown") ? "unknown" : "worked";
 	const fallback = steps.find((step) => step.escalatedToForeground);
-	const dispatchUnconfirmed = steps.some(step => step.transport || step.semanticDispatch || step.inputDispatch?.recoveryRequired);
+	const dispatchUnconfirmed = steps.some(step => step.transport || step.semanticDispatch || step.batchFailure || step.inputDispatch?.recoveryRequired);
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
 		dispatchCompletion: dispatchUnconfirmed ? "unknown" : "returned",
@@ -2334,6 +2365,7 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 		transport: steps.find((step) => step.transport)?.transport,
 		inputDispatch: steps.find((step) => step.inputDispatch)?.inputDispatch,
 		semanticDispatch: steps.find((step) => step.semanticDispatch)?.semanticDispatch,
+		batchFailure: steps.find((step) => step.batchFailure)?.batchFailure,
 		error: steps.find((step) => step.error)?.error,
 		backgroundFirst: steps[0]?.backgroundFirst,
 		escalatedToForeground: Boolean(fallback),
@@ -2385,7 +2417,8 @@ async function terminalDesktopActionResult(
 	const partialInputUnknown = execution.inputDispatch?.outcome === "unknown";
 	const inputRecovered = partialInputUnknown && execution.inputDispatch?.recoveryRequired === false;
 	const semanticUnknown = execution.semanticDispatch?.outcome === "unknown";
-	const dispatchUnknown = transportUnknown || partialInputUnknown || semanticUnknown;
+	const batchUnknown = execution.batchFailure !== undefined;
+	const dispatchUnknown = transportUnknown || partialInputUnknown || semanticUnknown || batchUnknown;
 	if (!dispatchUnknown && !confirmedRootAbsent) {
 		exactRootAvailable = await exactRootAvailability(target);
 	}
@@ -2423,7 +2456,7 @@ async function terminalDesktopActionResult(
 	}
 	const status = dispatchUnknown ? "dispatch_outcome_unknown" : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const partialCode = inputRecovered ? execution.error?.code : execution.error?.code === "modifier_interrupted_after_partial_hid" ? "modifier_interrupted_after_partial_hid" : "foreground_interrupted_after_partial_hid";
-	const code = semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (partialCode ?? "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
+	const code = batchUnknown ? "batch_step_unconfirmed" : semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (partialCode ?? "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
 	clearDesktopOperationState(operationState());
 	const details: TerminalDesktopActionDetails = {
@@ -2446,7 +2479,9 @@ async function terminalDesktopActionResult(
 	const unreleasedButtons = execution.inputDispatch?.unreleasedMouseButtons ?? [];
 	const inputFailure = execution.error?.code === "modifier_interrupted_after_partial_hid" ? "Modifier"
 		: execution.error?.code === "foreground_interrupted_after_partial_hid" ? "Foreground" : "Native input";
-	const result = semanticUnknown
+	const result = batchUnknown
+		? `The batch stopped after ${execution.batchFailure!.returnedPrefixActions} returned actions. A later step failed before its native completion could be confirmed. Do not replay the prefix or the failed step. The returned prefix is retained in execution.steps; this failure does not prove that native input was released.`
+		: semanticUnknown
 		? `The AT-SPI semantic action may already have taken effect, but its outcome could not be confirmed. Do not retry this action. Request ${execution.semanticDispatch?.requestId} returned an uncertain mutation error; no physical fallback was sent.`
 		: transportUnknown
 		? `The native outcome of the act_ui request is unknown. Request ${execution.transport?.requestId} ${execution.transport?.requestWriteAttempted ? "had a helper-socket write attempted, but daemon receipt and input delivery are unknown" : "was not written to the helper socket"}. Do not retry this action. Explicit desktop recovery is required before continuing.`
@@ -2458,7 +2493,7 @@ async function terminalDesktopActionResult(
 		? `The action was delivered, and its source root ${target.appName} — ${target.windowTitle} closed before a successor observation could be captured.`
 		: `The action was delivered, but its source root ${target.appName} — ${target.windowTitle} could not be observed afterward: ${message}`;
 	return {
-		content: [{ type: "text", text: inputRecovered && !transportUnknown && !semanticUnknown
+		content: [{ type: "text", text: inputRecovered && !transportUnknown && !semanticUnknown && !batchUnknown
 			? `${result}\nNo successor state was created. Call find_roots, then observe_ui to inspect the actual result and obtain fresh state and refs before continuing.`
 			: dispatchUnknown
 			? `${result}\nNo successor state was created. Keep writes quarantined and perform explicit desktop recovery before any further CU call.`
@@ -2490,7 +2525,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const headless = getComputerUseConfig().headless;
 	return await withWindowWriteLock(target, async () => {
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
-		if (execution.transport?.outcome === "unknown" || execution.inputDispatch?.outcome === "unknown" || execution.semanticDispatch?.outcome === "unknown") {
+		if (execution.transport?.outcome === "unknown" || execution.inputDispatch?.outcome === "unknown" || execution.semanticDispatch?.outcome === "unknown" || execution.batchFailure) {
 			return await terminalDesktopActionResult(
 				target,
 				baseView.stateId,

@@ -102,7 +102,9 @@ interface ExecutionTrace {
 	escalationReason?: string;
 	backgroundAttempt?: { outcome: "foreground_required" | "didnt"; reason: string };
 	verification?: {
-		status: "verified" | "preexisting" | "failed";
+		status: "verified" | "preexisting" | "failed" | "unverified";
+		reason?: string;
+		nodeCount?: number;
 		text?: string;
 		role?: string;
 		value?: string;
@@ -309,6 +311,8 @@ interface WaitForDetails {
 	timedOut?: boolean;
 	target?: SerializedOutlineSearchMatch;
 	nodeCount?: number;
+	incomplete?: boolean;
+	reason?: string;
 	text?: string;
 	role?: string;
 	value?: string;
@@ -1957,6 +1961,8 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 		timedOut: raw.timedOut || undefined,
 		target: foundTarget ? serializeOutlineSearchMatch(foundTarget) : undefined,
 		nodeCount: Number.isFinite(raw.nodeCount) ? Number(raw.nodeCount) : refreshed.outline.nodes.length,
+		incomplete: raw.incomplete || undefined,
+		reason: raw.reason,
 		text,
 		role,
 		value,
@@ -1964,7 +1970,7 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 		outline: serializeOutline(refreshed.outline),
 		renderedOutline: foldToBudget(refreshed.outline).text,
 	};
-	const message = details.found ? (details.gone ? "Condition disappeared." : "Condition appeared.") : `Timed out after ${timeoutMs}ms waiting for condition.`;
+	const message = details.incomplete ? "Condition is unverified: the native tree read was incomplete." : details.found ? (details.gone ? "Condition disappeared." : "Condition appeared.") : `Timed out after ${timeoutMs}ms waiting for condition.`;
 	const viewText = useDiff ? `${renderChanges(transition.changes) || "(no element changes)"}\nUse stateId ${refreshed.capture.stateId} for subsequent actions and queries.` : details.renderedOutline;
 	return { content: [{ type: "text", text: `${message}\n${viewText}` }], details };
 }
@@ -2562,7 +2568,9 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 					timeoutMs,
 				}, { signal, timeoutMs: timeoutMs + 2_000 });
 				execution.verification = {
-					status: verification.found ? (desiredWasPreexisting ? "preexisting" : "verified") : "failed",
+					status: verification.found ? (desiredWasPreexisting ? "preexisting" : "verified") : verification.incomplete ? "unverified" : "failed",
+					reason: verification.reason,
+					nodeCount: verification.nodeCount,
 					text: expectedText,
 					role: expectedRole,
 					value: expectedValue,
@@ -2572,15 +2580,17 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 				execution.outcome = outcomeAfterCheck(execution.outcome ?? "unknown", execution.verification.status);
 				if (!verification.found) {
 					execution.error = {
-						code: "postcondition_failed",
-						message: `The action was delivered but its postcondition was not satisfied within ${timeoutMs}ms.`,
+						code: verification.incomplete ? "postcondition_unverified" : "postcondition_failed",
+						message: verification.incomplete ? "The action was delivered but an incomplete native tree read cannot verify its postcondition." : `The action was delivered but its postcondition was not satisfied within ${timeoutMs}ms.`,
 					};
 				}
 			} else {
 				await sleep(settleMsForExecution(execution), signal);
 			}
 			const capture = await captureCurrentTarget(signal, pixelSuccessor || semanticSuccessor ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION, target, !semanticSuccessor, false, pixelSuccessor ? false : undefined);
-			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
+			if (execution.verification?.status !== "unverified") {
+				execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
+			}
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}

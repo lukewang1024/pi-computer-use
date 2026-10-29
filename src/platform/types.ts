@@ -236,6 +236,8 @@ export interface PlatformWaitForResponse {
 	gone?: boolean;
 	timedOut?: boolean;
 	nodeCount?: number;
+	incomplete?: boolean;
+	reason?: string;
 }
 
 export interface ComputerUsePlatformBackend {

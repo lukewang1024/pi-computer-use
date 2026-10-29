@@ -495,6 +495,27 @@ final class Bridge {
 	private var recentCompletedRequestIds: [String] = []
 
 	func run() {
+		if CommandLine.arguments.contains("inspect-input") {
+			let receipt: [String: Any] = ["schemaVersion": 1, "readOnly": true,
+				"bootId": nativeInputBootId() as Any? ?? NSNull(),
+				"samples": nativeSystemInputSamples(), "journalRoot": nativeInputJournalRoot().path,
+				"executableSha256": executableSha256, "accessibilityTrusted": AXIsProcessTrusted(),
+				"postAccess": CGPreflightPostEventAccess()]
+			let data = try! JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+			FileHandle.standardOutput.write(data + Data([10])); exit(0)
+		}
+		if CommandLine.arguments.contains("recover-input") {
+			do {
+				guard let file = argumentValue("--plan-file") else { throw NativeInputRecoveryFailure.refused("A private recovery plan is required") }
+				let receipt = try recoverNativeInput(planPath: file, executableSha256: executableSha256)
+				let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+				FileHandle.standardOutput.write(data + Data([10]))
+				exit(receipt["status"] as? String == "verified" ? 0 : 2)
+			} catch {
+				let data = try! JSONSerialization.data(withJSONObject: ["status": "unknown", "error": String(describing: error), "downEventsDispatched": 0, "releaseCompletionUnconfirmed": true, "quarantinePreserved": true])
+				FileHandle.standardOutput.write(data + Data([10])); exit(1)
+			}
+		}
 		if CommandLine.arguments.contains("serve") {
 			let socketPath = argumentValue("--socket") ?? defaultSocketPath()
 			Thread.detachNewThread { [self] in runServer(socketPath: socketPath) }
@@ -3048,6 +3069,10 @@ final class Bridge {
 			if target?.dispatchState.hasHeldInput == true {
 				throw BridgeFailure(message: "Native action ended with owned input still held", code: "native_input_interrupted_after_partial_hid")
 			}
+			if let dispatch = target?.dispatchState, !dispatch.ownedKeys.isEmpty || !dispatch.ownedMouseButtons.isEmpty {
+				guard verifyReleasedInput(dispatch).complete else { throw BridgeFailure(message: "System input release is unconfirmed", code: "input_release_unconfirmed") }
+				try? persistNativeInputJournal(dispatch, helperSha256: executableSha256, terminal: ["status": "verified", "verification": "system_input_state", "inputReplayed": false])
+			}
 			return result
 		} catch {
 			guard let target, target.dispatchState.eventsDispatched > 0 else { throw error }
@@ -3061,14 +3086,29 @@ final class Bridge {
 					event?.flags = self.flagsForModifierKeyCodes(modifiers)
 				case let .mouseUp(button):
 					event = target.releases.buttons[button]
-					if let point = target.releases.lastPointerLocation { event?.location = point }
+					guard let position = CGEvent(source: nil)?.location else { return false }
+					event?.location = position
 				default: return false
 				}
 				guard let event else { return false }
-				do { try self.postEvent(event, pid: target.pid, target: target); return true }
-				catch { return false }
+				guard self.foregroundInputEvent(event) == step else { return false }
+				return dispatchOwnedInputCleanup(step, dispatch: target.dispatchState) {
+					if case let .keyUp(_, remaining) = step {
+						let observed = Set([54, 55, 56, 58, 59, 60, 61, 62].filter { code in
+							[CGEventSourceStateID.hidSystemState, .combinedSessionState].contains {
+								CGEventSource.keyState($0, key: CGKeyCode(code))
+							}
+						})
+						event.flags = self.flagsForModifierKeyCodes(Array(ownedCleanupModifierCodes(
+							observed: observed, owned: target.dispatchState.ownedKeys,
+							remaining: Set(remaining))))
+					}
+					event.post(tap: .cghidEventTap)
+					self.recordPostedInputEvent()
+				}
 			}, verify: { self.verifyReleasedInput(target.dispatchState) })
 			let dispatch = target.dispatchState.details
+			try? persistNativeInputJournal(target.dispatchState, helperSha256: executableSha256, terminal: dispatch["inputRecovery"] as? [String: Any] ?? ["status": "blocked"])
 			if let failure = error as? ForegroundGateFailure {
 				var details = failure.details
 				details["inputDispatch"] = dispatch
@@ -4697,7 +4737,8 @@ final class Bridge {
 		try verifyModifierState(target: target)
 		// AppKit views can ignore pid-targeted events, so verified foreground
 		// input is posted globally only after the exact PID and window recheck.
-		guard dispatchForegroundEventIfVerified(report, event: inputEvent, dispatch: target.dispatchState, emit: {
+		guard try dispatchForegroundEventIfVerified(report, event: inputEvent, dispatch: target.dispatchState, emit: {
+			if inputEvent != .other { try persistNativeInputJournal(target.dispatchState, helperSha256: executableSha256, prepared: inputEvent) }
 			event.post(tap: .cghidEventTap)
 			recordPostedInputEvent()
 		}) else {
@@ -4717,6 +4758,7 @@ final class Bridge {
 			target.releases.lastPointerLocation = event.location
 		default: break
 		}
+		if inputEvent != .other { try persistNativeInputJournal(target.dispatchState, helperSha256: executableSha256) }
 	}
 
 	private func foregroundReport(
@@ -4935,10 +4977,10 @@ final class Bridge {
 		var flags = CGEventFlags()
 		for key in keys {
 			switch key {
-			case 55: flags.insert(.maskCommand)
-			case 56: flags.insert(.maskShift)
-			case 58: flags.insert(.maskAlternate)
-			case 59: flags.insert(.maskControl)
+			case 54, 55: flags.insert(.maskCommand)
+			case 56, 60: flags.insert(.maskShift)
+			case 58, 61: flags.insert(.maskAlternate)
+			case 59, 62: flags.insert(.maskControl)
 			default: break
 			}
 		}

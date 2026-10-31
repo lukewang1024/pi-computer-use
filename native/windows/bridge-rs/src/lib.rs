@@ -6,6 +6,7 @@
 pub mod capture;
 pub mod error;
 pub mod input;
+pub mod hit_target;
 pub mod pointer_motion;
 pub mod protocol;
 pub mod refs;

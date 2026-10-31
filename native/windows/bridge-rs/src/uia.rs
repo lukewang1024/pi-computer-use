@@ -1096,6 +1096,43 @@ mod native {
         unsafe { element.SetFocus().map_err(|e| format!("SetFocus: {e}")) }
     }
 
+    /// Focus preparation alone never permits pointer delivery. Callers must
+    /// re-resolve geometry and pass the original occlusion/foreground guards.
+    pub fn prepare_pointer_focus(
+        hwnd: isize,
+        runtime_id_target: &[i32],
+        automation_id: &str,
+    ) -> Result<bool, String> {
+        let (_com, uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        let target_id = runtime_id(&element).unwrap_or_default();
+        if !super::exact_keyboard_focus(runtime_id_target, &target_id) {
+            return Err("Element reference is stale".to_owned());
+        }
+        let enabled = unsafe { element.CurrentIsEnabled() }
+            .map_err(|e| format!("Pointer target enabled: {e}"))?.as_bool();
+        let focusable = unsafe { element.CurrentIsKeyboardFocusable() }
+            .map_err(|e| format!("Pointer target focusable: {e}"))?.as_bool();
+        let secure = unsafe { element.CurrentIsPassword() }
+            .map_err(|e| format!("Pointer target secure: {e}"))?.as_bool();
+        if !enabled || !focusable || secure {
+            return Ok(false);
+        }
+        if let Ok(focused) = unsafe { uia.GetFocusedElement() } {
+            if super::exact_keyboard_focus(&target_id, &runtime_id(&focused).unwrap_or_default()) {
+                return Ok(true);
+            }
+        }
+        crate::action_trace::phase("pointer_target_focus_preparation_started");
+        unsafe { element.SetFocus() }.map_err(|e| format!("Pointer target SetFocus: {e}"))?;
+        let focused = unsafe { uia.GetFocusedElement() }
+            .map_err(|e| format!("Read pointer target focus: {e}"))?;
+        if !super::exact_keyboard_focus(&target_id, &runtime_id(&focused).unwrap_or_default()) {
+            return Err("Exact pointer target focus was not established".to_owned());
+        }
+        crate::action_trace::phase("pointer_target_focus_preparation_verified");
+        Ok(true)
+    }
+
     /// Keyboard delivery is grounded in actual focus, not the editor's center
     /// pixel (which may be a note-reference glyph or another provider fragment).
     /// No pointer fallback and no ancestor-of-focus/window/PID approximation.
@@ -1485,7 +1522,7 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    ensure_enabled, focus, focus_keyboard_editor, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
+    ensure_enabled, focus, focus_keyboard_editor, prepare_pointer_focus, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
 
@@ -1557,6 +1594,10 @@ pub fn set_text(
 }
 #[cfg(not(windows))]
 pub fn focus(_hwnd: isize, _runtime_id: &[i32], _automation_id: &str) -> Result<(), String> {
+    Err("UIA is only supported on Windows".to_owned())
+}
+#[cfg(not(windows))]
+pub fn prepare_pointer_focus(_hwnd: isize, _runtime_id: &[i32], _automation_id: &str) -> Result<bool, String> {
     Err("UIA is only supported on Windows".to_owned())
 }
 #[cfg(not(windows))]

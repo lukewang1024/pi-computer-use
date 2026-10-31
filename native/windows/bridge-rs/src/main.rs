@@ -1435,30 +1435,52 @@ fn coordinate_fallback(
         )
         .map_err(stale_ref_from_uia)?;
         let mut point = None;
+        let mut focus_prepared = false;
         for attempt in 0..3 {
-            match windows_bridge::hit_target::select_clear_point(snapshot.rect, |x, y| {
+            use windows_bridge::hit_target::{PointSelection, PreparedTarget};
+            match windows_bridge::hit_target::select_clear_point_with_preparation(snapshot.rect, &snapshot.runtime_id, |x, y| {
                 windows_bridge::uia::occlusion_ok(element.hwnd, &snapshot.runtime_id,
-                    &element.automation_id, x, y)
+                    &element.automation_id, x, y).map_err(stale_ref_from_uia)
+            }, || {
+                if attempt < 2 {
+                    return Ok(None);
+                }
+                window::require_foreground(element.hwnd, expected_pid)?;
+                if !windows_bridge::uia::prepare_pointer_focus(element.hwnd,
+                    &snapshot.runtime_id, &element.automation_id).map_err(stale_ref_from_uia)? {
+                    return Ok(None);
+                }
+                focus_prepared = true;
+                window::require_foreground(element.hwnd, expected_pid)?;
+                let fresh = windows_bridge::uia::snapshot(element.hwnd,
+                    &snapshot.runtime_id, &element.automation_id).map_err(stale_ref_from_uia)?;
+                Ok(Some(PreparedTarget {rect: fresh.rect, runtime_id: fresh.runtime_id}))
             }) {
-                Ok(Some(clear)) => {
+                Ok(PointSelection::Clear(clear)) => {
                     point = Some(clear);
                     break;
                 }
-                Ok(None) if attempt < 2 => sleep(Duration::from_millis(20)),
-                Ok(None) => break,
-                Err(message) => return Err(stale_ref_from_uia(message)),
+                Ok(PointSelection::Occluded) if attempt < 2 => sleep(Duration::from_millis(20)),
+                Ok(PointSelection::Occluded) => break,
+                Ok(PointSelection::StaleIdentity) => return Err(ProtocolError::new(
+                    "Element identity changed or is unavailable during pointer preparation", ErrorCode::StaleRef)),
+                Err(error) => return Err(error),
             }
         }
         let Some((x, y)) = point else {
             return Err(ProtocolError::new(
-                "Target is occluded",
+                if focus_prepared {"Target remains occluded after exact target focus preparation"} else {"Target is occluded"},
                 ErrorCode::OccludedTarget,
             ));
         };
         let mut executable = args.clone();
         executable["resolvedPoint"] = json!({ "x": x, "y": y });
         executable["pointerGuard"] = json!({"hwnd": element.hwnd, "pid": expected_pid});
-        input::act(&executable)
+        let mut result = input::act(&executable)?;
+        if focus_prepared {
+            result["evidence"]["pointerTargetFocusVerifiedBeforeInput"] = json!(true);
+        }
+        Ok(result)
     })
 }
 

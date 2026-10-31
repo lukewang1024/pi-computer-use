@@ -56,9 +56,144 @@ pub fn select_clear_point<E>(
     Ok(None)
 }
 
+pub struct PreparedTarget {
+    pub rect: (f64, f64, f64, f64),
+    pub runtime_id: Vec<i32>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PointSelection {
+    Clear((f64, f64)),
+    Occluded,
+    StaleIdentity,
+}
+
+/// Preparation may change focus/layout, but cannot authorize a covered pixel.
+/// The caller still dispatches input only after Clear and its final HWND guard.
+pub fn select_clear_point_with_preparation<E>(
+    rect: (f64, f64, f64, f64),
+    runtime_id: &[i32],
+    mut accepts: impl FnMut(f64, f64) -> Result<bool, E>,
+    prepare: impl FnOnce() -> Result<Option<PreparedTarget>, E>,
+) -> Result<PointSelection, E> {
+    if let Some(point) = select_clear_point(rect, &mut accepts)? {
+        return Ok(PointSelection::Clear(point));
+    }
+    if interior_points(rect).is_empty() {
+        return Ok(PointSelection::Occluded);
+    }
+    if runtime_id.is_empty() {
+        return Ok(PointSelection::StaleIdentity);
+    }
+    let Some(prepared) = prepare()? else {
+        return Ok(PointSelection::Occluded);
+    };
+    if prepared.runtime_id != runtime_id {
+        return Ok(PointSelection::StaleIdentity);
+    }
+    Ok(match select_clear_point(prepared.rect, accepts)? {
+        Some(point) => PointSelection::Clear(point),
+        None => PointSelection::Occluded,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_clear_target_does_not_prepare_focus() {
+        assert_eq!(
+            select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+                |_, _| Ok::<_, ()>(true), || panic!("unnecessary focus")),
+            Ok(PointSelection::Clear((10.0, 12.0)))
+        );
+    }
+
+    #[test]
+    fn focus_uses_fresh_geometry_and_the_same_identity() {
+        let focused = Cell::new(false);
+        let calls = Cell::new(0);
+        let selected = select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+            |x, y| {
+                calls.set(calls.get() + 1);
+                // The original geometry is no longer a valid target location.
+                Ok::<_, ()>(focused.get() && x == 110.0 && y == 212.0)
+            }, || {
+                focused.set(true);
+                Ok(Some(PreparedTarget {rect: (100.0, 200.0, 20.0, 24.0), runtime_id: vec![1]}))
+            }).unwrap();
+        assert_eq!(selected, PointSelection::Clear((110.0, 212.0)));
+        assert_eq!(calls.get(), 10);
+    }
+
+    #[test]
+    fn actual_occlusion_remains_rejected_after_focus() {
+        let focus_calls = Cell::new(0);
+        let probes = Cell::new(0);
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+            |_, _| {probes.set(probes.get() + 1); Ok::<_, ()>(false)}, || {
+                focus_calls.set(focus_calls.get() + 1);
+                Ok(Some(PreparedTarget {rect: (0.0, 0.0, 20.0, 24.0), runtime_id: vec![1]}))
+            }), Ok(PointSelection::Occluded));
+        assert_eq!(focus_calls.get(), 1);
+        assert_eq!(probes.get(), 18);
+    }
+
+    #[test]
+    fn a_replaced_target_is_not_probed_after_focus() {
+        let probes = Cell::new(0);
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+            |_, _| {probes.set(probes.get() + 1); Ok::<_, ()>(false)}, || {
+                Ok(Some(PreparedTarget {rect: (100.0, 200.0, 20.0, 24.0), runtime_id: vec![2]}))
+            }), Ok(PointSelection::StaleIdentity));
+        assert_eq!(probes.get(), 9);
+    }
+
+    #[test]
+    fn declined_or_uncertain_focus_never_continues_probing() {
+        let probes = Cell::new(0);
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+            |_, _| {probes.set(probes.get() + 1); Ok::<_, &str>(false)}, || Ok(None)),
+            Ok(PointSelection::Occluded));
+        assert_eq!(probes.get(), 9);
+        probes.set(0);
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+            |_, _| {probes.set(probes.get() + 1); Ok(false)}, || Err("focus completion uncertain")),
+            Err("focus completion uncertain"));
+        assert_eq!(probes.get(), 9);
+    }
+
+    #[test]
+    fn failed_resolution_does_not_prepare_or_continue() {
+        let probes = Cell::new(0);
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+            |_, _| {probes.set(probes.get() + 1); Err("resolution failed")},
+            || panic!("focus after failed resolution")), Err("resolution failed"));
+        assert_eq!(probes.get(), 1);
+    }
+
+    #[test]
+    fn invalid_geometry_and_missing_identity_do_not_prepare() {
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 0.0, 24.0), &[1],
+            |_, _| -> Result<bool, ()> {panic!("unsafe geometry probe")},
+            || panic!("focus with invalid geometry")), Ok(PointSelection::Occluded));
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[],
+            |_, _| Ok::<_, ()>(false), || panic!("focus without exact identity")),
+            Ok(PointSelection::StaleIdentity));
+    }
+
+    #[test]
+    fn an_error_in_the_fresh_point_search_stops_immediately() {
+        let prepared = Cell::new(false);
+        let probes = Cell::new(0);
+        assert_eq!(select_clear_point_with_preparation((0.0, 0.0, 20.0, 24.0), &[1],
+            |_, _| {probes.set(probes.get() + 1); if prepared.get() {Err("fresh resolution failed")} else {Ok(false)}},
+            || {prepared.set(true); Ok(Some(PreparedTarget {rect: (100.0, 200.0, 20.0, 24.0), runtime_id: vec![1]}))}),
+            Err("fresh resolution failed"));
+        assert_eq!(probes.get(), 10);
+    }
 
     #[test]
     fn decorative_center_does_not_hide_an_exact_target_pixel() {

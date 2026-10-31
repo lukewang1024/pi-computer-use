@@ -60,6 +60,12 @@ Explicit local macOS builds reuse an existing signed helper across SDK-only vers
 
 On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 
+Windows native element pointer fallback checks at most nine interior physical
+pixels, center first, against the original UIA identity and ancestor guard. A
+decorative sibling covering the center does not prevent choosing another exact
+target pixel. Full occlusion, invalid geometry and stale identities remain
+rejected; foreground HWND/PID checks still guard the single input dispatch.
+
 Windows window captures verify the same HWND, PID, GUI thread and bounds before
 and after GDI capture, then again after encoding and optional UIA extraction.
 Moved, resized, minimized or invalidated frames are rejected, as are unavailable

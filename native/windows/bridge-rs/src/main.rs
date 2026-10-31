@@ -1434,32 +1434,27 @@ fn coordinate_fallback(
             &element.automation_id,
         )
         .map_err(stale_ref_from_uia)?;
-        let x = snapshot.rect.0 + snapshot.rect.2 / 2.0;
-        let y = snapshot.rect.1 + snapshot.rect.3 / 2.0;
-        let mut clear = false;
+        let mut point = None;
         for attempt in 0..3 {
-            match windows_bridge::uia::occlusion_ok(
-                element.hwnd,
-                &snapshot.runtime_id,
-                &element.automation_id,
-                x,
-                y,
-            ) {
-                Ok(true) => {
-                    clear = true;
+            match windows_bridge::hit_target::select_clear_point(snapshot.rect, |x, y| {
+                windows_bridge::uia::occlusion_ok(element.hwnd, &snapshot.runtime_id,
+                    &element.automation_id, x, y)
+            }) {
+                Ok(Some(clear)) => {
+                    point = Some(clear);
                     break;
                 }
-                Ok(false) if attempt < 2 => sleep(Duration::from_millis(20)),
-                Ok(false) => break,
+                Ok(None) if attempt < 2 => sleep(Duration::from_millis(20)),
+                Ok(None) => break,
                 Err(message) => return Err(stale_ref_from_uia(message)),
             }
         }
-        if !clear {
+        let Some((x, y)) = point else {
             return Err(ProtocolError::new(
                 "Target is occluded",
                 ErrorCode::OccludedTarget,
             ));
-        }
+        };
         let mut executable = args.clone();
         executable["resolvedPoint"] = json!({ "x": x, "y": y });
         executable["pointerGuard"] = json!({"hwnd": element.hwnd, "pid": expected_pid});

@@ -14,6 +14,7 @@ pub mod state;
 pub mod scroll;
 pub mod uia;
 pub mod window;
+pub mod window_reflow;
 
 pub use error::{ErrorCode, ProtocolError};
 pub use protocol::{Request, Response};

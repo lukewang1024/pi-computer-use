@@ -31,6 +31,7 @@ import { ResourceScheduler, runPreflightWrite } from "./runtime.ts";
 import { verifyFocusedWindow } from "./focus-window.ts";
 import { scoreWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
+import { classifyWindowReflow } from "./window-reflow.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
 export type { ActParams, EvaluateBrowserParams, ExpandUiParams, FocusWindowParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
 
@@ -2959,6 +2960,48 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 
 export const executeFind = makeToolExecutor("find_roots", performListWindows);
 export const executeFocusWindow = makeToolExecutor<FocusWindowParams, ComputerUseDetails | FocusOnlyDetails>("focus_window", performFocusWindow);
+export const executeReflowWindow = makeToolExecutor("reflow_window", async (params: { stateId: string }, signal?: AbortSignal) => {
+	if (process.platform !== "win32" || !currentPlatformBackend.reflowWindow) throw new Error("Window reflow is available only on Windows.");
+	if (!params.stateId) throw new Error("reflow_window requires an image-backed stateId.");
+	validateStateId(params.stateId);
+	const state = operationState();
+	const look = currentLookOrThrow();
+	if (!look.image?.jpegBase64) throw new Error("Window reflow requires a fresh image-backed observation.");
+	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
+	validateStateId(params.stateId);
+	return await withWindowWriteLock(target, async () => {
+		let raw: unknown;
+		let transport: ExecutionTrace | undefined;
+		try { raw = await currentPlatformBackend.reflowWindow!(look.lookId, target.pid, signal); }
+		catch (error) {
+			transport = dispatchUnknownTrace(error, "foreground");
+			if (!transport) throw error;
+			transport.dispatchCompletion = "unknown";
+			transport.effectVerification = "unverified";
+		} finally {
+			// Never promote the pre-mutation observation to the new write epoch.
+			state.currentCapture = undefined;
+		}
+		const completion = transport ? "partial_or_unknown" : classifyWindowReflow(raw);
+		const uncertain = completion === "partial_or_unknown";
+		const steps = raw && typeof raw === "object" && Array.isArray((raw as { steps?: unknown }).steps)
+			? (raw as { steps: HelperActResult[] }).steps : [];
+		const partial = steps.filter((step) => step && typeof step === "object").map(partialHidDispatchFromAct).reverse().find((item) => item !== undefined);
+		const execution = transport ?? executionTrace("act", "default", {
+			outcome: uncertain ? "unknown" : completion === "returned" ? "worked" : "didnt",
+			dispatchCompletion: uncertain ? "unknown" : "returned", effectVerification: "unverified",
+			...(uncertain ? { inputDispatch: { outcome: "unknown" as const, kind: "partial_hid" as const, eventsDispatched: partial?.eventsDispatched, unreleasedKeys: partial?.unreleasedKeys ?? [], unreleasedMouseButtons: partial?.unreleasedMouseButtons ?? [], recoveryRequired: true, retrySafe: false as const } } : {}),
+		});
+		// CCM's desktop client fences further calls on this flag, including when
+		// the helper transport was lost without a native HID ledger.
+		const publicExecution = { ...execution, ...(uncertain ? { recoveryRequired: true } : {}) };
+		const text = uncertain
+			? "Window reflow may be partial or its outcome is unknown. Stop input and inspect the receipt; do not replay this operation or any previous unknown input."
+			: completion === "not_sent" ? "Window reflow was rejected before mutation."
+			: "Window geometry was restored. UIA recovery has not been verified; observe afresh. Never replay a previous unknown input.";
+		return { content: [{ type: "text" as const, text }], details: { tool: "reflow_window", status: uncertain ? "dispatch_outcome_unknown" : completion === "not_sent" ? "rejected_before_mutation" : "geometry_restored", execution: publicExecution, nativeReceipt: raw, originalInputRetryProhibited: true, uiaRecoveryVerified: false } };
+	});
+});
 function recordingResult(tool: string, receipt: RecordingReceipt): AgentToolResult<RecordingReceipt & { tool: string }> {
 	return { content: [{ type: "text", text: JSON.stringify(receipt) }], details: { tool, ...receipt } };
 }

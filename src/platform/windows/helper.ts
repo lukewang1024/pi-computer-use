@@ -127,7 +127,7 @@ export class WindowsHelperClient {
 			if (this.child !== child) return;
 			diagnostics.push(chunk, (id, stage) => {
 				const pending = this.pending.get(id);
-				if (!pending || !["act", "actBatch"].includes(pending.command)) return;
+				if (!pending || !["act", "actBatch", "reflowWindow"].includes(pending.command)) return;
 				if (pending.stages.length && stage.elapsedMs < pending.stages.at(-1)!.elapsedMs) return;
 				pending.stages.push(stage);
 				if (pending.stages.length > 32) pending.stages.shift();
@@ -181,7 +181,7 @@ export class WindowsHelperClient {
 				error.code = parsed.error?.code;
 				// Correlated progress is diagnostic only. A returned native error
 				// does not establish delivery, completion, or permission to retry.
-				if (pending.command === "act" || pending.command === "actBatch") {
+				if (["act", "actBatch", "reflowWindow"].includes(pending.command)) {
 					Object.assign(error, { nativeActionDiagnostics: {
 						version: 1, command: pending.command,
 						stages: pending.stages.map(row => ({ ...row })),

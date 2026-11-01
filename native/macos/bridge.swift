@@ -1859,6 +1859,65 @@ final class Bridge {
             secure: role == "AXSecureTextField" || subrole == "AXSecureTextField", frame: frame, selection: selection)
     }
 
+	// Some web editors expose their active keyboard proxy as a zero-size AXTextArea.
+	// Geometry is necessary for pointer targeting, not for this exact current focus.
+	// Read-only identity proof; it neither focuses an element nor authorizes input.
+	private func focusedFramelessKeyboardTarget(_ element: AXUIElement, observedRole: String?,
+		pid: Int32, windowId: UInt32, window: AXUIElement?, action: String,
+		delivery: String, isMenu: Bool) -> Bool {
+		guard ["typeText", "keypress"].contains(action), delivery == "hid", !isMenu,
+			observedRole == "AXTextArea", pid > 0, windowId > 0, let window else { return false }
+		let deadline = ProcessInfo.processInfo.systemUptime + 0.200
+		func prepare(_ node: AXUIElement) -> Bool {
+			let remaining = deadline - ProcessInfo.processInfo.systemUptime
+			return remaining > 0 && AXUIElementSetMessagingTimeout(node, Float(min(0.010, remaining))) == .success
+		}
+		func read(_ node: AXUIElement, _ name: CFString) -> (AXError, AnyObject?) {
+			guard prepare(node) else { return (.cannotComplete, nil) }
+			var raw: AnyObject?
+			let status = AXUIElementCopyAttributeValue(node, name, &raw)
+			return (status, status == .success ? raw : nil)
+		}
+		func axElement(_ node: AXUIElement, _ name: CFString) -> AXUIElement? {
+			read(node, name).1.flatMap(asAXElement)
+		}
+		func editable() -> Bool {
+			guard read(element, kAXRoleAttribute as CFString).1 as? String == "AXTextArea",
+				read(element, kAXEnabledAttribute as CFString).1 as? Bool == true else { return false }
+			let (status, raw) = read(element, kAXSubroleAttribute as CFString)
+			// Unsupported/no-value means no subrole; a failed read proves nothing.
+			guard status == .success || status == .attributeUnsupported || status == .noValue else { return false }
+			if status == .success, !(raw is String) { return false }
+			guard !isSecureTextElement(role: "AXTextArea", subrole: raw as? String ?? ""), prepare(element) else { return false }
+			var settable = DarwinBoolean(false)
+			return AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
+		}
+		guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+			pidForElement(element) == pid, pidForElement(window) == pid,
+			pidForWindowId(windowId) == pid else { return false }
+		let app = AXUIElementCreateApplication(pid)
+		func focusMatches() -> Bool {
+			guard let focused = axElement(app, kAXFocusedUIElementAttribute as CFString),
+				let focusedWindow = axElement(app, kAXFocusedWindowAttribute as CFString) else { return false }
+			return sameElement(focused, element) && sameElement(focusedWindow, window)
+		}
+		guard focusMatches(), editable() else { return false }
+		var ancestor: AXUIElement? = element
+		var visited: [AXUIElement] = []
+		var withinWindow = false
+		for _ in 0..<64 {
+			guard let current = ancestor, ProcessInfo.processInfo.systemUptime < deadline,
+				pidForElement(current) == pid,
+				!visited.contains(where: { sameElement($0, current) }) else { break }
+			if sameElement(current, window) { withinWindow = true; break }
+			visited.append(current)
+			ancestor = axElement(current, kAXParentAttribute as CFString)
+		}
+		return withinWindow && editable() && focusMatches()
+			&& NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+			&& pidForWindowId(windowId) == pid && ProcessInfo.processInfo.systemUptime < deadline
+	}
+
 	// AXFocused on individual nodes is not the application's unique focused element.
 	private func focusedContext(pid: Int32, window: AXUIElement, outline: LookNode, budgetMs: Double = 750) -> [String: Any] {
 		let started = ProcessInfo.processInfo.systemUptime
@@ -2452,6 +2511,7 @@ final class Bridge {
 		return try withPhysicalInputTransaction(target: physicalTarget) {
 		var performed: [String: Any] = ["delivery": delivery]
 		var element: AXUIElement?
+		var usesFocusedFramelessReference = false
 		var isApplicationMenuElement = false
 		var rawPoint: CGPoint?
 		var preflightCapsUnknown = false
@@ -2480,7 +2540,12 @@ final class Bridge {
 			var refound = false
 			let cached = refStore.element(for: ref)
 			let cachedIsLive = cached.map {
-				stringAttribute($0, attribute: kAXRoleAttribute as CFString) != nil && frameForElement($0) != nil
+				if stringAttribute($0, attribute: kAXRoleAttribute as CFString) != nil && frameForElement($0) != nil { return true }
+				usesFocusedFramelessReference = focusedFramelessKeyboardTarget($0,
+					observedRole: refStore.snapshot(for: ref)?.role, pid: pid, windowId: record.windowId,
+					window: physicalTarget?.axWindow, action: action, delivery: delivery,
+					isMenu: record.menuRoot != nil || record.appMenuBarRoot != nil)
+				return usesFocusedFramelessReference
 			} ?? false
 			let resolved: AXUIElement?
 			if nativeReferenceRequiresCachedElement(action: action, popupMenu: record.menuRoot != nil,
@@ -2532,6 +2597,15 @@ final class Bridge {
 			}
 			if let rawPoint { return rawPoint }
 			throw BridgeFailure(message: "No coordinate grounding is available", code: "coordinate_unavailable")
+		}
+
+		func validateFocusedFramelessReferenceBeforeInput() throws {
+			guard let element, let ref = target["ref"] as? String,
+				focusedFramelessKeyboardTarget(element, observedRole: refStore.snapshot(for: ref)?.role,
+					pid: pid, windowId: record.windowId, window: physicalTarget?.axWindow,
+					action: action, delivery: delivery, isMenu: record.menuRoot != nil || record.appMenuBarRoot != nil)
+			else { throw BridgeFailure(message: "Observed frameless editor is no longer the exact current focus; no input was sent", code: "stale_ref") }
+			performed["referenceGrounding"] = "current-native-focus"
 		}
 
 		func animateCursor(at point: CGPoint) {
@@ -2971,15 +3045,16 @@ final class Bridge {
 			try executeCoordinates(coordinatePoint())
 		} else if action == "typeText" {
 			let preserveFocus = params["preserveFocus"] as? Bool ?? false
-			if let element {
+			if let element, !usesFocusedFramelessReference {
 				let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 				if focused == .success { performed["focused"] = true }
 			}
 			acquirePhysicalInputIfNeeded()
-			if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
+			if usesFocusedFramelessReference { try validateFocusedFramelessReferenceBeforeInput() }
+			else if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
 			let text = params["text"] as? String ?? ""
 			try postUnicodeText(text, pid: pid, target: physicalTarget, delivery: delivery)
-			performed["grounding"] = "coordinates"
+			performed["grounding"] = usesFocusedFramelessReference ? "keyboard-events" : "coordinates"
 			if let element, !text.isEmpty {
 				usleep(30_000)
 				let afterValue = valueAttribute(element) ?? ""
@@ -2992,7 +3067,7 @@ final class Bridge {
 		} else if action == "keypress" {
 			let preserveFocus = params["preserveFocus"] as? Bool ?? false
 			let keys = validatedKeys ?? []
-			if let element {
+			if let element, !usesFocusedFramelessReference {
 				let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 				if focused == .success { performed["focused"] = true }
 				let normalizedKeys = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -3010,9 +3085,10 @@ final class Bridge {
 				}
 			}
 			acquirePhysicalInputIfNeeded()
-			if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
+			if usesFocusedFramelessReference { try validateFocusedFramelessReferenceBeforeInput() }
+			else if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
 			try postKeyPress(keys: keys, pid: pid, target: physicalTarget, delivery: delivery)
-			performed["grounding"] = "coordinates"
+			performed["grounding"] = usesFocusedFramelessReference ? "keyboard-events" : "coordinates"
 		} else if let element, action == "scroll" {
 			let cursorPoint = try? coordinatePoint()
 			let before = scrollPositionSignature(element)

@@ -250,7 +250,7 @@ fn handle_request(request: &Request) -> Response {
         return Response::err(&request.id, ProtocolError::new(format!("Unsupported Windows helper protocol {}; expected {}. Restart Pi to use the installed helper.", request.protocol_version, PROTOCOL_VERSION), ErrorCode::InvalidRequest));
     }
 
-    let _trace = matches!(request.cmd.as_str(), "act" | "actBatch")
+    let _trace = matches!(request.cmd.as_str(), "act" | "actBatch" | "reflowWindow")
         .then(|| windows_bridge::action_trace::begin(&request.id));
     let result = match request.cmd.as_str() {
         "cursorStatus" => Ok(windows_bridge::agent_cursor::status()),
@@ -260,6 +260,7 @@ fn handle_request(request: &Request) -> Response {
         "listRoots" | "listWindows" => handle_list_roots(&request.args),
         "look" | "screenshot" => handle_look(&request.args),
         "focusWindow" => handle_focus_window(&request.args),
+        "reflowWindow" => handle_reflow_window(&request.args),
         "act" => handle_act(&request.args),
         "actBatch" => handle_act_batch(&request.args),
         "uiaReadText" | "axReadText" => handle_read_text(&request.args),
@@ -883,6 +884,73 @@ fn scoped_outline_root(mut outline: Value, scope_ref: &str) -> Value {
     scoped
 }
 
+fn reflow_capture(record: &LookRecord) -> Result<windows_bridge::window_reflow::Rect, ProtocolError> {
+    let values = [record.frame_x, record.frame_y, record.frame_w, record.frame_h];
+    if !record.has_image
+        || record.hwnd == 0
+        || record.pid == 0
+        || !record.image_w.is_finite()
+        || !record.image_h.is_finite()
+        || record.image_w <= 0.0
+        || record.image_h <= 0.0
+        || values.iter().any(|v| {
+            !v.is_finite() || v.fract() != 0.0 || *v < i32::MIN as f64 || *v > i32::MAX as f64
+        })
+        || record.frame_w <= 0.0
+        || record.frame_h <= 0.0
+    {
+        return Err(invalid("Window reflow requires a valid image-backed look"));
+    }
+    Ok(windows_bridge::window_reflow::Rect {
+        x: record.frame_x as i32,
+        y: record.frame_y as i32,
+        width: record.frame_w as i32,
+        height: record.frame_h as i32,
+    })
+}
+
+fn handle_reflow_window(args: &Value) -> Result<Value, ProtocolError> {
+    let look_id = args
+        .get("lookId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| invalid("lookId is required"))?;
+    let record = {
+        let state = helper_state()
+            .lock()
+            .map_err(|_| internal("helper state lock poisoned"))?;
+        state.looks.get(look_id).cloned().ok_or_else(|| {
+            ProtocolError::new(
+                format!("Look id '{look_id}' is no longer available"),
+                ErrorCode::StaleLook,
+            )
+        })?
+    };
+    let captured = reflow_capture(&record)?;
+    if args.get("pid").is_some_and(|value| value.as_u64() != Some(record.pid)) {
+        return Err(invalid("pid does not match the captured window"));
+    }
+    with_physical_input(|| {
+        window::require_capture_bounds(
+            record.hwnd,
+            record.pid,
+            (record.frame_x, record.frame_y, record.frame_w, record.frame_h),
+        )?;
+        #[cfg(windows)]
+        {
+            windows_bridge::window_reflow::native::execute(record.hwnd, record.pid, captured)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = captured;
+            Err(ProtocolError::new(
+                "Window reflow is only supported on Windows",
+                ErrorCode::UnsupportedPlatform,
+            ))
+        }
+    })
+}
+
 fn handle_act(args: &Value) -> Result<Value, ProtocolError> {
     let parsed = input::parse_act_request(args)?;
     if parsed.action == "moveMouse"
@@ -1434,32 +1502,27 @@ fn coordinate_fallback(
             &element.automation_id,
         )
         .map_err(stale_ref_from_uia)?;
-        let x = snapshot.rect.0 + snapshot.rect.2 / 2.0;
-        let y = snapshot.rect.1 + snapshot.rect.3 / 2.0;
-        let mut clear = false;
+        let mut point = None;
         for attempt in 0..3 {
-            match windows_bridge::uia::occlusion_ok(
-                element.hwnd,
-                &snapshot.runtime_id,
-                &element.automation_id,
-                x,
-                y,
-            ) {
-                Ok(true) => {
-                    clear = true;
+            match windows_bridge::hit_target::select_clear_point(snapshot.rect, |x, y| {
+                windows_bridge::uia::occlusion_ok(element.hwnd, &snapshot.runtime_id,
+                    &element.automation_id, x, y)
+            }) {
+                Ok(Some(clear)) => {
+                    point = Some(clear);
                     break;
                 }
-                Ok(false) if attempt < 2 => sleep(Duration::from_millis(20)),
-                Ok(false) => break,
+                Ok(None) if attempt < 2 => sleep(Duration::from_millis(20)),
+                Ok(None) => break,
                 Err(message) => return Err(stale_ref_from_uia(message)),
             }
         }
-        if !clear {
+        let Some((x, y)) = point else {
             return Err(ProtocolError::new(
                 "Target is occluded",
                 ErrorCode::OccludedTarget,
             ));
-        }
+        };
         let mut executable = args.clone();
         executable["resolvedPoint"] = json!({ "x": x, "y": y });
         executable["pointerGuard"] = json!({"hwnd": element.hwnd, "pid": expected_pid});
@@ -2234,6 +2297,24 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn reflow_requires_an_image_and_exact_integral_window_geometry() {
+        let mut look = look_with_element(1.0);
+        assert!(reflow_capture(&look).is_err());
+        look.has_image = true;
+        assert_eq!(reflow_capture(&look).unwrap().width, 100);
+        look.frame_x = 0.5;
+        assert!(reflow_capture(&look).is_err());
+        look.frame_x = f64::NAN;
+        assert!(reflow_capture(&look).is_err());
+        look.frame_x = 0.0;
+        look.frame_w = i32::MAX as f64 + 1.0;
+        assert!(reflow_capture(&look).is_err());
+        look.frame_w = 100.0;
+        look.image_w = 0.0;
+        assert!(reflow_capture(&look).is_err());
     }
 
     #[test]

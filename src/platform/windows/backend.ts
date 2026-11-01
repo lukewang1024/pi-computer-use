@@ -100,6 +100,9 @@ async function ensureReady(_ctx: unknown, state: PlatformReadyState, signal?: Ab
 
 export const windowsBackend: ComputerUsePlatformBackend = {
 	name: "windows",
+	async reflowWindow(lookId, pid, signal): Promise<unknown> {
+		return await windowsHelper.command("reflowWindow", { lookId, pid }, { signal });
+	},
 	shutdown(): void { windowsHelper.dispose(); },
 	ensureReady,
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {

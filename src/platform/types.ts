@@ -249,6 +249,8 @@ export interface ComputerUsePlatformBackend {
 	listRoots(query: PlatformRootQuery, signal?: AbortSignal): Promise<PlatformRoot[]>;
 	getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult>;
 	focusWindow(target: PlatformTarget, signal?: AbortSignal): Promise<PlatformFocusWindowResult>;
+	/** Explicit Windows-only physical recovery; never replays the previous action. */
+	reflowWindow?(lookId: string, pid: number, signal?: AbortSignal): Promise<unknown>;
 	observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse>;
 	act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
 	/** Execute one-resource actions with one root baseline and one final settle. */

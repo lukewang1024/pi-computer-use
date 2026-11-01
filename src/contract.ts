@@ -34,6 +34,8 @@ export interface StateTargetParams {
 	stateId?: string;
 }
 
+export interface ReflowWindowParams { stateId: string }
+
 export interface NavigateBrowserParams extends StateTargetParams {
 	url: string;
 	/** Response projection only; retain the complete navigation successor. */
@@ -151,6 +153,7 @@ export interface WaitForParams extends StateTargetParams, UiCondition {
 export const AGENT_TOOL_NAMES = new Set([
 	"find_roots",
 	"focus_window",
+	"reflow_window",
 	"read_text",
 	"wait_for",
 	"observe_ui",

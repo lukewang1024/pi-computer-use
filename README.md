@@ -66,6 +66,14 @@ decorative sibling covering the center does not prevent choosing another exact
 target pixel. Full occlusion, invalid geometry and stale identities remain
 rejected; foreground HWND/PID checks still guard the single input dispatch.
 
+`reflow_window` is an explicit Windows recovery operation for a normal,
+resizable foreground window with a fresh image-backed state. It makes one
+guarded four-pixel border drag and, only after verifying the intermediate
+geometry and placement, one guarded drag back. It rejects unsuitable windows
+before input and reports partial or uncertain execution without retrying. Even
+when geometry is restored, UIA recovery remains unverified: observe again and
+never replay an earlier operation whose outcome was unknown.
+
 Windows window captures verify the same HWND, PID, GUI thread and bounds before
 and after GDI capture, then again after encoding and optional UIA extraction.
 Moved, resized, minimized or invalidated frames are rejected, as are unavailable
@@ -97,6 +105,7 @@ Use `/computer-use` inside Pi to show the active configuration and where it came
 ## Main tools
 
 - `find_roots`
+- `focus_window`, `reflow_window` (the latter is Windows-only)
 - `observe_ui`
 - `search_ui`
 - `expand_ui`

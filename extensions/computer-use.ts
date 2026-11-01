@@ -6,6 +6,7 @@ import {
 	executeEvaluateBrowser,
 	executeExpandUi,
 	executeFocusWindow,
+	executeReflowWindow,
 	executeInspectUi,
 	executeLaunchBrowser,
 	executeFind,
@@ -91,6 +92,15 @@ const focusWindowTool = defineTool({
 		capture: Type.Optional(Type.Boolean({ description: "Capture an observation after focus (default false). Capture failure does not erase focus verification." })),
 	}),
 	execute: executeFocusWindow,
+});
+
+const reflowWindowTool = defineTool({
+	name: "reflow_window",
+	label: "Reflow Window",
+	description: "Explicit Windows-only recovery for a normal, resizable foreground window using two guarded border drags. It may change the window geometry and does not replay or verify any previous input.",
+	promptSnippet: "Use only as an explicit recovery after inspecting the exact foreground window. A partial or unknown result requires stopping input; never replay the previous unknown operation. Observe afresh to check UIA recovery.",
+	parameters: Type.Object({ stateId: Type.String({ description: "Fresh image-backed observation of the exact foreground window" }) }, { additionalProperties: false }),
+	execute: executeReflowWindow,
 });
 
 const observeTool = defineTool({
@@ -251,7 +261,7 @@ function formatConfigStatus(): string {
 }
 
 export default function computerUseExtension(pi: ExtensionAPI): void {
-	for (const tool of [findTool, focusWindowTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool, startRecordingTool, recordingStatusTool, stopRecordingTool]) pi.registerTool(tool);
+	for (const tool of [findTool, focusWindowTool, reflowWindowTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool, startRecordingTool, recordingStatusTool, stopRecordingTool]) pi.registerTool(tool);
 
 	pi.registerCommand("computer-use", {
 		description: "Show configuration or explicitly manage macOS permissions",

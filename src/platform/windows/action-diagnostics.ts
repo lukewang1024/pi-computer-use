@@ -5,6 +5,7 @@ const stages = new Set([
     "reference_resolution_started", "reference_resolution_ready",
     "enabled_check_started", "pattern_lookup_started",
     "native_mutation_started", "native_mutation_returned", "post_action_observation_started",
+    "reflow_expand_started", "reflow_restore_started",
 ]);
 export function sanitizeActionStages(value: unknown): WindowsActionStage[] {
     if (!Array.isArray(value)) return [];

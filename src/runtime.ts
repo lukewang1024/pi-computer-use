@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ActionPreflightError, validateBeforeInput } from "./action-preflight.ts";
 
 export interface StoredState<T> {
 	stateId: string;
@@ -141,6 +142,17 @@ export async function runPreflightWrite<T>(
 	preflight: () => void,
 	work: (nextEpoch: number) => Promise<T>,
 ): Promise<{ value: T; epoch: number }> {
-	preflight();
-	return await scheduler.write(resourceKey, baseEpoch, work);
+	validateBeforeInput(preflight);
+	let entered = false;
+	try {
+		return await scheduler.write(resourceKey, baseEpoch, async (epoch) => {
+			entered = true;
+			return await work(epoch);
+		});
+	} catch (error) {
+		if (!entered && error instanceof StaleResourceStateError) {
+			throw new ActionPreflightError(error.message, "observe_ui");
+		}
+		throw error;
+	}
 }

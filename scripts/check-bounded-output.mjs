@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, MODEL_TEXT_MAX_BYTES, readStoredOutput } from "../src/output.ts";
 import { searchOutlineRanked, serializeOutlineSearchMatch } from "../src/outline.ts";
+import { ActionPreflightError } from "../src/action-preflight.ts";
 
 clearStoredOutputs();
 const oversized = "🙂".repeat(30_000);
@@ -32,6 +33,13 @@ const shortError = new Error("short");
 assert.equal(boundToolError("act_ui", shortError), shortError, "small errors must retain their original identity");
 const malformedCode = Object.assign(new Error("x".repeat(60_000)), { code: "x".repeat(90) });
 assert.equal(boundToolError("act_ui", malformedCode).code, undefined, "unbounded metadata must not defeat output limits");
+const preflightError = new ActionPreflightError("x".repeat(60_000), "observe_ui");
+const boundedPreflight = boundToolError("act_ui", preflightError);
+assert.equal(boundedPreflight.code, "cu_preflight_rejected");
+assert.deepEqual(boundedPreflight.preflight, preflightError.preflight, "bounded errors must retain the versioned no-input receipt");
+assert.ok(Buffer.byteLength(boundedPreflight.message) <= MODEL_TEXT_MAX_BYTES);
+const arbitraryProof = Object.assign(new Error("x".repeat(60_000)), { preflight: preflightError.preflight });
+assert.equal(boundToolError("act_ui", arbitraryProof).preflight, undefined, "only typed validation errors may carry a no-input receipt through truncation");
 
 const node = (ref, title, role = "AXButton") => ({ ref, role, subrole: "", identifier: "", title, description: "", value: "", actions: ["AXPress"], canPress: true, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, focused: false, offscreen: false, pictureOnly: false, truncated: false, text: [], children: [] });
 const root = node("@e1", "root", "AXWindow");

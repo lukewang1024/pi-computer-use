@@ -1,4 +1,5 @@
 import { prepareManagedDownloadDirectory } from "./browser-downloads.ts";
+import { ActionPreflightError, validateBeforeInput } from "./action-preflight.ts";
 import { cachedOutlineCompleteness } from "./outline.ts";
 import { CdpNavigationFailure, ManagedLaunchNavigationFailure } from "./navigation-failure.ts";
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
@@ -576,18 +577,19 @@ function outlineNodeCenter(node: OutlineNode): { x: number; y: number } {
 function validateStateId(stateId?: string): CurrentCapture {
 	const state = operationState();
 	if (!state.currentCapture) {
-		throw new Error("No observation state is available. Call observe_ui first.");
+		throw new ActionPreflightError("No observation state is available. Call observe_ui first.", "observe_ui");
 	}
 	const supplied = stateId;
 	if (supplied && state.currentCapture.stateId !== supplied) {
-		throw new Error(
+		throw new ActionPreflightError(
 			`Stale state '${supplied}'. The active operation state is '${state.currentCapture.stateId}'. Observe the root again and retry.`,
+			"observe_ui",
 		);
 	}
 	const stateTarget = state.currentStateTarget;
 	if (stateTarget && state.currentTarget && (stateTarget.pid !== state.currentTarget.pid || stateTarget.windowId !== state.currentTarget.windowId
 		|| (stateTarget.nativeWindowRef !== undefined && stateTarget.nativeWindowRef !== state.currentTarget.nativeWindowRef))) {
-		throw new Error("The latest state belongs to a different window. Call observe_ui for the target window and retry.");
+		throw new ActionPreflightError("The latest state belongs to a different window. Call observe_ui for the target window and retry.", "observe_ui");
 	}
 	return state.currentCapture;
 }
@@ -612,7 +614,7 @@ function outlineNodeByRef(ref: string): OutlineNode {
 	const node = outline ? nodeByRef(outline, ref) : undefined;
 	if (!node) {
 		const windowHint = state.currentTarget?.windowRef ? `({ root: "${state.currentTarget.windowRef}" })` : "";
-		throw new Error(`Outline ref '${ref}' is stale or not available for the latest state. Call observe_ui${windowHint} again and choose a current @e ref.`);
+		throw new ActionPreflightError(`Outline ref '${ref}' is stale or not available for the latest state. Call observe_ui${windowHint} again and choose a current @e ref.`, "observe_ui");
 	}
 	return node;
 }
@@ -1270,7 +1272,7 @@ function currentLookOrThrow(): LookResponse {
 
 function ensurePointIsInLookImage(x: number, y: number, look: LookResponse, errorPrefix = "Coordinates"): void {
 	if (!look.image?.jpegBase64) {
-		throw new Error(`${errorPrefix} require an image-bearing root. This look is outline-only; use an @e ref with a semantic action or observe an image-bearing root.`);
+		throw new ActionPreflightError(`${errorPrefix} require an image-bearing root. This look is outline-only; use an @e ref with a semantic action or observe an image-bearing root.`, "observe_visual");
 	}
 	if (!Number.isFinite(x) || !Number.isFinite(y)) {
 		throw new Error(`${errorPrefix} must be finite numbers.`);
@@ -2517,13 +2519,15 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const look = currentLookOrThrow();
 	const pixelOnly = isPixelOnlyLook(look);
 	const pixelSuccessor = pixelOnly || params.observationMode === "pixels";
-	if (params.observationMode === "pixels" && params.expect) throw new Error("Pixel-only successor cannot verify semantic postconditions; use semantic or fused.");
-	if (params.observationMode === "pixels" && params.outlineQuery) throw new Error("outlineQuery requires a semantic successor.");
-	if (pixelOnly && semanticSuccessor) throw new Error("Pixel-only state cannot return a semantic successor; observe semantic or fused first.");
-	if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
+	const { condition, scopeNode } = validateBeforeInput(() => {
+		if (params.observationMode === "pixels" && params.expect) throw new Error("Pixel-only successor cannot verify semantic postconditions; use semantic or fused.");
+		if (params.observationMode === "pixels" && params.outlineQuery) throw new Error("outlineQuery requires a semantic successor.");
+		if (pixelOnly && semanticSuccessor) throw new Error("Pixel-only state cannot return a semantic successor; observe semantic or fused first.");
+		if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
+		const condition = params.expect ? validateCondition(params.expect) : undefined;
+		return { condition, scopeNode: condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined };
+	});
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
-	const condition = params.expect ? validateCondition(params.expect) : undefined;
-	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 	const noteBefore = state.currentNote;
 	// Root discovery can reveal a replaced or remapped window after the first
@@ -2723,21 +2727,24 @@ function validateActionTarget(action: UiAction): void {
 }
 
 async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
-	if (params.includeImage !== undefined && typeof params.includeImage !== "boolean") throw new Error("act_ui.includeImage must be boolean.");
-	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
-	if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused" && params.observationMode !== "pixels") {
-		throw new Error("act_ui.observationMode must be semantic, fused or pixels.");
-	}
-	const actions = Array.isArray(params.actions) ? params.actions : [];
-	if (actions.length === 0) throw new Error("act_ui.actions must contain at least one action.");
-	if (actions.length > 20) throw new Error("act_ui supports at most 20 actions per transaction.");
-	for (const action of actions) validateActionTarget(action);
+	const actions = validateBeforeInput(() => {
+		if (params.includeImage !== undefined && typeof params.includeImage !== "boolean") throw new Error("act_ui.includeImage must be boolean.");
+		if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("outlineView must be full or folded.");
+		if (params.observationMode !== undefined && params.observationMode !== "semantic" && params.observationMode !== "fused" && params.observationMode !== "pixels") {
+			throw new Error("act_ui.observationMode must be semantic, fused or pixels.");
+		}
+		const requested = Array.isArray(params.actions) ? params.actions : [];
+		if (requested.length === 0) throw new Error("act_ui.actions must contain at least one action.");
+		if (requested.length > 20) throw new Error("act_ui supports at most 20 actions per transaction.");
+		for (const action of requested) validateActionTarget(action);
+		return requested;
+	});
 	if (operationState().contextId) {
-		if (params.observationMode !== undefined) throw new Error("act_ui.observationMode is currently desktop-only.");
-		if (actions.some(action => action.action === "selectText")) throw new Error("selectText is only available for macOS native editors.");
+		if (params.observationMode !== undefined) throw new ActionPreflightError("act_ui.observationMode is currently desktop-only.");
+		if (actions.some(action => action.action === "selectText")) throw new ActionPreflightError("selectText is only available for macOS native editors.");
 		return await performBrowserTransaction(params, actions, signal);
 	}
-	if (params.observationMode === "pixels" && currentPlatformBackend.name !== "windows" && currentPlatformBackend.name !== "macos") throw new Error("Pixel-only successor requires Windows or macOS native capture; no input was sent.");
+	if (params.observationMode === "pixels" && currentPlatformBackend.name !== "windows" && currentPlatformBackend.name !== "macos") throw new ActionPreflightError("Pixel-only successor requires Windows or macOS native capture; no input was sent.");
 	return await performDesktopTransaction(params, actions, signal);
 }
 
@@ -2930,7 +2937,7 @@ async function executeTool<P, T>(ctx: ExtensionContext, params: P, signal: Abort
 	const requestedStateId = outputRef ? undefined : trimOrUndefined((params as { stateId?: string } | undefined)?.stateId);
 	const stateRecord = requestedStateId ? savedStates.get(requestedStateId) : undefined;
 	if (requestedStateId && !stateRecord) {
-		throw new Error(`State '${requestedStateId}' is unavailable or was evicted. Observe the root again.`);
+		throw new ActionPreflightError(`State '${requestedStateId}' is unavailable or was evicted. Observe the root again.`, "observe_ui");
 	}
 	const operation = savedStates.hydrate(stateRecord);
 	return await savedStates.operations.run(operation, async () => {
@@ -3062,7 +3069,7 @@ export const executeSearchUi = makeToolExecutor("search_ui", performSearchUi);
 export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);
 export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>("act_ui", async (params, signal) => {
-	const query = validateOutlineQuery(params.outlineQuery);
+	const query = validateBeforeInput(() => validateOutlineQuery(params.outlineQuery));
 	let result = await performAct(params, signal);
 	// Project only after the original transaction has saved its complete successor.
 	// Terminal failures retain their original evidence and never trigger more input.

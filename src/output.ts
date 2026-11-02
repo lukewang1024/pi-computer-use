@@ -2,6 +2,7 @@ import { closeSync, mkdtempSync, openSync, readSync, rmSync, unlinkSync, writeFi
 import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { ActionPreflightError } from "./action-preflight.ts";
 
 export const MODEL_TEXT_MAX_BYTES = 48 * 1024;
 export const MODEL_TEXT_MAX_LINES = 2_000;
@@ -105,6 +106,9 @@ export function boundToolError(tool: string, error: unknown): Error {
 		if (typeof code === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(code)) {
 			Object.defineProperty(bounded, "code", { value: code, enumerable: true });
 		}
+	}
+	if (error instanceof ActionPreflightError) {
+		Object.defineProperty(bounded, "preflight", { value: error.preflight, enumerable: true });
 	}
 	return bounded;
 }

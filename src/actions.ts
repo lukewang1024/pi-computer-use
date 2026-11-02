@@ -193,6 +193,14 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 		const node = env.node(action.ref.trim());
 		const semanticClick = operation === "click" || operation === "press";
 		if (semanticClick && node.isTextInput) {
+			// Windows resolves this observed identity again and checks the live
+			// rectangle and occlusion before pointer fallback. Retain that path
+			// without requiring screenshot bytes for a native control reference.
+			if (env.platform === "windows" && node.wireRef && !node.pictureOnly
+				&& (action.button === undefined || action.button === "left")
+				&& (action.clickCount === undefined || action.clickCount === 1)) {
+				return { ref: node.wireRef };
+			}
 			// Keep an observed native ref for a verifiable macOS focus request.
 			// The helper distinguishes native editors from web areas. Keep the
 			// image requirement for any pointer fallback and explicit pointer gestures.
@@ -286,7 +294,8 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 		env.validatePoint(point.x, point.y);
 	}
 	const needsForeground = !env.headless && (operation === "click" || operation === "press")
-		&& ("x" in target || pointerRefFallback);
+		&& ("x" in target || pointerRefFallback
+			|| (env.platform === "windows" && Boolean(action.ref) && env.node(action.ref!).isTextInput));
 
 	switch (operation) {
 		case "press":

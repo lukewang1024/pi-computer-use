@@ -9,8 +9,8 @@ const env={platform:'windows',headless:false,image:{width:100,height:100},
  center(){return {x:20,y:30};},
  validatePoint(x,y){if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>=100||y>=100)throw Error('Invalid point');}};
 const sequence=preflightActionSequence([{action:'press',ref:'@e1'},{action:'keypress',keys:['ctrl','a']}],false,env);
-assert.deepEqual(sequence[0].target,{x:20,y:30});
-assert.equal(sequence[0].needsForeground,true,'coordinate fallback still requires foreground');
+assert.deepEqual(sequence[0].target,{ref:'native-text'});
+assert.equal(sequence[0].needsForeground,true,'Windows editor focus still requires foreground');
 assert.equal(sequence[1].usesCurrentFocus,true);
 assert.deepEqual(sequence[1].params.keys,['ctrl','a']);
 assert.throws(()=>preflightActionSequence([{action:'press',ref:'@e1'},{action:'keypress',keys:['unsupported-key']}],false,env),/Unsupported/,'whole batch must be prepared before dispatch');
@@ -63,7 +63,7 @@ assert(!Value.Check(schema,{stateId:'S1',actions:[{action:'typeText',x:20,text:'
 console.log('Action preflight and registered-schema regression checks passed (no native input)');
 
 // A semantic native Mac editor click retains its exact ref; pointer gestures
-// and Windows controls retain image grounding and the foreground requirement.
+// retain image grounding. Windows editor refs use guarded native resolution.
 const focusable={...text,canFocus:true};
 const macEnv={...env,platform:'macos',node(ref){if(ref!=='@e1')throw Error('Stale reference');return focusable;}};
 const nativeFocus=preflightActionSequence([{action:'click',ref:'@e1'}],false,macEnv)[0];
@@ -76,7 +76,7 @@ for(const action of [{action:'click',ref:'@e1',button:'right'},{action:'click',r
  assert.deepEqual(pointer.target,{x:20,y:30});assert.equal(pointer.needsForeground,true);
 }
 assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,node(){return {...focusable,canFocus:false};}})[0].target,{x:20,y:30});
-assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,platform:'windows'})[0].target,{x:20,y:30});
+assert.deepEqual(preflightActionSequence([{action:'click',ref:'@e1'}],false,{...macEnv,platform:'windows'})[0].target,{ref:'native-text'});
 assert.throws(()=>preflightActionSequence([{action:'click',ref:'@missing'}],false,macEnv),/Stale/);
 for(const operation of ['press','click']){
  const semanticFocus=preflightActionSequence([{action:operation,ref:'@e1'}],false,{...macEnv,image:undefined})[0];
@@ -87,6 +87,20 @@ for(const action of [{action:'click',ref:'@e1',button:'right'},{action:'click',r
  assert.throws(()=>preflightActionSequence([action],false,{...macEnv,image:undefined,validatePoint(){throw Error('Image required');}}),/Image/);
 }
 console.log('Native macOS focus routing and pointer-gesture boundaries passed');
+
+// Semantic successors can focus exact Windows editors without taking another
+// screenshot. The helper, rather than stale screenshot coordinates, owns live
+// UIA identity, rectangle, foreground and occlusion validation.
+for(const action of ['click','press']) {
+ const noImage={...env,image:undefined,center(){throw Error('No screenshot coordinates');},validatePoint(){throw Error('Image required');}};
+ const prepared=preflightActionSequence([{action,ref:'@e1'}],false,noImage)[0];
+ assert.deepEqual(prepared.target,{ref:'native-text'});
+ assert.equal(prepared.needsForeground,true);
+ for(const change of [{pictureOnly:true},{wireRef:undefined}]) {
+  assert.throws(()=>preflightActionSequence([{action,ref:'@e1'}],false,{...noImage,node(){return {...text,...change};}}),/screenshot|Image/);
+ }
+ assert.throws(()=>preflightActionSequence([{action,x:20,y:30}],false,noImage),/Image/,'explicit image points still require image grounding');
+}
 
 // A focusable Word comment button without AXPress still uses pointer delivery.
 const focusOnlyButton={...focusable,role:'AXButton',isTextInput:false,canPress:false,canSetValue:false,actions:[]};

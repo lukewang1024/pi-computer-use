@@ -98,6 +98,20 @@ On macOS, exact foreground text temporarily selects an enabled US or ABC keyboar
 
 On macOS, a click or press on a non-editor control without AXPress uses foreground pointer delivery from its first attempt, including focusable native refs. This fallback requires fresh image grounding while retaining the exact native reference. Semantic AXPress controls and native editor focus keep their existing routes. An unknown result is never replayed automatically.
 
+On Windows, an ordinary single click or press on an observed native editor keeps
+its exact UIA reference, including after a semantic observation with no image.
+The helper rechecks live identity, geometry, foreground and occlusion before
+delivery. Explicit image coordinates, picture-only controls and pointer gestures
+such as right-click or double-click still require image grounding.
+
+Deterministic action validation failures carry `code=cu_preflight_rejected` and a
+versioned `preflight` receipt (`phase=before_input`, `inputDispatched=false`,
+`recoverable=true`). `recovery` requests `correct_call`, `observe_ui` or
+`observe_visual`. A rejected preflight consumes no write epoch: callers may
+correct the call on that state or refresh the exact root as directed. The receipt
+only covers this call; errors after dispatch and earlier unknown input remain
+unresolved. Never replay an unknown action or an already dispatched batch prefix.
+
 On Linux, run Pi inside the target user's graphical session with a working AT-SPI2 accessibility bus. AT-SPI semantic operations remain background-first. X11 additionally supports EWMH window metadata/focus, window capture, and policy-gated XTEST physical input; strict headless/background policies never use focus or XTEST. Native Wayland remains semantic-only; diagnostics reads portal capability properties without creating a session, and interactive portal use is disabled. See [Linux support](./docs/linux.md) for the exact capability matrix and portal status.
 
 Use `/computer-use` inside Pi to show the active configuration and where it came from.

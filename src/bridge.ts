@@ -1,5 +1,5 @@
 import { prepareManagedDownloadDirectory } from "./browser-downloads.ts";
-import { ActionPreflightError, validateBeforeInput } from "./action-preflight.ts";
+import { ActionPreflightError, NativeActionPreflightError, validateBeforeInput } from "./action-preflight.ts";
 import { cachedOutlineCompleteness } from "./outline.ts";
 import { CdpNavigationFailure, ManagedLaunchNavigationFailure } from "./navigation-failure.ts";
 import { sanitizeActionStages, type WindowsActionStage } from "./platform/windows/action-diagnostics.js";
@@ -1389,6 +1389,16 @@ function dispatchUnknownTrace(error: unknown, policy: DeliveryPolicy): Execution
 	});
 }
 
+function nativeFailureMessage(error: unknown): string {
+	return error instanceof NativeActionPreflightError ? error.nativeMessage : error instanceof Error ? error.message : String(error);
+}
+
+function unconfirmedNativePrefix(error: ActionPreflightError): Error {
+	return Object.assign(new Error(`A prior native attempt prevents proving whole-operation non-delivery: ${nativeFailureMessage(error)}`), {
+		code: "native_prefix_unconfirmed", outcome: "unknown",
+	});
+}
+
 async function helperAct(
 	target: ResolvedTarget,
 	action: NativePreparedAction,
@@ -1424,6 +1434,9 @@ async function helperAct(
 			try {
 				foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
 			} catch (error) {
+				// No observable change does not prove that the earlier native
+				// request dispatched no input. The later receipt is only local.
+				if (error instanceof ActionPreflightError) throw unconfirmedNativePrefix(error);
 				const transport = dispatchUnknownTrace(error, "foreground");
 				if (!transport) throw error;
 				transport.backgroundFirst = true;
@@ -1448,12 +1461,15 @@ async function helperAct(
 			transport.backgroundFirst = true;
 			return transport;
 		}
-		const code = (error as Error & { code?: string })?.code;
+		const code = error instanceof NativeActionPreflightError ? error.nativeCode : (error as Error & { code?: string })?.code;
 		if (code !== "foreground_required" || headless || (action.action === "selectText" || action.action === "cancel" || action.action === "showMenu")) throw error;
 		let foreground: HelperActResult;
 		try {
 			foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
 		} catch (retryError) {
+			if (retryError instanceof ActionPreflightError && !(error instanceof NativeActionPreflightError)) {
+				throw unconfirmedNativePrefix(retryError);
+			}
 			const transport = dispatchUnknownTrace(retryError, "foreground");
 			if (!transport) throw retryError;
 			transport.backgroundFirst = true;
@@ -2347,7 +2363,7 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 			const causeCode = error instanceof Error ? (error as Error & { code?: unknown }).code : undefined;
 			step = executionTrace("act", currentRuntimeMode(), {
 				outcome: "unknown", dispatchCompletion: "unknown", effectVerification: "unverified",
-				error: { code: "batch_step_unconfirmed", message: error instanceof Error ? error.message : String(error) },
+				error: { code: "batch_step_unconfirmed", message: nativeFailureMessage(error) },
 				batchFailure: { failedStepIndex: steps.length, returnedPrefixActions: steps.length,
 					causeCode: typeof causeCode === "string" ? causeCode : undefined },
 			});

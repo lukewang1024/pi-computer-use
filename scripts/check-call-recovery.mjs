@@ -1,7 +1,7 @@
 // Public executor + scheduler tests with injected platform operations only.
 // No native helper is started and no desktop input is sent.
 import assert from 'node:assert/strict';
-import {ActionPreflightError} from '../src/action-preflight.ts';
+import {ActionPreflightError,NativeActionPreflightError} from '../src/action-preflight.ts';
 import {ResourceScheduler,runPreflightWrite,StaleResourceStateError} from '../src/runtime.ts';
 import {parseLookResponse} from '../src/outline.ts';
 import {currentPlatformBackend as backend} from '../src/platform/index.ts';
@@ -28,7 +28,10 @@ try{
 const root={kind:'window',rootRef:'native-root',windowRef:'native-root',windowId:10,pid:7,appName:'Fixture',title:'Recovery fixture',zOrder:0,framePoints:{x:0,y:0,w:100,h:100},scaleFactor:1,isOnscreen:true,isFocused:true,isMinimized:false,isMain:true,isModal:false};
 const sent=[];
 const overrides={name:'windows',ensureReady:async()=>({lastPermissionCheckAt:Date.now()}),listApps:async()=>[{appName:'Fixture',pid:7}],listRoots:async()=>[root],getFrontmost:async()=>({appName:'Fixture',pid:7,windowId:10,rootRef:'native-root'}),
- observe:async()=>parseLookResponse({lookId:'fixture-look',capturedAt:Date.now()/1000,window:{windowId:10,framePoints:root.framePoints,scaleFactor:1,isModal:false},outline:{ref:'native-editor',role:'textbox',title:'Editor',canSetValue:true,isTextInput:true,rect:{x:10,y:10,w:80,h:80},actions:['set_text'],children:[]},timings:{}}),
+ observe:async()=>parseLookResponse({lookId:'fixture-look',capturedAt:Date.now()/1000,window:{windowId:10,framePoints:root.framePoints,scaleFactor:1,isModal:false},outline:{ref:'fixture-body',role:'group',rect:{x:0,y:0,w:100,h:100},children:[
+  {ref:'native-editor',role:'textbox',title:'Editor',canSetValue:true,isTextInput:true,rect:{x:10,y:10,w:80,h:40},actions:['set_text'],children:[]},
+  {ref:'native-link',role:'button',title:'Link',canPress:true,rect:{x:10,y:60,w:80,h:20},actions:['press'],children:[]},
+ ]},timings:{}}),
  act:async request=>{sent.push(request);return {outcome:'worked',performed:{delivery:'hid'}};},actBatch:undefined};
 const original=Object.fromEntries(Object.keys(overrides).map(key=>[key,backend[key]]));Object.assign(backend,overrides);
 const call=(fn,params)=>fn('call-recovery',params,undefined,undefined,{cwd:process.cwd(),hasUI:false});
@@ -53,5 +56,53 @@ try{
  await assert.rejects(call(executeAct,{stateId,actions:[{action:'click',ref}]}),error=>proof(error,'observe_ui'));
  assert.equal(sent.length,1,'a consumed state must never authorize a replay');
  assert.equal(new ActionPreflightError('Invalid').preflight.inputDispatched,false);
+
+ const fresh=async text=>{
+  const observed=await call(executeObserve,{root:roots.details.windows[0].windowRef,mode:'semantic'});
+  const stateId=observed.details.capture.stateId;
+  const searched=await call(executeSearchUi,{stateId,text,role:text==='Editor'?'textbox':'button'});
+  assert.equal(searched.details.matches.length,1);
+  return {stateId,ref:searched.details.matches[0].ref};
+ };
+ let current=await fresh('Editor');
+ let rejectedNativeCalls=0;
+ backend.act=async()=>{rejectedNativeCalls++;throw new NativeActionPreflightError('Target is occluded','occluded_target');};
+ await assert.rejects(call(executeAct,{stateId:current.stateId,actions:[{action:'click',ref:current.ref}],observationMode:'semantic'}),error=>proof(error,'observe_ui'));
+ await assert.rejects(call(executeAct,{stateId:current.stateId,actions:[{action:'click',ref:current.ref}],observationMode:'semantic'}),error=>proof(error,'observe_ui'));
+ assert.equal(rejectedNativeCalls,1,'a native preflight consumes its write epoch; stale-state reuse must stop before another native request');
+ current=await fresh('Editor');
+ backend.act=overrides.act;
+ const continued=await call(executeAct,{stateId:current.stateId,actions:[{action:'click',ref:current.ref}],observationMode:'semantic'});
+ assert.equal(continued.details.execution.outcome,'worked','a new observation permits a corrected operation in the same session');
+
+ for(const provedFirst of [true,false]){
+  current=await fresh('Link');
+  const policies=[];
+  backend.act=async request=>{
+   policies.push(request.policy);
+   if(request.policy==='background'){
+    if(provedFirst)throw new NativeActionPreflightError('Foreground required','foreground_required');
+    throw Object.assign(new Error('Foreground required'),{code:'foreground_required'});
+   }
+   throw new NativeActionPreflightError('Target is occluded','occluded_target');
+  };
+  await assert.rejects(call(executeAct,{stateId:current.stateId,actions:[{action:'click',ref:current.ref}],observationMode:'semantic'}),error=>{
+   if(provedFirst)return proof(error,'observe_ui');
+   assert.equal(error.preflight,undefined);assert.equal(error.code,'native_prefix_unconfirmed');assert.equal(error.outcome,'unknown');return true;
+  });
+  assert.deepEqual(policies,['background','foreground']);
+ }
+
+ current=await fresh('Editor');let nativeCalls=0;
+ backend.act=async()=>{
+  nativeCalls++;
+  if(nativeCalls===1)return {outcome:'worked',performed:{delivery:'hid'}};
+  throw new NativeActionPreflightError('Target is occluded','occluded_target');
+ };
+ const partial=await call(executeAct,{stateId:current.stateId,actions:[{action:'click',ref:current.ref},{action:'click',ref:current.ref}],observationMode:'semantic'});
+ assert.equal(nativeCalls,2);
+ assert.equal(partial.details.execution.outcome,'unknown');
+ assert.equal(partial.details.execution.batchFailure.returnedPrefixActions,1);
+ assert.equal(partial.details.preflight,undefined,'a local no-input receipt cannot erase an executed prefix');
  console.log('Recoverable caller errors, same-state correction and no-image Windows ref click passed (injected native backend)');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

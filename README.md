@@ -8,7 +8,7 @@
 
 The macOS helper requires macOS 14 or newer.
 
-Windows and Linux continuously drain helper diagnostic output so a full stderr pipe cannot block protocol replies. These diagnostics are discarded rather than accumulated in memory or attached to tool results. This does not resolve unrelated native UI provider hangs. Linux also reports lost post-dispatch responses as unknown outcomes, preventing the public executor from replaying input or reusing the old observation. Pre-dispatch cancellation writes no request; terminal native rejections retain their original error codes. Both platforms also handle broken stdin pipes as unknown delivery, retiring the failed helper instead of crashing the host.
+Windows and Linux continuously drain helper diagnostic output so a full stderr pipe cannot block protocol replies. Windows retains a bounded set of request-correlated action phases; other helper diagnostics are discarded. Phases are diagnostic and never prove completion or non-delivery. This does not resolve unrelated native UI provider hangs. Linux also reports lost post-dispatch responses as unknown outcomes, preventing the public executor from replaying input or reusing the old observation. Pre-dispatch cancellation writes no request. Verified Windows pre-input receipts can produce the recoverable errors described below; other terminal native rejections retain their original error codes. Both platforms also handle broken stdin pipes as unknown delivery, retiring the failed helper instead of crashing the host.
 
 An agent can look at an app window, understand the buttons and text inside it, and perform actions like clicking, typing, scrolling, and waiting for something to change. This is useful when the agent needs to work with a normal desktop app instead of an API, a terminal command, or a file.
 
@@ -107,10 +107,16 @@ such as right-click or double-click still require image grounding.
 Deterministic action validation failures carry `code=cu_preflight_rejected` and a
 versioned `preflight` receipt (`phase=before_input`, `inputDispatched=false`,
 `recoverable=true`). `recovery` requests `correct_call`, `observe_ui` or
-`observe_visual`. A rejected preflight consumes no write epoch: callers may
-correct the call on that state or refresh the exact root as directed. The receipt
-only covers this call; errors after dispatch and earlier unknown input remain
-unresolved. Never replay an unknown action or an already dispatched batch prefix.
+`observe_visual`. Validation before entering the write leaves its epoch unchanged,
+so callers can correct the call on that state. Native Windows foreground-policy
+and clear-point guards attach explicit receipts before dispatching input. These
+guards run inside the write, so their `observe_ui` recovery requires a fresh
+observation of the exact root. Foreground escalation preserves this guarantee
+only when every preceding native attempt also proved no input. Ordinary errors,
+older helpers, a transport timeout, or an executed batch prefix remain uncertain;
+an error code, missing progress or unchanged UI is never proof. The receipt only
+covers this call and does not resolve earlier unknown input. Never replay an
+unknown action or an already dispatched batch prefix.
 
 On Linux, run Pi inside the target user's graphical session with a working AT-SPI2 accessibility bus. AT-SPI semantic operations remain background-first. X11 additionally supports EWMH window metadata/focus, window capture, and policy-gated XTEST physical input; strict headless/background policies never use focus or XTEST. Native Wayland remains semantic-only; diagnostics reads portal capability properties without creating a session, and interactive portal use is disabled. See [Linux support](./docs/linux.md) for the exact capability matrix and portal status.
 

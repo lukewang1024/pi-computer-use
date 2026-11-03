@@ -61,6 +61,20 @@ impl fmt::Display for ErrorCode {
 pub struct ProtocolError {
     pub message: String,
     pub code: ErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preflight: Option<InputPreflight>,
+}
+
+/// Proof from the point-selection boundary, before invoking the input action.
+/// Keep construction private so ordinary native errors never acquire it.
+#[derive(Debug, Clone, Serialize)]
+struct InputPreflight {
+    version: u8,
+    phase: &'static str,
+    #[serde(rename = "inputDispatched")]
+    input_dispatched: bool,
+    recoverable: bool,
+    recovery: &'static str,
 }
 
 impl ProtocolError {
@@ -68,6 +82,35 @@ impl ProtocolError {
         Self {
             message: message.into(),
             code,
+            preflight: None,
+        }
+    }
+
+    /// Only use before input::act. An occlusion error after a cursor move,
+    /// emitted click prefix or UIA mutation must retain the ordinary error.
+    pub fn occluded_before_input() -> Self {
+        Self::before_input("Target is occluded", ErrorCode::OccludedTarget)
+    }
+
+    /// Rejects in the raw-input policy guard, before dispatching the action.
+    pub fn foreground_before_input() -> Self {
+        Self::before_input(
+            "Background policy blocks global Windows coordinate/raw input grounding",
+            ErrorCode::ForegroundRequired,
+        )
+    }
+
+    fn before_input(message: &str, code: ErrorCode) -> Self {
+        Self {
+            message: message.into(),
+            code,
+            preflight: Some(InputPreflight {
+                version: 1,
+                phase: "before_input",
+                input_dispatched: false,
+                recoverable: true,
+                recovery: "observe_ui",
+            }),
         }
     }
 }
@@ -77,5 +120,47 @@ impl std::error::Error for ProtocolError {}
 impl fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}", self.code, self.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Response;
+    use serde_json::json;
+
+    #[test]
+    fn before_input_occlusion_proof_survives_the_protocol_envelope() {
+        let response = Response::err("fixture", ProtocolError::occluded_before_input());
+        let wire = serde_json::to_value(response).unwrap();
+        assert_eq!(wire["ok"], false);
+        assert_eq!(wire["id"], "fixture");
+        assert_eq!(wire["error"]["code"], "occluded_target");
+        assert_eq!(
+            wire["error"]["preflight"],
+            json!({"version":1,"phase":"before_input","inputDispatched":false,
+                "recoverable":true,"recovery":"observe_ui"})
+        );
+        let foreground = serde_json::to_value(Response::err(
+            "foreground",
+            ProtocolError::foreground_before_input(),
+        ))
+        .unwrap();
+        assert_eq!(foreground["error"]["code"], "foreground_required");
+        assert_eq!(foreground["error"]["preflight"], wire["error"]["preflight"]);
+    }
+
+    #[test]
+    fn ordinary_native_errors_do_not_claim_non_delivery() {
+        for code in [
+            ErrorCode::OccludedTarget,
+            ErrorCode::StaleRef,
+            ErrorCode::ForegroundRequired,
+            ErrorCode::InternalError,
+        ] {
+            let error = ProtocolError::new("Input was not sent", code);
+            let wire = serde_json::to_value(Response::err("fixture", error)).unwrap();
+            assert!(wire["error"].get("preflight").is_none());
+        }
     }
 }

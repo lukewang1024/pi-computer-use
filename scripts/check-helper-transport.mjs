@@ -24,6 +24,19 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
  const r=JSON.parse(line);
  if(r.cmd==='exit')return process.exit(0);
  if(r.cmd==='silent')return;
+ if(r.args.nativePreflightFixture){
+  const emit=(id,stage,elapsedMs=1)=>fs.writeSync(2,JSON.stringify({event:'cu_action_phase',requestId:id,stage,elapsedMs})+'\\n');
+  emit('different-request','native_mutation_started');
+  if(r.args.readStage)emit(r.id,'reference_resolution_started');
+  if(r.args.afterMutation)emit(r.id,'native_mutation_started');
+  if(r.args.noisyAfterMutation)for(let i=2;i<42;i++)emit(r.id,'reference_resolution_started',i);
+  if(r.args.lateMutation){emit(r.id,'reference_resolution_started',5);emit(r.id,'native_mutation_started',1);}
+  const error={code:r.args.nativeCode||'occluded_target',message:'Target is occluded'};
+  if(r.args.proof!==undefined)error.preflight=r.args.proof;
+  if(r.args.mutationEvidence)error.outcome='unknown';
+  setTimeout(()=>process.stdout.write(JSON.stringify({id:r.id,protocolVersion:r.protocolVersion,ok:false,error})+'\\n'),r.args.delay||30);
+  return;
+ }
  if(['act','actBatch'].includes(r.cmd) && r.args.returnedErrorFixture){
   const emit=(id,stage,elapsedMs)=>fs.writeSync(2,JSON.stringify({event:'cu_action_phase',requestId:id,stage,elapsedMs,secret:'not-retained'})+'\\n');
   emit('different-request','native_mutation_started',0);
@@ -89,6 +102,41 @@ try{
   });
  }
  assert.equal(await client.command('echo',{value:'after-native-error'}),'after-native-error');
+
+ const beforeInput={version:1,phase:'before_input',inputDispatched:false,recoverable:true,recovery:'observe_ui'};
+ for(const [nativeCode,readStage] of [['occluded_target',false],['occluded_target',true],['foreground_required',false]]){
+  await assert.rejects(()=>client.command('act',{nativePreflightFixture:true,proof:beforeInput,readStage,nativeCode}),error=>{
+   assert.equal(error.code,'cu_preflight_rejected');
+   assert.deepEqual(error.preflight,beforeInput);
+   assert.equal(error.nativeCode,nativeCode);
+   assert.match(error.message,/Target is occluded/);
+   assert.equal(error.outcome,undefined);
+   return true;
+  });
+ }
+ // An error code or missing progress alone never establishes non-delivery.
+ for(const [command,options] of [
+  ['act',{}],['act',{proof:null}],['act',{proof:{...beforeInput,version:2}}],
+  ['act',{proof:{...beforeInput,phase:'after_input'}}],['act',{proof:{...beforeInput,inputDispatched:true}}],
+  ['act',{proof:{...beforeInput,recoverable:false}}],['act',{proof:{...beforeInput,recovery:'correct_call'}}],
+  ['act',{proof:{...beforeInput,eventsDispatched:1}}],['act',{proof:beforeInput,mutationEvidence:true}],
+  ['act',{proof:beforeInput,nativeCode:'stale_ref'}],['actBatch',{proof:beforeInput}],
+  ['act',{proof:beforeInput,afterMutation:true}],
+  ['act',{proof:beforeInput,afterMutation:true,noisyAfterMutation:true}],['act',{proof:beforeInput,lateMutation:true}],
+ ]){
+  await assert.rejects(()=>client.command(command,{nativePreflightFixture:true,...options}),error=>{
+   assert.equal(error.code,options.nativeCode||'occluded_target');
+   assert.equal(error.preflight,undefined);
+   return true;
+  });
+ }
+ await assert.rejects(()=>client.command('act',{nativePreflightFixture:true,proof:beforeInput,delay:50},{timeoutMs:5}),error=>{
+  assert.equal(error.code,'helper_transport_unknown');
+  assert.equal(error.preflight,undefined);
+  return true;
+ });
+ await new Promise(resolve=>setTimeout(resolve,60));
+ assert.equal(await client.command('echo',{value:'after-preflight'}),'after-preflight','a proved rejection keeps the original helper connection usable');
 
  const slow=client.command('echo',{value:'slow',delay:30});
  const fast=client.command('echo',{value:'fast'});

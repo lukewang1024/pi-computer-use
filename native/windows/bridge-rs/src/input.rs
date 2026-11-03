@@ -296,15 +296,13 @@ pub fn parse_act_request(args: &Value) -> Result<ParsedActRequest, ProtocolError
 }
 
 pub fn policy_allows_raw_input(request: &ParsedActRequest) -> Result<(), ProtocolError> {
-    if request.policy != "foreground" {
+    if request.policy == "ax_only" {
         Err(ProtocolError::new(
             "Background policy blocks global Windows coordinate/raw input grounding",
-            if request.policy == "ax_only" {
-                ErrorCode::CoordinateBlocked
-            } else {
-                ErrorCode::ForegroundRequired
-            },
+            ErrorCode::CoordinateBlocked,
         ))
+    } else if request.policy != "foreground" {
+        Err(ProtocolError::foreground_before_input())
     } else {
         Ok(())
     }

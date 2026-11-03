@@ -1,4 +1,5 @@
 import { WindowsActionDiagnostics, type WindowsActionStage } from "./action-diagnostics.js";
+import { NativeActionPreflightError } from "../../action-preflight.ts";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -23,6 +24,7 @@ function transportUnknownError(message: string, command: string, requestId: stri
 
 interface Pending<T> {
 	stages: WindowsActionStage[];
+	nativeMutationObserved: boolean;
 	command: string;
 	resolve(value: T): void;
 	reject(error: Error): void;
@@ -128,6 +130,9 @@ export class WindowsHelperClient {
 			diagnostics.push(chunk, (id, stage) => {
 				const pending = this.pending.get(id);
 				if (!pending || !["act", "actBatch", "reflowWindow"].includes(pending.command)) return;
+				// A bounded or reordered diagnostic history must not forget a
+				// contradictory mutation once it has been observed for this ID.
+				if (stage.stage === "native_mutation_started" || stage.stage === "native_mutation_returned") pending.nativeMutationObserved = true;
 				if (pending.stages.length && stage.elapsedMs < pending.stages.at(-1)!.elapsedMs) return;
 				pending.stages.push(stage);
 				if (pending.stages.length > 32) pending.stages.shift();
@@ -177,10 +182,23 @@ export class WindowsHelperClient {
 			} else if (parsed.ok === true) {
 				pending.resolve(parsed.result);
 			} else {
-				const error = new Error(parsed.error?.message ?? "Windows helper command failed.") as Error & { code?: string };
-				error.code = parsed.error?.code;
-				// Correlated progress is diagnostic only. A returned native error
-				// does not establish delivery, completion, or permission to retry.
+				const native = parsed.error, proof = native?.preflight;
+				// This receipt originates before point selection invokes input.
+				// Codes, absent progress and older helper errors are not evidence.
+				// A batch or observed native mutation must remain conservative.
+				const beforeInput = pending.command === "act" && ["occluded_target", "foreground_required"].includes(native?.code)
+					&& typeof native.message === "string"
+					&& Object.keys(native).every(key => ["code", "message", "preflight"].includes(key))
+					&& proof !== null && typeof proof === "object" && !Array.isArray(proof)
+					&& Object.keys(proof).length === 5
+					&& proof.version === 1 && proof.phase === "before_input" && proof.inputDispatched === false
+					&& proof.recoverable === true && proof.recovery === "observe_ui"
+					&& !pending.nativeMutationObserved;
+				const error = beforeInput
+					? new NativeActionPreflightError(native.message, native.code)
+					: Object.assign(new Error(native?.message ?? "Windows helper command failed."), { code: native?.code });
+				// Progress is diagnostic only. Non-delivery requires the separate,
+				// explicitly validated receipt above, never missing progress.
 				if (["act", "actBatch", "reflowWindow"].includes(pending.command)) {
 					Object.assign(error, { nativeActionDiagnostics: {
 						version: 1, command: pending.command,
@@ -204,7 +222,7 @@ export class WindowsHelperClient {
 			const cleanup = () => signal?.removeEventListener("abort", onAbort);
 			const onAbort = () => { this.pending.delete(id); clearTimeout(timer); cleanup(); reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id, stages)); };
 			const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id, stages)); }, timeoutMs);
-			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd, stages });
+			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd, stages, nativeMutationObserved: false });
 			signal?.addEventListener("abort", onAbort, { once: true });
 			child.stdin.write(`${JSON.stringify({ protocolVersion: WINDOWS_HELPER_PROTOCOL_VERSION, id, cmd, args })}\n`, (error) => {
 				if (!error) return;

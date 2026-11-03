@@ -1518,10 +1518,9 @@ fn coordinate_fallback(
             }
         }
         let Some((x, y)) = point else {
-            return Err(ProtocolError::new(
-                "Target is occluded",
-                ErrorCode::OccludedTarget,
-            ));
+            // No input action has run. Other occlusion errors can follow
+            // partial delivery and deliberately keep their ordinary shape.
+            return Err(ProtocolError::occluded_before_input());
         };
         let mut executable = args.clone();
         executable["resolvedPoint"] = json!({ "x": x, "y": y });

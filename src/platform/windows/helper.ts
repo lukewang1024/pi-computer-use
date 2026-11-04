@@ -26,10 +26,12 @@ interface Pending<T> {
 	stages: WindowsActionStage[];
 	nativeMutationObserved: boolean;
 	command: string;
+	action?: string;
 	resolve(value: T): void;
 	reject(error: Error): void;
 	timer: NodeJS.Timeout;
 	cleanup?: () => void;
+	onStage?: (stage: WindowsActionStage) => void;
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {
@@ -85,7 +87,7 @@ export class WindowsHelperClient {
 	private buffer = "";
 	private pending = new Map<string, Pending<unknown>>();
 
-	dispose(): void {
+	async dispose(): Promise<void> {
 		const error = new Error("Windows helper closed because the Pi session ended.");
 		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);
@@ -101,8 +103,22 @@ export class WindowsHelperClient {
 		child.stdin.destroy();
 		child.stdout.destroy();
 		child.stderr.destroy();
-		child.kill("SIGTERM");
-		child.unref();
+		if (child.exitCode !== null || child.signalCode !== null) return;
+		// Windows modal action workers belong to a kill-on-close native job.
+		// Wait for this helper to exit and close its ownership handles before
+		// acknowledging session cleanup. An unknown action is not a live worker.
+		await new Promise<void>((resolve, reject) => {
+			const finish = (error?: Error) => {
+				clearTimeout(force); clearTimeout(deadline);
+				child.removeListener("exit", exited);
+				error ? reject(error) : resolve();
+			};
+			const exited = () => finish();
+			const force = setTimeout(() => child.kill("SIGKILL"), 2_000);
+			const deadline = setTimeout(() => finish(new Error("Windows helper exit was not confirmed during session cleanup.")), 4_000);
+			child.once("exit", exited);
+			child.kill("SIGTERM");
+		});
 	}
 
 	async ensureInstalled(signal?: AbortSignal): Promise<void> {
@@ -136,6 +152,7 @@ export class WindowsHelperClient {
 				if (pending.stages.length && stage.elapsedMs < pending.stages.at(-1)!.elapsedMs) return;
 				pending.stages.push(stage);
 				if (pending.stages.length > 32) pending.stages.shift();
+				try { pending.onStage?.(stage); } catch { /* Diagnostics must not affect transport. */ }
 			});
 		});
 		child.stdin.setDefaultEncoding("utf8");
@@ -183,10 +200,11 @@ export class WindowsHelperClient {
 				pending.resolve(parsed.result);
 			} else {
 				const native = parsed.error, proof = native?.preflight;
-				// This receipt originates before point selection invokes input.
+				// These receipts originate before point input or a setText mutation.
 				// Codes, absent progress and older helper errors are not evidence.
 				// A batch or observed native mutation must remain conservative.
-				const beforeInput = pending.command === "act" && ["occluded_target", "foreground_required"].includes(native?.code)
+				const beforeInput = pending.command === "act" && ["occluded_target", "foreground_required", "uia_resolution_failed"].includes(native?.code)
+					&& (native.code !== "uia_resolution_failed" || pending.action === "setText")
 					&& typeof native.message === "string"
 					&& Object.keys(native).every(key => ["code", "message", "preflight"].includes(key))
 					&& proof !== null && typeof proof === "object" && !Array.isArray(proof)
@@ -210,7 +228,7 @@ export class WindowsHelperClient {
 		}
 	}
 
-	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
+	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal; onRequestId?: (id: string) => void; onStage?: (stage: WindowsActionStage) => void }): Promise<T> {
 		const signal = options?.signal;
 		if (signal?.aborted) throw new Error("Operation aborted before dispatch.");
 		const child = await this.process(signal);
@@ -222,7 +240,9 @@ export class WindowsHelperClient {
 			const cleanup = () => signal?.removeEventListener("abort", onAbort);
 			const onAbort = () => { this.pending.delete(id); clearTimeout(timer); cleanup(); reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id, stages)); };
 			const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id, stages)); }, timeoutMs);
-			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd, stages, nativeMutationObserved: false });
+			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd,
+				action: typeof args.action === "string" ? args.action : undefined, stages, nativeMutationObserved: false, onStage: options?.onStage });
+			try { options?.onRequestId?.(id); } catch { /* Diagnostics must not affect transport. */ }
 			signal?.addEventListener("abort", onAbort, { once: true });
 			child.stdin.write(`${JSON.stringify({ protocolVersion: WINDOWS_HELPER_PROTOCOL_VERSION, id, cmd, args })}\n`, (error) => {
 				if (!error) return;

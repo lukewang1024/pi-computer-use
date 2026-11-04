@@ -20,7 +20,7 @@ async function scenario(options={}) {
   act:async()=>{
    dispatched=true;dispatches++;
    if(options.transportUnknown)throw Object.assign(Error('Response lost'),{code:'helper_transport_unknown',outcome:'unknown',command:'act',requestId:'request-exact',requestWriteAttempted:true});
-   return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[{change:'closed',kind:'window',pid:options.wrongPid?8:7,ref:options.unrelated?'other-root':'native-root',title:'Owned fixture'}]};
+   return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[{change:'closed',kind:options.remapped?'popover':'window',pid:options.wrongPid?8:7,ref:options.remapped?'discovery-modal-root':options.unrelated?'other-root':'native-root',windowId:options.wrongHwnd?11:options.remapped?10:undefined,title:'Owned fixture'}]};
   },actBatch:undefined});
  try {
   const found=await call(executeFind,{text:'Owned fixture'});
@@ -31,7 +31,7 @@ async function scenario(options={}) {
   if(options.condition)params.expect={text:'Close',until:options.condition,timeoutMs:100};
   const result=await call(executeAct,params);
   assert.equal(dispatches,1,'an observation failure must never replay input');
-  if(!options.available&&!options.reappears&&!options.probeError&&!options.unrelated&&!options.wrongPid&&!options.transportUnknown){
+  if(!options.available&&!options.reappears&&!options.probeError&&!options.unrelated&&!options.wrongPid&&!options.wrongHwnd&&!options.transportUnknown){
    assert.equal(result.details.status,'target_closed');
    assert.equal(postCaptures,0,'confirmed closed root must not enter capture/UIA');
    assert.equal(probes,3,'bounded exact identity reconciliation is required');
@@ -49,6 +49,7 @@ async function scenario(options={}) {
  }finally{await shutdownComputerUseSession();}
 }
 try{
- for(const options of [{},{available:true},{reappears:true},{probeError:true},{unrelated:true,available:true},{wrongPid:true,available:true},{transportUnknown:true},{condition:'absent'},{condition:'present'}])await scenario(options);
- console.log('Closed-root capture regressions passed (9 injected native scenarios)');
+ for(const options of [{},{available:true},{reappears:true},{probeError:true},{unrelated:true,available:true},{wrongPid:true,available:true},{transportUnknown:true},{condition:'absent'},{condition:'present'},
+  {remapped:true},{remapped:true,available:true},{remapped:true,reappears:true},{remapped:true,wrongPid:true},{wrongHwnd:true}])await scenario(options);
+ console.log('Closed-root capture regressions passed (14 injected native scenarios)');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

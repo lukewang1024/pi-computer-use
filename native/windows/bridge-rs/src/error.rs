@@ -32,6 +32,8 @@ pub enum ErrorCode {
     OccludedTarget,
     #[serde(rename = "secure_text_unreadable")]
     SecureTextUnreadable,
+    #[serde(rename = "uia_resolution_failed")]
+    UiaResolutionFailed,
 }
 
 impl fmt::Display for ErrorCode {
@@ -51,6 +53,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::ForegroundRequired => "foreground_required",
             ErrorCode::OccludedTarget => "occluded_target",
             ErrorCode::SecureTextUnreadable => "secure_text_unreadable",
+            ErrorCode::UiaResolutionFailed => "uia_resolution_failed",
         };
         write!(f, "{s}")
     }
@@ -100,7 +103,13 @@ impl ProtocolError {
         )
     }
 
-    fn before_input(message: &str, code: ErrorCode) -> Self {
+    /// A setText target could not be resolved. Called only from the branch
+    /// that returns before acquiring or invoking its value-setting pattern.
+    pub fn uia_resolution_before_input(message: impl Into<String>) -> Self {
+        Self::before_input(message, ErrorCode::UiaResolutionFailed)
+    }
+
+    fn before_input(message: impl Into<String>, code: ErrorCode) -> Self {
         Self {
             message: message.into(),
             code,
@@ -148,6 +157,12 @@ mod tests {
         .unwrap();
         assert_eq!(foreground["error"]["code"], "foreground_required");
         assert_eq!(foreground["error"]["preflight"], wire["error"]["preflight"]);
+        let resolution = serde_json::to_value(Response::err(
+            "resolution",
+            ProtocolError::uia_resolution_before_input("ElementFromHandle: timeout"),
+        )).unwrap();
+        assert_eq!(resolution["error"]["code"], "uia_resolution_failed");
+        assert_eq!(resolution["error"]["preflight"], wire["error"]["preflight"]);
     }
 
     #[test]
@@ -157,6 +172,7 @@ mod tests {
             ErrorCode::StaleRef,
             ErrorCode::ForegroundRequired,
             ErrorCode::InternalError,
+            ErrorCode::UiaResolutionFailed,
         ] {
             let error = ProtocolError::new("Input was not sent", code);
             let wire = serde_json::to_value(Response::err("fixture", error)).unwrap();

@@ -76,15 +76,18 @@ try{
  assert.equal(await client.command('stderr-pressure',{value:'windows-drained'},{timeoutMs:3000}),'windows-drained');
  assert.equal(await client.command('echo',{value:'fragmented'}),'fragmented');
  const unrelated=client.command('echo',{value:'isolated',delay:10});
- await assert.rejects(()=>client.command('act',{phaseFixture:true},{timeoutMs:200}),error=>{
+ let progressId;const progress=[];
+ await assert.rejects(()=>client.command('act',{phaseFixture:true},{timeoutMs:200,onRequestId:id=>{progressId=id;},onStage:stage=>progress.push(stage)}),error=>{
   assert.equal(error.code,'helper_transport_unknown');
   assert.equal(error.outcome,'unknown');
   assert.equal(error.requestWriteAttempted,true);
   assert.equal(error.stages.length,32);
   assert.deepEqual(error.stages.at(-1),{stage:'native_mutation_started',elapsedMs:40});
   assert(error.stages.every(row=>Object.keys(row).sort().join(',')==='elapsedMs,stage'));
+  assert.equal(error.requestId,progressId);
   return true;
  });
+ assert(progress.some(stage=>stage.stage==='native_mutation_started'),'the active request receives its correlated native progress');
  assert.equal(await unrelated,'isolated');
 
  for(const [command,afterMutation,noStages] of [['act',false,false],['act',true,false],['actBatch',false,true]]){
@@ -104,8 +107,8 @@ try{
  assert.equal(await client.command('echo',{value:'after-native-error'}),'after-native-error');
 
  const beforeInput={version:1,phase:'before_input',inputDispatched:false,recoverable:true,recovery:'observe_ui'};
- for(const [nativeCode,readStage] of [['occluded_target',false],['occluded_target',true],['foreground_required',false]]){
-  await assert.rejects(()=>client.command('act',{nativePreflightFixture:true,proof:beforeInput,readStage,nativeCode}),error=>{
+ for(const [nativeCode,readStage,action] of [['occluded_target',false,undefined],['occluded_target',true,undefined],['foreground_required',false,undefined],['uia_resolution_failed',true,'setText']]){
+  await assert.rejects(()=>client.command('act',{nativePreflightFixture:true,proof:beforeInput,readStage,nativeCode,action}),error=>{
    assert.equal(error.code,'cu_preflight_rejected');
    assert.deepEqual(error.preflight,beforeInput);
    assert.equal(error.nativeCode,nativeCode);
@@ -121,6 +124,10 @@ try{
   ['act',{proof:{...beforeInput,recoverable:false}}],['act',{proof:{...beforeInput,recovery:'correct_call'}}],
   ['act',{proof:{...beforeInput,eventsDispatched:1}}],['act',{proof:beforeInput,mutationEvidence:true}],
   ['act',{proof:beforeInput,nativeCode:'stale_ref'}],['actBatch',{proof:beforeInput}],
+  ['act',{proof:beforeInput,nativeCode:'uia_resolution_failed'}],
+  ['act',{proof:beforeInput,nativeCode:'uia_resolution_failed',action:'press'}],
+  ['act',{nativeCode:'uia_resolution_failed',action:'setText'}],
+  ['act',{proof:beforeInput,nativeCode:'uia_resolution_failed',action:'setText',afterMutation:true}],
   ['act',{proof:beforeInput,afterMutation:true}],
   ['act',{proof:beforeInput,afterMutation:true,noisyAfterMutation:true}],['act',{proof:beforeInput,lateMutation:true}],
  ]){
@@ -154,7 +161,7 @@ try{
  assert.equal(await client.command('echo',{value:'after-late'}),'after-late');
  await assert.rejects(()=>client.command('exit',{}, {timeoutMs:300}),error=>{assert.match(error.message,/helper exited.*unknown/);assert.equal(error.code,'helper_transport_unknown');assert.equal(error.outcome,'unknown');assert.equal(error.command,'exit');assert.equal(typeof error.requestId,'string');assert.equal(error.requestWriteAttempted,true);return true;});
  assert.equal(await client.command('echo',{value:'fresh-process'}),'fresh-process','a later explicit command may start a new helper');
- client.dispose();
+ await client.dispose();
  // Closing Node's active stdin FD directly is not portable across libuv runtimes.
  // A POSIX helper closes its input and stays alive with the same PID.
  await fs.writeFile(helper,closedPipeScript,{mode:0o755});
@@ -169,4 +176,4 @@ try{
  const closedLinux=new LinuxHelperClient({helperPath:closedPipeHelper});closedLinux.ensureInstalled=async()=>{};
  try {assert.equal(await closedLinux.command('close-input',{value:'closed'}),'closed');assert.equal(closedLinux.child.exitCode,null,'closed-input fixture must remain alive');await assert.rejects(()=>closedLinux.command('echo',{value:'broken-pipe'},{timeoutMs:300}),error=>{assert.equal(error.code,'helper_transport_unknown');assert.equal(error.outcome,'unknown');assert.match(error.message,/EPIPE|ECONNRESET/);return true;});} finally {closedLinux.dispose();}
  console.log('Helper subprocess transport regression checks passed (new coverage; no desktop input)');
-}finally{client.dispose();if(prior===undefined)delete process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;else process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH=prior;await fs.rm(root,{recursive:true,force:true});}
+}finally{await client.dispose();if(prior===undefined)delete process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;else process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH=prior;await fs.rm(root,{recursive:true,force:true});}

@@ -11,6 +11,14 @@ use serde_json::Value;
 
 use crate::refs::RefStore;
 
+/// Keep a failed read-only lookup distinct from an error after SetValue began.
+/// Only the former can prove that this action sent no input.
+#[derive(Debug)]
+pub enum SetTextError {
+    Resolution(String),
+    Mutation(String),
+}
+
 // Observation only: a known negative cached capability avoids a provider call.
 // Missing/unsupported metadata retains the original live-pattern fallback.
 #[cfg(any(windows, test))]
@@ -888,6 +896,7 @@ mod native {
         pub runtime_id: Vec<i32>,
     }
 
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub enum PressResult {
         Invoked,
         Toggled(bool),
@@ -949,6 +958,14 @@ mod native {
         automation_id: &str,
     ) -> Result<PressResult, String> {
         let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        // Only the dedicated, contained modal-action worker opts into this
+        // budget. Lookup remains bounded by resolve(); ordinary actions retain
+        // their provider defaults. The parent bounds the worker lifetime.
+        if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
+            let modern: IUIAutomation2 = _uia.cast().map_err(|e| format!("Action client: {e}"))?;
+            unsafe { modern.SetTransactionTimeout(crate::uia_action_worker::ACTION_BUDGET_MS as u32) }
+                .map_err(|e| format!("Set modal action timeout: {e}"))?;
+        }
         crate::action_trace::phase("enabled_check_started");
         ensure_element_enabled(&element)?;
         crate::action_trace::phase("pattern_lookup_started");
@@ -1065,8 +1082,9 @@ mod native {
         runtime_id_target: &[i32],
         automation_id: &str,
         text: &str,
-    ) -> Result<SetTextResult, String> {
-        let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+    ) -> Result<SetTextResult, super::SetTextError> {
+        let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)
+            .map_err(super::SetTextError::Resolution)?;
         if let Ok(pattern) =
             unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
         {
@@ -1074,7 +1092,7 @@ mod native {
             unsafe {
                 pattern
                     .SetValue(&value)
-                    .map_err(|e| format!("SetValue: {e}"))?;
+                    .map_err(|e| super::SetTextError::Mutation(format!("SetValue: {e}")))?;
             }
             let value = unsafe {
                 pattern
@@ -1496,6 +1514,7 @@ pub struct ElementSnapshot {
     pub runtime_id: Vec<i32>,
 }
 #[cfg(not(windows))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum PressResult {
     Invoked,
     Toggled(bool),
@@ -1552,8 +1571,8 @@ pub fn set_text(
     _runtime_id: &[i32],
     _automation_id: &str,
     _text: &str,
-) -> Result<SetTextResult, String> {
-    Err("UIA is only supported on Windows".to_owned())
+) -> Result<SetTextResult, SetTextError> {
+    Err(SetTextError::Resolution("UIA is only supported on Windows".to_owned()))
 }
 #[cfg(not(windows))]
 pub fn focus(_hwnd: isize, _runtime_id: &[i32], _automation_id: &str) -> Result<(), String> {

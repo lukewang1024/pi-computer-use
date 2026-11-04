@@ -12,6 +12,10 @@ struct Trace {
 thread_local! { static CURRENT: RefCell<Option<Trace>> = const { RefCell::new(None) }; }
 pub struct Guard;
 
+pub fn request_id() -> Option<String> {
+    CURRENT.with(|slot| slot.borrow().as_ref().map(|trace| trace.id.clone()))
+}
+
 pub fn begin(id: &str) -> Guard {
     let valid = !id.is_empty()
         && id.len() <= 128

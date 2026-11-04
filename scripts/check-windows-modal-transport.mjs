@@ -17,6 +17,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
  const r=JSON.parse(line);
  if(r.cmd==='listRoots') return send(r,{roots:modalOpen?[parent(),modal()]:[parent()]});
  if(r.cmd==='act') {
+  if (r.args.isolateUiaPress !== true) throw Error('Modal presses require an isolated native client');
   dispatches++; original=r;
   process.stderr.write(JSON.stringify({event:'cu_action_phase',requestId:r.id,stage:'native_mutation_started',elapsedMs:3})+'\\n');
   modalOpen=true;
@@ -49,7 +50,7 @@ try {
 	assert.equal((await result.pending.completion).outcome, "worked");
 	console.log("Windows modal observer and original completion passed over a real helper subprocess (no desktop input).");
 } finally {
-	windowsHelper.dispose();
+	await windowsHelper.dispose();
 	if (previous === undefined) delete process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;
 	else process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH = previous;
 	await fs.rm(temporary, { recursive: true, force: true });

@@ -137,6 +137,12 @@ fn with_physical_input<T>(
 
 fn main() {
     #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
+        set_dpi_awareness();
+        windows_bridge::uia_action_worker::serve();
+        return;
+    }
+    #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("--read-only-uia") {
         set_dpi_awareness();
         let args: Vec<String> = std::env::args().collect();
@@ -1395,11 +1401,11 @@ fn act_on_ref(
                 Ok(result)
             })
         }
-        "press" | "click" => match windows_bridge::uia::press(
-            element.hwnd,
-            &element.runtime_id,
-            &element.automation_id,
-        )
+        "press" | "click" => match if args.get("isolateUiaPress").and_then(Value::as_bool) == Some(true) {
+            windows_bridge::uia_action_worker::press(element.hwnd, record.pid, &element.runtime_id, &element.automation_id)
+        } else {
+            windows_bridge::uia::press(element.hwnd, &element.runtime_id, &element.automation_id)
+        }
         .map_err(stale_ref_from_uia)?
         {
             windows_bridge::uia::PressResult::Invoked => Ok(

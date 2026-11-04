@@ -896,6 +896,7 @@ mod native {
         pub runtime_id: Vec<i32>,
     }
 
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub enum PressResult {
         Invoked,
         Toggled(bool),
@@ -957,6 +958,14 @@ mod native {
         automation_id: &str,
     ) -> Result<PressResult, String> {
         let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        // Only the dedicated, contained modal-action worker opts into this
+        // budget. Lookup remains bounded by resolve(); ordinary actions retain
+        // their provider defaults. The parent bounds the worker lifetime.
+        if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
+            let modern: IUIAutomation2 = _uia.cast().map_err(|e| format!("Action client: {e}"))?;
+            unsafe { modern.SetTransactionTimeout(crate::uia_action_worker::ACTION_BUDGET_MS as u32) }
+                .map_err(|e| format!("Set modal action timeout: {e}"))?;
+        }
         crate::action_trace::phase("enabled_check_started");
         ensure_element_enabled(&element)?;
         crate::action_trace::phase("pattern_lookup_started");
@@ -1505,6 +1514,7 @@ pub struct ElementSnapshot {
     pub runtime_id: Vec<i32>,
 }
 #[cfg(not(windows))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum PressResult {
     Invoked,
     Toggled(bool),

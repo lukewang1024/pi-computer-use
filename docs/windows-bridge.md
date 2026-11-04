@@ -102,6 +102,15 @@ of the candidate when available. This reports the window, not proof of the
 action's success or of why the provider is blocked. Inspect the modal; it may
 be an error. Never repeat the original input.
 
+Eligible monitored presses use a dedicated UIA client process so a blocked
+provider call does not occupy the client needed to operate the dialog. The
+worker receives an exact HWND, PID and element identity, invokes once, and is
+contained in a kill-on-close Windows job before receiving the action. Its
+transaction timeout is 290 seconds and its process lifetime is bounded to
+295 seconds, within the five-minute helper request limit. Ordinary UIA
+clients retain their existing timeouts. There is no worker retry or physical
+input fallback.
+
 The original helper request remains tracked. While it is pending, input is
 limited to the exact still-open owned modal; its identity and owner state are
 rechecked before each mutation. Modal actions must be submitted one at a time,
@@ -113,10 +122,15 @@ five minutes; the ordinary 15-second timeout remains in force if no unique
 candidate is observed. If the pre-action window baseline cannot be read, the
 action is rejected before input is sent. If capture fails, discover and observe
 the exact root again; lack of a capture does not authorize input.
-Ending the session with the original action still unresolved reports cleanup
-failure and requires explicit recovery; it never reports a clean native result.
-The fence is held in the current process; abrupt process loss requires external
-session recovery and is not evidence that the native action finished.
+Ending the session waits for the helper to exit; its Windows job terminates
+any owned action worker. A failure to confirm helper exit still fails cleanup.
+An unresolved input result stays unknown in its original receipt, but is not
+itself evidence that resources failed to close. Abrupt helper exit also closes
+the job; terminating a worker is never proof that its input succeeded or failed.
+
+After a modal closes, its discovery and observation refs can differ. Closure
+matching uses the exact Windows PID and HWND, followed by live absence checks,
+before returning `target_closed` instead of querying the retired UIA window.
 
 For a single `setText`, a native failure while resolving the exact UIA target
 returns a versioned before-input receipt. Observe again before deciding on a
@@ -147,6 +161,13 @@ require an update to use the returned modal observation.
 ## Word workflow observations
 
 On Word 16.0.20430.20092, the caption dialog exposes its editable field as `document/_WwG`, with text-input capability. Its node value can be empty while `read_text` returns the generated caption prefix. Check actual capabilities and current path instead of assuming all text inputs have role `edit`. A semantic `setText` attempt did not change this field; freshly grounded click, End, and suffix typing did. Preserve the generated prefix and its whitespace.
+
+Word's New Label dialog may expose both a logical `标签(L):` edit and an
+underlying `RichEdit Control`. In live validation, writing the logical edit
+returned `didnt` with an unchanged empty value; writing the freshly observed
+RichEdit control returned `worked`, and both observed values updated. Inspect
+the returned evidence before choosing the next action; do not assume an
+accepted UIA call changed the text.
 
 Word's TextPattern omitted a supplementary emoji that was visible in the current caption image and present in saved OOXML as a symbol with a Unicode text fallback. Repeated text polling did not recover it. This is one observed Word configuration, not a general provider guarantee. When necessary, combine exact textual evidence with independently inspected current visual evidence; do not automatically accept a BMP projection as complete Unicode verification. Verify the saved document's full requested text. Caption sequence fields may appear as `fldSimple` instructions or complex `instrText` fields.
 

@@ -104,7 +104,7 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 	async reflowWindow(lookId, pid, signal): Promise<unknown> {
 		return await windowsHelper.command("reflowWindow", { lookId, pid }, { signal });
 	},
-	shutdown(): void { windowsHelper.dispose(); },
+	async shutdown(): Promise<void> { await windowsHelper.dispose(); },
 	ensureReady,
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return appsFromRoots(parseRoots(await windowsHelper.command("listRoots", {}, { signal })));
@@ -144,7 +144,8 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 			signal: options?.signal,
 			listRoots: async (signal) => parseRoots(await windowsHelper.command("listRoots", { pid: request.pid }, { signal, timeoutMs: 1_500 })),
 			act: async (actionOptions) => await windowsHelper.command<HelperActResult>("act", {
-				...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless,
+				...helperAction(request), isolateUiaPress: true,
+				cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless,
 			}, actionOptions),
 		});
 	},

@@ -108,7 +108,7 @@ endMonitoring(); leave();
 let settle;
 const held = new Promise((resolve) => { settle = resolve; });
 fence.register(7, 10, after[1], "request-2", held);
-assert.equal(fence.requiresRecoveryOnShutdown(), true);
+assert.equal(fence.completion(), "pending");
 const leaveModal = fence.enterWrite();
 assert.throws(() => fence.enterWrite(), /no input was sent/, "continuation and unscoped writes must not race");
 leaveModal();
@@ -252,7 +252,16 @@ try {
 	assert.equal(unknownAttempts, 1, "an ordinary error without preflight proof must remain fenced");
 	finishUncertain({ outcome: "worked" });
 	await sleep(0);
-	await assert.rejects(() => shutdownComputerUseSession(), /unresolved.*recovery/, "closing the host must not falsely certify an unfinished native action");
+	let cleanupCompleted = false;
+	const previousShutdown = backend.shutdown;
+	try {
+		backend.shutdown = async () => { await sleep(10); cleanupCompleted = true; };
+		await shutdownComputerUseSession();
+		assert.equal(cleanupCompleted, true, "shutdown must await resource cleanup even after unknown input");
+		assert.equal(unresolved.details.execution.dispatchCompletion, "pending", "cleanup must not rewrite an input receipt as success");
+		backend.shutdown = async () => { throw new Error("native process still alive"); };
+		await assert.rejects(() => shutdownComputerUseSession(), /native process still alive/);
+	} finally { backend.shutdown = previousShutdown; }
 	console.log("Windows pending-modal detection and public executor regression checks passed.");
 } finally {
 	Object.assign(backend, original);

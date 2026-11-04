@@ -29,5 +29,6 @@ pub mod read_worker;
 mod uia_resolution;
 
 pub mod action_trace;
+pub mod uia_action_worker;
 
 pub mod agent_cursor;

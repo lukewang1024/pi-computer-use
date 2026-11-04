@@ -87,7 +87,7 @@ export class WindowsHelperClient {
 	private buffer = "";
 	private pending = new Map<string, Pending<unknown>>();
 
-	dispose(): void {
+	async dispose(): Promise<void> {
 		const error = new Error("Windows helper closed because the Pi session ended.");
 		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);
@@ -103,8 +103,22 @@ export class WindowsHelperClient {
 		child.stdin.destroy();
 		child.stdout.destroy();
 		child.stderr.destroy();
-		child.kill("SIGTERM");
-		child.unref();
+		if (child.exitCode !== null || child.signalCode !== null) return;
+		// Windows modal action workers belong to a kill-on-close native job.
+		// Wait for this helper to exit and close its ownership handles before
+		// acknowledging session cleanup. An unknown action is not a live worker.
+		await new Promise<void>((resolve, reject) => {
+			const finish = (error?: Error) => {
+				clearTimeout(force); clearTimeout(deadline);
+				child.removeListener("exit", exited);
+				error ? reject(error) : resolve();
+			};
+			const exited = () => finish();
+			const force = setTimeout(() => child.kill("SIGKILL"), 2_000);
+			const deadline = setTimeout(() => finish(new Error("Windows helper exit was not confirmed during session cleanup.")), 4_000);
+			child.once("exit", exited);
+			child.kill("SIGTERM");
+		});
 	}
 
 	async ensureInstalled(signal?: AbortSignal): Promise<void> {

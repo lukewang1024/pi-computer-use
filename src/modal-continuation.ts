@@ -61,8 +61,6 @@ export class ModalContinuation {
 
 	hasPending(): boolean { return this.entry !== undefined; }
 
-	requiresRecoveryOnShutdown(): boolean { return this.entry !== undefined && this.entry.state !== "returned"; }
-
 	completion(): "pending" | "returned" | "unknown" | undefined {
 		return this.entry?.state === "uncertain" ? "unknown" : this.entry?.state;
 	}

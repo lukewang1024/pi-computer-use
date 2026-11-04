@@ -161,7 +161,7 @@ try{
  assert.equal(await client.command('echo',{value:'after-late'}),'after-late');
  await assert.rejects(()=>client.command('exit',{}, {timeoutMs:300}),error=>{assert.match(error.message,/helper exited.*unknown/);assert.equal(error.code,'helper_transport_unknown');assert.equal(error.outcome,'unknown');assert.equal(error.command,'exit');assert.equal(typeof error.requestId,'string');assert.equal(error.requestWriteAttempted,true);return true;});
  assert.equal(await client.command('echo',{value:'fresh-process'}),'fresh-process','a later explicit command may start a new helper');
- client.dispose();
+ await client.dispose();
  // Closing Node's active stdin FD directly is not portable across libuv runtimes.
  // A POSIX helper closes its input and stays alive with the same PID.
  await fs.writeFile(helper,closedPipeScript,{mode:0o755});
@@ -176,4 +176,4 @@ try{
  const closedLinux=new LinuxHelperClient({helperPath:closedPipeHelper});closedLinux.ensureInstalled=async()=>{};
  try {assert.equal(await closedLinux.command('close-input',{value:'closed'}),'closed');assert.equal(closedLinux.child.exitCode,null,'closed-input fixture must remain alive');await assert.rejects(()=>closedLinux.command('echo',{value:'broken-pipe'},{timeoutMs:300}),error=>{assert.equal(error.code,'helper_transport_unknown');assert.equal(error.outcome,'unknown');assert.match(error.message,/EPIPE|ECONNRESET/);return true;});} finally {closedLinux.dispose();}
  console.log('Helper subprocess transport regression checks passed (new coverage; no desktop input)');
-}finally{client.dispose();if(prior===undefined)delete process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;else process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH=prior;await fs.rm(root,{recursive:true,force:true});}
+}finally{await client.dispose();if(prior===undefined)delete process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH;else process.env.PI_COMPUTER_USE_WINDOWS_HELPER_PATH=prior;await fs.rm(root,{recursive:true,force:true});}

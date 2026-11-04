@@ -444,7 +444,6 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	await screenRecorder.shutdown();
 	await resourceScheduler.close();
 	resourceScheduler = new ResourceScheduler();
-	const unresolvedModalAction = modalContinuation.requiresRecoveryOnShutdown();
 	modalContinuation.clear();
 	let cursorCleanupError: unknown;
 	try { await clearAgentCursors(); } catch (error) { cursorCleanupError = error; }
@@ -472,7 +471,8 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	if (browserCleanupError && cursorCleanupError) throw new AggregateError([browserCleanupError,cursorCleanupError], "Computer-use cleanup failed.");
 	if (browserCleanupError) throw browserCleanupError;
 	if (cursorCleanupError) throw cursorCleanupError;
-	if (unresolvedModalAction) throw new Error("The session ended while a native modal action was unresolved. Explicit desktop recovery is required; do not replay the action.");
+	// Input outcomes remain in their original receipts. They do not turn
+	// verified process/resource teardown into a failed session cleanup.
 }
 
 function currentRuntimeMode(): ExecutionVariant {
@@ -2497,6 +2497,16 @@ async function exactRootAvailability(target: ResolvedTarget): Promise<boolean | 
 	}
 }
 
+function closedDeltaMatchesTarget(delta: NonNullable<HelperActResult["rootDelta"]>[number], target: ResolvedTarget): boolean {
+	if (delta.change !== "closed" || delta.pid !== target.pid) return false;
+	// A Windows modal can have different discovery and observation refs.
+	// Prefer its exact HWND; this is only a hint until live identity checks pass.
+	if (currentPlatformBackend.name === "windows" && Number.isSafeInteger(delta.windowId) && delta.windowId! > 0) {
+		return delta.windowId === target.windowId;
+	}
+	return delta.ref === target.windowRef || delta.ref === target.nativeWindowRef;
+}
+
 async function terminalDesktopActionResult(
 	target: ResolvedTarget,
 	baseStateId: string,
@@ -2516,7 +2526,7 @@ async function terminalDesktopActionResult(
 		exactRootAvailable = await exactRootAvailability(target);
 	}
 	const targetClosed = exactRootAvailable === false;
-	if (targetClosed && !(execution.rootDelta ?? []).some((delta) => delta.change === "closed" && delta.pid === target.pid && (delta.ref === target.windowRef || delta.ref === target.nativeWindowRef))) {
+	if (targetClosed && !(execution.rootDelta ?? []).some((delta) => closedDeltaMatchesTarget(delta, target))) {
 		execution.rootDelta = [
 			...(execution.rootDelta ?? []),
 			{
@@ -2680,9 +2690,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 		// A closed-root hint is not itself proof. Reconcile the exact native
 		// identity before trying to capture a hidden/retired window, which may
 		// otherwise spend seconds in PrintWindow and UIA before failing.
-		const sourceClosedHint = (execution.rootDelta ?? []).some((delta) =>
-			delta.change === "closed" && delta.pid === target.pid &&
-			(delta.ref === target.windowRef || delta.ref === target.nativeWindowRef));
+		const sourceClosedHint = (execution.rootDelta ?? []).some((delta) => closedDeltaMatchesTarget(delta, target));
 		if (sourceClosedHint && await exactRootAvailability(target) === false) {
 			return await terminalDesktopActionResult(target, baseView.stateId, execution,
 				new Error("The exact source root is absent after native action completion."), condition, true);

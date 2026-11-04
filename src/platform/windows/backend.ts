@@ -4,6 +4,7 @@ import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformReadyState, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
 import { WINDOWS_HELPER_PROTOCOL_VERSION, windowsHelper } from "./helper.ts";
 import { assertPlatformArchitecture } from "../architecture.ts";
+import { actWithOwnedModal } from "./modal-action.ts";
 
 function normalizedProcessName(appName: string): string {
 	return appName.toLowerCase().replace(/\.exe$/i, "");
@@ -131,6 +132,21 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 			if (capability.virtualMotion !== true) throw new Error("Installed helper does not support the virtual cursor; no input was dispatched. Rebuild or update the native helper.");
 		}
 		return await windowsHelper.command<HelperActResult>("act", {...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless}, options);
+	},
+	async actWithModal(request: PlatformActRequest, parentWindowId: number, options) {
+		if (!request.pid || !(request.action === "press" || request.action === "click") || !("ref" in request.target)) {
+			return { kind: "completed" as const, result: await this.act(request, options) };
+		}
+		return await actWithOwnedModal({
+			pid: request.pid,
+			parentWindowId,
+			timeoutMs: options?.timeoutMs ?? 15_000,
+			signal: options?.signal,
+			listRoots: async (signal) => parseRoots(await windowsHelper.command("listRoots", { pid: request.pid }, { signal, timeoutMs: 1_500 })),
+			act: async (actionOptions) => await windowsHelper.command<HelperActResult>("act", {
+				...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay && !getComputerUseConfig().headless,
+			}, actionOptions),
+		});
 	},
 	async actBatch(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
 		if (requests.some(request => request.action === "moveMouse" && request.params.pointerMode !== "physical")) {

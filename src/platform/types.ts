@@ -156,6 +156,11 @@ export interface HelperActResult {
 	stoppedAt?: number;
 }
 
+/** Internal continuation for a Windows UIA call that is still in flight. */
+export type ModalActionResult =
+	| { kind: "completed"; result: HelperActResult }
+	| { kind: "modal_pending"; pending: { requestId: string; modal: PlatformRoot; completion: Promise<HelperActResult> } };
+
 export interface PlatformTarget {
 	pid?: number;
 	windowId?: number;
@@ -253,6 +258,7 @@ export interface ComputerUsePlatformBackend {
 	reflowWindow?(lookId: string, pid: number, signal?: AbortSignal): Promise<unknown>;
 	observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse>;
 	act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
+	actWithModal?(request: PlatformActRequest, parentWindowId: number, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<ModalActionResult>;
 	/** Execute one-resource actions with one root baseline and one final settle. */
 	actBatch?(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
 	readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse>;

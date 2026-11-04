@@ -76,15 +76,18 @@ try{
  assert.equal(await client.command('stderr-pressure',{value:'windows-drained'},{timeoutMs:3000}),'windows-drained');
  assert.equal(await client.command('echo',{value:'fragmented'}),'fragmented');
  const unrelated=client.command('echo',{value:'isolated',delay:10});
- await assert.rejects(()=>client.command('act',{phaseFixture:true},{timeoutMs:200}),error=>{
+ let progressId;const progress=[];
+ await assert.rejects(()=>client.command('act',{phaseFixture:true},{timeoutMs:200,onRequestId:id=>{progressId=id;},onStage:stage=>progress.push(stage)}),error=>{
   assert.equal(error.code,'helper_transport_unknown');
   assert.equal(error.outcome,'unknown');
   assert.equal(error.requestWriteAttempted,true);
   assert.equal(error.stages.length,32);
   assert.deepEqual(error.stages.at(-1),{stage:'native_mutation_started',elapsedMs:40});
   assert(error.stages.every(row=>Object.keys(row).sort().join(',')==='elapsedMs,stage'));
+  assert.equal(error.requestId,progressId);
   return true;
  });
+ assert(progress.some(stage=>stage.stage==='native_mutation_started'),'the active request receives its correlated native progress');
  assert.equal(await unrelated,'isolated');
 
  for(const [command,afterMutation,noStages] of [['act',false,false],['act',true,false],['actBatch',false,true]]){

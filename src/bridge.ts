@@ -33,6 +33,7 @@ import { verifyFocusedWindow } from "./focus-window.ts";
 import { scoreWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { classifyWindowReflow } from "./window-reflow.ts";
+import { ModalContinuation } from "./modal-continuation.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
 export type { ActParams, EvaluateBrowserParams, ExpandUiParams, FocusWindowParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
 
@@ -89,8 +90,11 @@ interface ExecutionTrace {
 		causeCode?: string;
 	};
 	/** Native terminal reply, distinct from whether the intended UI effect was observed. */
-	dispatchCompletion?: "returned" | "unknown";
+	dispatchCompletion?: "returned" | "unknown" | "pending";
 	effectVerification?: "observed" | "not_observed" | "unverified";
+	pendingModal?: { requestId: string; parentWindowId: number; windowId: number; windowRef?: string };
+	priorModalAction?: { requestId: string; completion: "pending" | "returned" | "unknown"; modalOpen: boolean };
+	recoveryRequired?: boolean;
 	outcome?: ActOutcome;
 	performed?: HelperActPerformed;
 	evidence?: Record<string, unknown>;
@@ -159,7 +163,7 @@ interface ComputerUseDetails {
 		headless: boolean;
 	};
 	helper?: PlatformDiagnostics;
-	status?: "ok";
+	status?: "ok" | "modal_pending";
 	axDiagnostics?: {
 		reason?: string;
 		message?: string;
@@ -200,7 +204,7 @@ interface FocusOnlyDetails extends Omit<ComputerUseDetails, "capture" | "view" |
 }
 interface TerminalDesktopActionDetails {
 	tool: "act_ui";
-	status: "target_closed" | "post_action_observation_failed" | "dispatch_outcome_unknown";
+	status: "target_closed" | "post_action_observation_failed" | "dispatch_outcome_unknown" | "modal_pending";
 	baseStateId: string;
 	target: {
 		app: string;
@@ -409,6 +413,7 @@ const runtimeState: RuntimeState = {
 
 const savedStates = new SavedStates();
 let resourceScheduler = new ResourceScheduler();
+const modalContinuation = new ModalContinuation();
 
 function operationState(): OperationState {
 	return savedStates.current();
@@ -439,6 +444,8 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	await screenRecorder.shutdown();
 	await resourceScheduler.close();
 	resourceScheduler = new ResourceScheduler();
+	const unresolvedModalAction = modalContinuation.requiresRecoveryOnShutdown();
+	modalContinuation.clear();
 	let cursorCleanupError: unknown;
 	try { await clearAgentCursors(); } catch (error) { cursorCleanupError = error; }
 	disconnectCdp();
@@ -465,6 +472,7 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	if (browserCleanupError && cursorCleanupError) throw new AggregateError([browserCleanupError,cursorCleanupError], "Computer-use cleanup failed.");
 	if (browserCleanupError) throw browserCleanupError;
 	if (cursorCleanupError) throw cursorCleanupError;
+	if (unresolvedModalAction) throw new Error("The session ended while a native modal action was unresolved. Explicit desktop recovery is required; do not replay the action.");
 }
 
 function currentRuntimeMode(): ExecutionVariant {
@@ -547,7 +555,33 @@ async function withWindowWriteLock<T>(target: ResolvedTarget | CurrentTarget, wo
 	const result = await runPreflightWrite(resourceScheduler, key, baseEpoch, preflight ?? (() => {}), async (nextEpoch) => {
 		state.resourceKey = key;
 		state.epoch = nextEpoch;
-		return await work();
+		const continuingModal = await modalContinuation.guardWrite(target.pid, target.windowId, async (pid) =>
+			await currentPlatformBackend.listRoots({ pid }));
+		try {
+			const value = await work();
+			if (continuingModal) {
+				const response = value as { details?: { execution?: ExecutionTrace }; content?: Array<{ type: string; text?: string }> } | undefined;
+				const details = response?.details;
+				const execution = details?.execution;
+				if (execution?.transport || execution?.semanticDispatch || execution?.batchFailure || execution?.inputDispatch?.recoveryRequired) modalContinuation.markUncertain();
+				const prior = await modalContinuation.afterModalWrite(async (pid) => await currentPlatformBackend.listRoots({ pid }));
+				if (prior && execution) {
+					execution.priorModalAction = prior;
+					if (prior.completion === "unknown" || (!prior.modalOpen && prior.completion === "pending")) execution.recoveryRequired = true;
+					response?.content?.push({ type: "text", text: prior.completion === "returned"
+						? prior.modalOpen
+							? "The earlier native action has returned, but the modal remains open. Continue only in that exact modal."
+							: "The earlier native action has returned. Verify the current window before further input."
+						: prior.completion === "unknown" || !prior.modalOpen
+							? "The earlier native action is unconfirmed. Do not send further input; explicit desktop recovery is required."
+							: "The earlier native action is still pending. Input remains restricted to the observed modal." });
+				}
+			}
+			return value;
+		} catch (error) {
+			if (continuingModal && !(error instanceof ActionPreflightError)) modalContinuation.markUncertain();
+			throw error;
+		}
 	});
 	return result.value;
 }
@@ -1404,7 +1438,9 @@ async function helperAct(
 	action: NativePreparedAction,
 	headless: boolean,
 	signal?: AbortSignal,
+	allowModal = false,
 ): Promise<ExecutionTrace> {
+	modalContinuation.assertNotUncertain();
 	const checked = (candidate: HelperActResult): HelperActResult => {
 		if (!candidate || !["worked", "didnt", "unknown"].includes(candidate.outcome)) {
 			throw new Error("Helper act returned an invalid result without an outcome.");
@@ -1428,7 +1464,29 @@ async function helperAct(
 	}
 	try {
 		const initialPolicy = headless ? "ax_only" : "background";
-		const result = checked(await currentPlatformBackend.act(helperActRequest(target, action, initialPolicy), { signal, timeoutMs }));
+		const request = helperActRequest(target, action, initialPolicy);
+		let result: HelperActResult;
+		if (allowModal && currentPlatformBackend.actWithModal && (action.action === "press" || action.action === "click")
+			&& "ref" in action.target && !action.needsForeground && action.params.button === "left"
+			&& action.params.clickCount === 1 && target.windowId > 0) {
+			const attempt = await currentPlatformBackend.actWithModal(request, target.windowId, { signal, timeoutMs });
+			if (attempt.kind === "modal_pending") {
+				const modal = attempt.pending.modal;
+				if (!modal.windowId || modal.pid !== target.pid) throw new Error("The observed modal lacks an exact window identity.");
+				modalContinuation.register(target.pid, target.windowId, modal, attempt.pending.requestId, attempt.pending.completion);
+				const delta = { change: "appeared" as const, kind: modal.kind, ref: modal.rootRef ?? modal.windowRef,
+					windowId: modal.windowId, title: modal.title, pid: target.pid, isModal: modal.isModal, metadata: modal.metadata };
+				const ref = modelRefForRootDelta(delta);
+				return executionTrace("act", "stealth", {
+					outcome: "unknown", dispatchCompletion: "pending", effectVerification: "unverified",
+					pendingModal: { requestId: attempt.pending.requestId, parentWindowId: target.windowId, windowId: modal.windowId, windowRef: ref },
+					rootDelta: [{ ...delta, ref }], backgroundFirst: true, deliveryPolicy: initialPolicy,
+				});
+			}
+			result = checked(attempt.result);
+		} else {
+			result = checked(await currentPlatformBackend.act(request, { signal, timeoutMs }));
+		}
 		if (canRetryInForeground(action, result.outcome, headless)) {
 			let foreground: HelperActResult;
 			try {
@@ -2300,13 +2358,13 @@ function prepareUiAction(action: UiAction, state: ActionState, look: LookRespons
 	});
 }
 
-async function dispatchUiAction(action: UiAction, target: ResolvedTarget, look: LookResponse, headless: boolean, state: ActionState, signal?: AbortSignal): Promise<ExecutionTrace> {
+async function dispatchUiAction(action: UiAction, target: ResolvedTarget, look: LookResponse, headless: boolean, state: ActionState, signal?: AbortSignal, allowModal = false): Promise<ExecutionTrace> {
 	const prepared = prepareUiAction(action, state, look, headless);
 	if (prepared.action === "wait") {
 		await sleep(prepared.params.ms, signal);
 		return executionTrace("wait", "stealth", { outcome: "worked" });
 	}
-	const trace = await helperAct(target, prepared, headless, signal);
+	const trace = await helperAct(target, prepared, headless, signal, allowModal);
 	if (!headless && (prepared.establishesFocus || (prepared.action === "click" && "x" in prepared.target))) {
 		state.currentFocus = true;
 	}
@@ -2355,7 +2413,15 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 		}
 		let step: ExecutionTrace;
 		try {
-			step = await dispatchUiAction(action, target, look, headless, actionState, signal);
+			const eligible = actions.length === 1 && !headless && currentPlatformBackend.name === "windows"
+				&& target.windowId > 0 && (action.action === "press" || action.action === "click") && Boolean(action.ref)
+				&& !currentPlatformBackend.isBrowserApp(target.appName, target.bundleId);
+			const prepared = eligible ? prepareUiAction(action, actionState, look, headless) : undefined;
+			const canMonitor = prepared && (prepared.action === "press" || prepared.action === "click")
+				&& "ref" in prepared.target && !prepared.needsForeground && prepared.params.button === "left" && prepared.params.clickCount === 1;
+			const endMonitoring = canMonitor ? modalContinuation.beginMonitoring() : undefined;
+			try { step = await dispatchUiAction(action, target, look, headless, actionState, signal, Boolean(endMonitoring)); }
+			finally { endMonitoring?.(); }
 		} catch (error) {
 			if (steps.length === 0) throw error;
 			// The failure is not a cleanup receipt. Retain the returned prefix,
@@ -2378,11 +2444,13 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	const outcomes = steps.map((step) => step.outcome);
 	const outcome: ActOutcome = outcomes.includes("didnt") ? "didnt" : outcomes.includes("unknown") ? "unknown" : "worked";
 	const fallback = steps.find((step) => step.escalatedToForeground);
-	const dispatchUnconfirmed = steps.some(step => step.transport || step.semanticDispatch || step.batchFailure || step.inputDispatch?.recoveryRequired);
+	const pendingModal = steps.find((step) => step.pendingModal)?.pendingModal;
+	const dispatchUnconfirmed = steps.some(step => step.pendingModal || step.transport || step.semanticDispatch || step.batchFailure || step.inputDispatch?.recoveryRequired);
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
-		dispatchCompletion: dispatchUnconfirmed ? "unknown" : "returned",
+		dispatchCompletion: pendingModal ? "pending" : dispatchUnconfirmed ? "unknown" : "returned",
 		effectVerification: outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified",
+		pendingModal,
 		steps,
 		actionCount: dispatchUnconfirmed ? undefined : steps.length,
 		stoppedAt: steps.findIndex((step) => step.outcome !== "worked") >= 0 ? steps.findIndex((step) => step.outcome !== "worked") : undefined,
@@ -2527,6 +2595,53 @@ async function terminalDesktopActionResult(
 	};
 }
 
+async function modalPendingActionResult(
+	target: ResolvedTarget, baseStateId: string, execution: ExecutionTrace,
+	semanticSuccessor: boolean, pixelSuccessor: boolean, signal?: AbortSignal,
+): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails>> {
+	const pending = execution.pendingModal!;
+	const summary = "A uniquely owned new window appeared while the native action was pending. The window may be an error or an unrelated event; inspect it before acting. Do not repeat the original action.";
+	try {
+		if (!pending.windowRef) throw new Error("The observed window has no stable root reference.");
+		const modalTarget = await resolveTargetByWindowSelector(pending.windowRef, signal);
+		if (!await modalContinuation.guardWrite(modalTarget.pid, modalTarget.windowId, async (pid) => await currentPlatformBackend.listRoots({ pid }, signal))) {
+			throw new Error("The pending action already completed; observe a current root before continuing.");
+		}
+		const capture = await captureCurrentTarget(signal, pixelSuccessor || semanticSuccessor ? "never" : "auto", AUTO_IMAGE_MAX_DIMENSION,
+			modalTarget, !semanticSuccessor, false, pixelSuccessor ? false : undefined);
+		if (!await modalContinuation.guardWrite(modalTarget.pid, modalTarget.windowId, async (pid) => await currentPlatformBackend.listRoots({ pid }, signal))) {
+			throw new Error("The modal closed during observation; observe a current root before continuing.");
+		}
+		if (modalContinuation.completion() === "returned") execution.dispatchCompletion = "returned";
+		const result = await buildToolResult("act_ui", `${summary} Only this exact modal may receive input until the modal closes and the original action is reconciled.`, capture, execution, signal, operationState().currentImageMode);
+		result.details.status = "modal_pending";
+		return result;
+	} catch (error) {
+		clearDesktopOperationState(operationState());
+		const completion = modalContinuation.completion();
+		if (completion === "unknown") {
+			execution.dispatchCompletion = "unknown";
+			execution.recoveryRequired = true;
+		} else if (completion === "returned" || completion === undefined) {
+			execution.dispatchCompletion = "returned";
+		}
+		const suffix = completion === "unknown"
+			? "The original action is unconfirmed. Explicit desktop recovery is required; do not send more input."
+			: completion === undefined
+				? "The modal closed before capture and the original native action returned. Find and observe the current root before continuing."
+				: "The modal could not be captured. Use find_roots and observe_ui to inspect the exact window; do not send input if its identity cannot be confirmed.";
+		return {
+			content: [{ type: "text", text: `${summary}\n${suffix}` }],
+			details: {
+				tool: "act_ui", status: "modal_pending", baseStateId, execution,
+				target: { app: target.appName, bundleId: target.bundleId, pid: target.pid, windowTitle: target.windowTitle,
+					windowId: target.windowId, windowRef: target.windowRef, nativeWindowRef: target.nativeWindowRef },
+				error: { code: "modal_observation_unavailable", message: error instanceof Error ? error.message : String(error) },
+			},
+		};
+	}
+}
+
 async function performDesktopTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails>> {
 	const state = operationState();
 	const semanticSuccessor = params.observationMode === "semantic";
@@ -2552,6 +2667,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const headless = getComputerUseConfig().headless;
 	return await withWindowWriteLock(target, async () => {
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
+		if (execution.pendingModal) return await modalPendingActionResult(target, baseView.stateId, execution, semanticSuccessor, pixelSuccessor, signal);
 		if (execution.transport?.outcome === "unknown" || execution.inputDispatch?.outcome === "unknown" || execution.semanticDispatch?.outcome === "unknown" || execution.batchFailure) {
 			return await terminalDesktopActionResult(
 				target,
@@ -2629,6 +2745,9 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			return await terminalDesktopActionResult(target, baseView.stateId, execution, error, condition);
 		}
 	}, () => {
+		if (modalContinuation.hasPending() && actions.length > 1) {
+			throw new ActionPreflightError("A native modal action is pending; send only one modal action at a time so its identity can be checked between actions.");
+		}
 		preflightActionSequence(actions, false, {
 			platform: currentPlatformBackend.name,
 			headless,
@@ -2641,6 +2760,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 }
 
 async function performBrowserTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
+	await modalContinuation.rejectUnscopedWrite(async (pid) => await currentPlatformBackend.listRoots({ pid }, signal));
 	const contextId = browserContextForOperation();
 	if (!contextId) throw new Error("Browser transaction requires a browser observation state.");
 	const baseSnapshot = operationState().browserSnapshot;
@@ -2811,6 +2931,7 @@ async function waitForCdpPort(port: number, signal?: AbortSignal): Promise<void>
 // Side effects: starts a Pi-managed browser process, replaces any previous managed browser,
 // and sets PI_COMPUTER_USE_CDP_PORT for subsequent CDP context discovery.
 async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
+	await modalContinuation.rejectUnscopedWrite(async (pid) => await currentPlatformBackend.listRoots({ pid }, signal));
 	const started = performance.now();
 	const launchTimings: Record<string, number> = {};
 	const measure = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
@@ -2889,6 +3010,7 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 }
 
 async function performNavigateBrowser(params: NavigateBrowserParams): Promise<AgentToolResult<BrowserObservationDetails>> {
+	await modalContinuation.rejectUnscopedWrite(async (pid) => await currentPlatformBackend.listRoots({ pid }));
 	const contextId = browserContextForOperation();
 	const url = trimOrUndefined(params.url);
 	if (!contextId) throw new Error("navigate_browser.stateId must belong to a CDP browser-page observation. Native browser windows use act_ui.");
@@ -2915,6 +3037,7 @@ async function performNavigateBrowser(params: NavigateBrowserParams): Promise<Ag
 }
 
 async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<AgentToolResult<EvaluateBrowserDetails>> {
+	await modalContinuation.rejectUnscopedWrite(async (pid) => await currentPlatformBackend.listRoots({ pid }));
 	if (params.includeOutline !== undefined && typeof params.includeOutline !== "boolean") throw new Error("evaluate_browser.includeOutline must be boolean.");
 	if (params.outlineView !== undefined && params.outlineView !== "full" && params.outlineView !== "folded") throw new Error("evaluate_browser.outlineView must be full or folded.");
 	if (params.includeOutline === false && params.outlineView !== undefined) throw new Error("evaluate_browser.outlineView requires includeOutline.");
@@ -2973,11 +3096,13 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 		_onUpdate: AgentToolUpdateCallback<D> | undefined,
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<D>> => {
+		const writes = ["act_ui", "focus_window", "reflow_window", "navigate_browser", "evaluate_browser", "launch_browser"].includes(tool);
+		const leaveWrite = writes ? modalContinuation.enterWrite() : undefined;
 		try {
 			return applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal)));
 		} catch (error) {
 			throw boundToolError(tool, error);
-		}
+		} finally { leaveWrite?.(); }
 	};
 }
 

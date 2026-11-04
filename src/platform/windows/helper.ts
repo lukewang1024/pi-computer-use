@@ -30,6 +30,7 @@ interface Pending<T> {
 	reject(error: Error): void;
 	timer: NodeJS.Timeout;
 	cleanup?: () => void;
+	onStage?: (stage: WindowsActionStage) => void;
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {
@@ -136,6 +137,7 @@ export class WindowsHelperClient {
 				if (pending.stages.length && stage.elapsedMs < pending.stages.at(-1)!.elapsedMs) return;
 				pending.stages.push(stage);
 				if (pending.stages.length > 32) pending.stages.shift();
+				try { pending.onStage?.(stage); } catch { /* Diagnostics must not affect transport. */ }
 			});
 		});
 		child.stdin.setDefaultEncoding("utf8");
@@ -210,7 +212,7 @@ export class WindowsHelperClient {
 		}
 	}
 
-	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
+	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal; onRequestId?: (id: string) => void; onStage?: (stage: WindowsActionStage) => void }): Promise<T> {
 		const signal = options?.signal;
 		if (signal?.aborted) throw new Error("Operation aborted before dispatch.");
 		const child = await this.process(signal);
@@ -222,7 +224,8 @@ export class WindowsHelperClient {
 			const cleanup = () => signal?.removeEventListener("abort", onAbort);
 			const onAbort = () => { this.pending.delete(id); clearTimeout(timer); cleanup(); reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id, stages)); };
 			const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id, stages)); }, timeoutMs);
-			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd, stages, nativeMutationObserved: false });
+			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd, stages, nativeMutationObserved: false, onStage: options?.onStage });
+			try { options?.onRequestId?.(id); } catch { /* Diagnostics must not affect transport. */ }
 			signal?.addEventListener("abort", onAbort, { once: true });
 			child.stdin.write(`${JSON.stringify({ protocolVersion: WINDOWS_HELPER_PROTOCOL_VERSION, id, cmd, args })}\n`, (error) => {
 				if (!error) return;

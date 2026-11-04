@@ -89,6 +89,42 @@ Response envelope:
 
 Diagnostics (`cmd: "diagnostics"`) returns the protocol version and helper process metadata. The TypeScript backend rejects a mismatched version with a “Restart Pi …” error.
 
+## UIA calls that open a modal
+
+For a single Windows native UIA `press` or left `click`, the target provider may
+open an owned modal while its call remains blocked. If the original window was
+enabled, exactly one new visible enabled window is owned by that window, and
+the owner is now disabled, the backend observes the titled candidate and its
+window class twice while the
+native mutation is still outstanding. It returns `status: "modal_pending"`,
+`dispatchCompletion: "pending"`, `outcome: "unknown"`, and a fresh observation
+of the candidate when available. This reports the window, not proof of the
+action's success or of why the provider is blocked. Inspect the modal; it may
+be an error. Never repeat the original input.
+
+The original helper request remains tracked. While it is pending, input is
+limited to the exact still-open owned modal; its identity and owner state are
+rechecked before each mutation. Modal actions must be submitted one at a time,
+so a batch cannot continue after the window changes. After the modal closes,
+the original reply is reconciled, and the re-enabled parent is observed twice,
+before other input is permitted. An unconfirmed or lost reply keeps
+the desktop fenced for explicit recovery. The pending request is bounded to
+five minutes; the ordinary 15-second timeout remains in force if no unique
+candidate is observed. If the pre-action window baseline cannot be read, the
+action is rejected before input is sent. If capture fails, discover and observe
+the exact root again; lack of a capture does not authorize input.
+Ending the session with the original action still unresolved reports cleanup
+failure and requires explicit recovery; it never reports a clean native result.
+The fence is held in the current process; abrupt process loss requires external
+session recovery and is not evidence that the native action finished.
+
+This applies to single, background-first native Windows actions, not batches,
+coordinate clicks, browser windows, strict headless mode, or other platforms.
+During candidate detection concurrent mutating tool calls are rejected before
+input; if another mutation was already active, modal detection is skipped.
+Older clients that stop on `outcome: "unknown"` remain conservative and may
+require an update to use the returned modal observation.
+
 ## Remote acceptance notes
 
 - **Item 5 / menus:** click Notepad's File menu, read `rootDelta`, then observe the `appeared` root's `ref`. Menus are separate roots; observing the original Notepad window will not show the menu contents.

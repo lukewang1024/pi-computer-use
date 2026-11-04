@@ -26,6 +26,7 @@ interface Pending<T> {
 	stages: WindowsActionStage[];
 	nativeMutationObserved: boolean;
 	command: string;
+	action?: string;
 	resolve(value: T): void;
 	reject(error: Error): void;
 	timer: NodeJS.Timeout;
@@ -185,10 +186,11 @@ export class WindowsHelperClient {
 				pending.resolve(parsed.result);
 			} else {
 				const native = parsed.error, proof = native?.preflight;
-				// This receipt originates before point selection invokes input.
+				// These receipts originate before point input or a setText mutation.
 				// Codes, absent progress and older helper errors are not evidence.
 				// A batch or observed native mutation must remain conservative.
-				const beforeInput = pending.command === "act" && ["occluded_target", "foreground_required"].includes(native?.code)
+				const beforeInput = pending.command === "act" && ["occluded_target", "foreground_required", "uia_resolution_failed"].includes(native?.code)
+					&& (native.code !== "uia_resolution_failed" || pending.action === "setText")
 					&& typeof native.message === "string"
 					&& Object.keys(native).every(key => ["code", "message", "preflight"].includes(key))
 					&& proof !== null && typeof proof === "object" && !Array.isArray(proof)
@@ -224,7 +226,8 @@ export class WindowsHelperClient {
 			const cleanup = () => signal?.removeEventListener("abort", onAbort);
 			const onAbort = () => { this.pending.delete(id); clearTimeout(timer); cleanup(); reject(transportUnknownError("Operation aborted after dispatch; command outcome is unknown.", cmd, id, stages)); };
 			const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(transportUnknownError(`Helper command '${cmd}' timed out after ${timeoutMs}ms; command outcome is unknown.`, cmd, id, stages)); }, timeoutMs);
-			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd, stages, nativeMutationObserved: false, onStage: options?.onStage });
+			this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, cleanup, command: cmd,
+				action: typeof args.action === "string" ? args.action : undefined, stages, nativeMutationObserved: false, onStage: options?.onStage });
 			try { options?.onRequestId?.(id); } catch { /* Diagnostics must not affect transport. */ }
 			signal?.addEventListener("abort", onAbort, { once: true });
 			child.stdin.write(`${JSON.stringify({ protocolVersion: WINDOWS_HELPER_PROTOCOL_VERSION, id, cmd, args })}\n`, (error) => {

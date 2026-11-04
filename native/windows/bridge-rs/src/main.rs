@@ -1433,7 +1433,7 @@ fn act_on_ref(
                 &element.automation_id,
                 text,
             )
-            .map_err(stale_ref_from_uia)?
+            .map_err(set_text_failure)?
             {
                 windows_bridge::uia::SetTextResult::Set { value } => {
                     if value != text && parsed.policy != "foreground" {
@@ -1547,6 +1547,14 @@ fn stale_ref_from_uia(message: String) -> ProtocolError {
         ProtocolError::new("Element reference is stale", ErrorCode::StaleRef)
     } else {
         ProtocolError::new(message, ErrorCode::InternalError)
+    }
+}
+
+fn set_text_failure(error: windows_bridge::uia::SetTextError) -> ProtocolError {
+    match error {
+        windows_bridge::uia::SetTextError::Resolution(message) =>
+            ProtocolError::uia_resolution_before_input(message),
+        windows_bridge::uia::SetTextError::Mutation(message) => stale_ref_from_uia(message),
     }
 }
 
@@ -2040,6 +2048,19 @@ mod tests {
         let ordinary = super::stale_ref_from_uia("ElementFromHandle: provider unavailable".to_owned());
         assert_eq!(ordinary.code, windows_bridge::ErrorCode::InternalError);
         assert_eq!(ordinary.message, "ElementFromHandle: provider unavailable");
+    }
+
+    #[test]
+    fn set_text_resolution_failure_has_proof_but_mutation_failure_does_not() {
+        use windows_bridge::uia::SetTextError;
+        let before = super::set_text_failure(SetTextError::Resolution("ElementFromHandle: timeout".into()));
+        let after = super::set_text_failure(SetTextError::Mutation("SetValue: timeout".into()));
+        let before = serde_json::to_value(windows_bridge::Response::err("before", before)).unwrap();
+        let after = serde_json::to_value(windows_bridge::Response::err("after", after)).unwrap();
+        assert_eq!(before["error"]["code"], "uia_resolution_failed");
+        assert_eq!(before["error"]["preflight"]["inputDispatched"], false);
+        assert_eq!(after["error"]["code"], "internal_error");
+        assert!(after["error"].get("preflight").is_none());
     }
 
     #[test]

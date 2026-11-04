@@ -118,6 +118,12 @@ failure and requires explicit recovery; it never reports a clean native result.
 The fence is held in the current process; abrupt process loss requires external
 session recovery and is not evidence that the native action finished.
 
+For a single `setText`, a native failure while resolving the exact UIA target
+returns a versioned before-input receipt. Observe again before deciding on a
+new action. This receipt applies only to the failed `setText`: it does not
+settle an earlier pending action. A `SetValue` failure, transport uncertainty,
+batch failure, or missing/contradictory receipt still requires recovery.
+
 This applies to single, background-first native Windows actions, not batches,
 coordinate clicks, browser windows, strict headless mode, or other platforms.
 During candidate detection concurrent mutating tool calls are rejected before

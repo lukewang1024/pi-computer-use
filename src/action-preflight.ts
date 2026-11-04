@@ -20,7 +20,7 @@ export class ActionPreflightError extends Error {
 
 /** A native receipt checked against its exact helper response and input phase. */
 export class NativeActionPreflightError extends ActionPreflightError {
-	constructor(readonly nativeMessage: string, readonly nativeCode: "foreground_required" | "occluded_target") {
+	constructor(readonly nativeMessage: string, readonly nativeCode: "foreground_required" | "occluded_target" | "uia_resolution_failed") {
 		super(nativeMessage, "observe_ui");
 		this.name = "NativeActionPreflightError";
 	}

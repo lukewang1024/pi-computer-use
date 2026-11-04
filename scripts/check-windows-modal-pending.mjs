@@ -4,6 +4,7 @@ import { ModalContinuation } from "../src/modal-continuation.ts";
 import { parseLookResponse } from "../src/outline.ts";
 import { currentPlatformBackend as backend } from "../src/platform/index.ts";
 import { executeAct, executeFind, executeObserve, executeSearchUi, shutdownComputerUseSession } from "../src/bridge.ts";
+import { NativeActionPreflightError } from "../src/action-preflight.ts";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const root = (windowId, title, enabled, ownerHwnd) => ({
@@ -210,7 +211,17 @@ try {
 		{ action: "press", ref: initialOk.details.matches[0].ref },
 	] }), /only one modal action at a time/);
 	assert.equal(childDispatches, 0, "a rejected modal batch must not send any input");
-	const typed = await call(executeAct, { stateId: freshModal.details.capture.stateId, observationMode: "semantic", actions: [{ action: "setText", ref: label.details.matches[0].ref, text: "表" }] });
+	const workingAct = backend.act;
+	backend.act = async () => { throw new NativeActionPreflightError("ElementFromHandle: timeout", "uia_resolution_failed"); };
+	await assert.rejects(() => call(executeAct, { stateId: freshModal.details.capture.stateId, actions: [{ action: "setText", ref: label.details.matches[0].ref, text: "表" }] }), error => {
+		assert.equal(error.preflight?.inputDispatched, false);
+		return true;
+	});
+	assert.equal(modalValue, "", "a proved resolution failure must not change the label");
+	backend.act = workingAct;
+	const refreshedModal = await call(executeObserve, { root: modalRef, mode: "semantic" });
+	const refreshedLabel = await call(executeSearchUi, { stateId: refreshedModal.details.capture.stateId, text: "Label", role: "edit" });
+	const typed = await call(executeAct, { stateId: refreshedModal.details.capture.stateId, observationMode: "semantic", actions: [{ action: "setText", ref: refreshedLabel.details.matches[0].ref, text: "表" }] });
 	assert.equal(modalValue, "表");
 	const ok = await call(executeSearchUi, { stateId: typed.details.capture.stateId, text: "OK", role: "button" });
 	const closed = await call(executeAct, { stateId: typed.details.capture.stateId, actions: [{ action: "press", ref: ok.details.matches[0].ref }] });
@@ -221,14 +232,26 @@ try {
 	const parentAfterButton = await call(executeSearchUi, { stateId: parentAfter.details.capture.stateId, text: "New Label", role: "button" });
 	await call(executeAct, { stateId: parentAfter.details.capture.stateId, observationMode: "semantic", actions: [{ action: "press", ref: parentAfterButton.details.matches[0].ref }] });
 	assert.equal(modalDispatches, 2, "a completed original action must release the fence for a new request");
+	let finishUncertain;
 	backend.actWithModal = async () => {
 		modalOpen = true;
-		return { kind: "modal_pending", pending: { requestId: "shutdown-request", modal: roots()[1], completion: new Promise(() => {}) } };
+		return { kind: "modal_pending", pending: { requestId: "shutdown-request", modal: roots()[1], completion: new Promise(resolve => { finishUncertain = resolve; }) } };
 	};
 	const priorShutdown = await call(executeObserve, { root: parentRef, mode: "semantic" });
 	const shutdownButton = await call(executeSearchUi, { stateId: priorShutdown.details.capture.stateId, text: "New Label", role: "button" });
 	const unresolved = await call(executeAct, { stateId: priorShutdown.details.capture.stateId, observationMode: "semantic", actions: [{ action: "press", ref: shutdownButton.details.matches[0].ref }] });
 	assert.equal(unresolved.details.status, "modal_pending");
+	const uncertainModal = await call(executeObserve, { root: unresolved.details.target.windowRef, mode: "semantic" });
+	const uncertainLabel = await call(executeSearchUi, { stateId: uncertainModal.details.capture.stateId, text: "Label", role: "edit" });
+	let unknownAttempts = 0;
+	backend.act = async () => { unknownAttempts++; throw Object.assign(new Error("ElementFromHandle: timeout"), { code: "internal_error" }); };
+	await assert.rejects(() => call(executeAct, { stateId: uncertainModal.details.capture.stateId, actions: [{ action: "setText", ref: uncertainLabel.details.matches[0].ref, text: "表" }] }), /ElementFromHandle/);
+	const observeAfterUnknown = await call(executeObserve, { root: unresolved.details.target.windowRef, mode: "semantic" });
+	const labelAfterUnknown = await call(executeSearchUi, { stateId: observeAfterUnknown.details.capture.stateId, text: "Label", role: "edit" });
+	await assert.rejects(() => call(executeAct, { stateId: observeAfterUnknown.details.capture.stateId, actions: [{ action: "setText", ref: labelAfterUnknown.details.matches[0].ref, text: "表" }] }), /recovery/);
+	assert.equal(unknownAttempts, 1, "an ordinary error without preflight proof must remain fenced");
+	finishUncertain({ outcome: "worked" });
+	await sleep(0);
 	await assert.rejects(() => shutdownComputerUseSession(), /unresolved.*recovery/, "closing the host must not falsely certify an unfinished native action");
 	console.log("Windows pending-modal detection and public executor regression checks passed.");
 } finally {

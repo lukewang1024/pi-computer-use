@@ -200,10 +200,10 @@ export class WindowsHelperClient {
 				pending.resolve(parsed.result);
 			} else {
 				const native = parsed.error, proof = native?.preflight;
-				// These receipts originate before point input or a setText mutation.
+				// These receipts originate before input, including an absent look reference.
 				// Codes, absent progress and older helper errors are not evidence.
 				// A batch or observed native mutation must remain conservative.
-				const beforeInput = pending.command === "act" && ["occluded_target", "foreground_required", "uia_resolution_failed"].includes(native?.code)
+				const beforeInput = pending.command === "act" && ["occluded_target", "foreground_required", "uia_resolution_failed", "stale_ref"].includes(native?.code)
 					&& (native.code !== "uia_resolution_failed" || pending.action === "setText")
 					&& typeof native.message === "string"
 					&& Object.keys(native).every(key => ["code", "message", "preflight"].includes(key))

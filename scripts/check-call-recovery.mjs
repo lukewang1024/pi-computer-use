@@ -93,6 +93,28 @@ try{
   assert.deepEqual(policies,['background','foreground']);
  }
 
+ // A Windows secondary gesture must survive the pre-input foreground
+ // escalation without being changed into a primary semantic activation.
+ for(const operation of ['click','press']){
+  current=await fresh('Link');
+  const attempts=[];
+  backend.act=async request=>{
+   attempts.push(request);
+   if(request.policy==='background')throw new NativeActionPreflightError('Foreground required','foreground_required');
+   return {outcome:'unknown',performed:{delivery:'hid'}};
+  };
+  const result=await call(executeAct,{stateId:current.stateId,
+   actions:[{action:operation,ref:current.ref,button:'right',clickCount:1}],observationMode:'semantic'});
+  assert.deepEqual(attempts.map(x=>x.policy),['background','foreground']);
+  for(const request of attempts){
+   assert.equal(request.action,operation);
+   assert.deepEqual(request.target,{ref:'native-link'});
+   assert.equal(request.params.button,'right');
+   assert.equal(request.params.clickCount,1);
+  }
+  assert.equal(result.details.execution.outcome,'unknown');
+ }
+
  current=await fresh('Editor');let nativeCalls=0;
  backend.act=async()=>{
   nativeCalls++;

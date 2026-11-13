@@ -109,6 +109,12 @@ impl ProtocolError {
         Self::before_input(message, ErrorCode::UiaResolutionFailed)
     }
 
+    /// The requested element was absent from the saved look, before any
+    /// provider call or input dispatch. Later stale errors remain unproved.
+    pub fn stale_reference_before_input() -> Self {
+        Self::before_input("Element reference is stale", ErrorCode::StaleRef)
+    }
+
     fn before_input(message: impl Into<String>, code: ErrorCode) -> Self {
         Self {
             message: message.into(),
@@ -163,6 +169,12 @@ mod tests {
         )).unwrap();
         assert_eq!(resolution["error"]["code"], "uia_resolution_failed");
         assert_eq!(resolution["error"]["preflight"], wire["error"]["preflight"]);
+        let stale = serde_json::to_value(Response::err(
+            "stale",
+            ProtocolError::stale_reference_before_input(),
+        )).unwrap();
+        assert_eq!(stale["error"]["code"], "stale_ref");
+        assert_eq!(stale["error"]["preflight"], wire["error"]["preflight"]);
     }
 
     #[test]

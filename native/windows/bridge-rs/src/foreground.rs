@@ -179,7 +179,7 @@ pub fn require_foreground(raw: isize, expected_pid: u64) -> Result<(), ProtocolE
         let observation = observe(hwnd, pid, tid);
         if observation["focused"] != true {
             return Err(ProtocolError::new(
-                format!("Target lost foreground; physical input was not sent: {observation}"),
+                format!("Target lost foreground; this input step was not sent, but earlier input may have been sent: {observation}"),
                 ErrorCode::ForegroundRequired,
             ));
         }
@@ -228,7 +228,7 @@ pub fn activate(raw: isize, expected_pid: u64) -> Result<Value, ProtocolError> {
             let result = uia_fallback(raw, pid, tid).map_err(|e| {
                 ProtocolError::new(
                     format!(
-                        "{e}; physical input was not sent; diagnostics={}",
+                        "{e}; this input step was not sent, but earlier input may have been sent; diagnostics={}",
                         json!({"attempts":observations,"final":observe(hwnd,pid,tid)})
                     ),
                     ErrorCode::ForegroundRequired,

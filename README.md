@@ -65,6 +65,11 @@ pixels, center first, against the original UIA identity and ancestor guard. A
 decorative sibling covering the center does not prevent choosing another exact
 target pixel. Full occlusion, invalid geometry and stale identities remain
 rejected; foreground HWND/PID checks still guard the single input dispatch.
+Secondary-button and multi-click gestures use this guarded pointer path rather
+than UIA's single primary activation; background-only policies cannot send them.
+For an interactive Windows regression against a built helper, run
+`$env:PI_CU_LIVE='1'; npm run test:windows-pointer-live -- --helper C:\path\to\windows-bridge.exe`.
+The test creates its own temporary window and sends pointer input to it.
 
 `reflow_window` is an explicit Windows recovery operation for a normal,
 resizable foreground window with a fresh image-backed state. It makes one
@@ -108,11 +113,12 @@ Deterministic action validation failures carry `code=cu_preflight_rejected` and 
 versioned `preflight` receipt (`phase=before_input`, `inputDispatched=false`,
 `recoverable=true`). `recovery` requests `correct_call`, `observe_ui` or
 `observe_visual`. Validation before entering the write leaves its epoch unchanged,
-so callers can correct the call on that state. Native Windows foreground-policy
-and clear-point guards attach explicit receipts before dispatching input. These
-guards run inside the write, so their `observe_ui` recovery requires a fresh
-observation of the exact root. Foreground escalation preserves this guarantee
-only when every preceding native attempt also proved no input. Ordinary errors,
+so callers can correct the call on that state. Native Windows foreground-policy,
+clear-point and missing saved-reference guards attach explicit receipts before
+dispatching input. These guards run inside the write, so their `observe_ui`
+recovery requires a fresh observation of the exact root. Foreground escalation
+preserves this guarantee only when every preceding native attempt also proved no
+input. Ordinary errors,
 older helpers, a transport timeout, or an executed batch prefix remain uncertain;
 an error code, missing progress or unchanged UI is never proof. The receipt only
 covers this call and does not resolve earlier unknown input. Never replay an
@@ -351,6 +357,8 @@ requires restarting at offset 0. Each call re-enumerates live
 windows, so pages are not a frozen snapshot: verify fresh identities before
 actions, and restart at offset 0 when the window set changes. An offset beyond
 the current result returns an empty page with `hasMore: false`.
+On Windows, discovery also includes a visible foreground window omitted by
+`EnumWindows`, so system flyouts can be identified before further input.
 
 Use `subrole` for an exact platform subrole or Windows window class when many
 windows share the same application and title. This filter is case sensitive

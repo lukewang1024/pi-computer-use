@@ -1333,7 +1333,7 @@ fn action_may_use_physical_input(action: &Value, record: &LookRecord) -> bool {
         return false;
     };
     match parsed.action.as_str() {
-        "press" | "click" => is_web_backed(element) || !element.can_press,
+        "press" | "click" => input::requires_pointer_click(&parsed) || is_web_backed(element) || !element.can_press,
         "setText" => is_web_backed(element) || !element.can_set_value,
         "scroll" => !element.can_scroll,
         _ => true,
@@ -1366,7 +1366,10 @@ fn act_on_ref(
         .elements
         .get(reference)
         .cloned()
-        .ok_or_else(|| ProtocolError::new("Element reference is stale", ErrorCode::StaleRef))?;
+        .ok_or_else(ProtocolError::stale_reference_before_input)?;
+    if input::requires_pointer_click(parsed) {
+        return coordinate_fallback(args, parsed, &element, record.pid);
+    }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
         && matches!(parsed.action.as_str(), "press" | "click")
@@ -2057,6 +2060,21 @@ mod tests {
     }
 
     #[test]
+    fn missing_saved_reference_proves_no_input_but_provider_errors_do_not() {
+        let args = json!({"lookId":"fixture","action":"press","target":{"ref":"@missing"}});
+        let parsed = input::parse_act_request(&args).unwrap();
+        let look = look_with_element(10.0);
+        let missing = act_on_ref(&args, &parsed, &look, "@missing").unwrap_err();
+        let missing = serde_json::to_value(Response::err("fixture", missing)).unwrap();
+        assert_eq!(missing["error"]["code"], "stale_ref");
+        assert_eq!(missing["error"]["preflight"]["inputDispatched"], false);
+        let provider = stale_ref_from_uia("Element reference is stale".to_owned());
+        let provider = serde_json::to_value(Response::err("provider", provider)).unwrap();
+        assert_eq!(provider["error"]["code"], "stale_ref");
+        assert!(provider["error"].get("preflight").is_none());
+    }
+
+    #[test]
     fn set_text_resolution_failure_has_proof_but_mutation_failure_does_not() {
         use windows_bridge::uia::SetTextError;
         let before = super::set_text_failure(SetTextError::Resolution("ElementFromHandle: timeout".into()));
@@ -2454,6 +2472,25 @@ mod tests {
         assert!(!action_may_use_physical_input(&ax_only, &record));
         let coordinates = json!({"lookId":"look","action":"click","policy":"foreground","target":{"x":1,"y":2},"params":{}});
         assert!(action_may_use_physical_input(&coordinates, &record));
+    }
+
+    #[test]
+    fn secondary_click_reserves_physical_input_even_for_invokable_element() {
+        let mut record = look_with_element(1.0);
+        let element = record.elements.get_mut("same-ref").unwrap();
+        element.class_name = "Button".to_owned();
+        element.can_press = true;
+        for (operation, params) in [("click", json!({"button":"right"})),
+                                    ("press", json!({"button":"right"})),
+                                    ("click", json!({"clickCount":2})),
+                                    ("press", json!({"clickCount":2}))] {
+            let action = json!({"lookId":"look","action":operation,"policy":"foreground",
+                "target":{"ref":"same-ref"},"params":params});
+            assert!(action_may_use_physical_input(&action, &record));
+        }
+        let primary = json!({"lookId":"look","action":"click","policy":"foreground",
+            "target":{"ref":"same-ref"},"params":{"button":"left","clickCount":1}});
+        assert!(!action_may_use_physical_input(&primary, &record));
     }
 
     #[test]

@@ -58,6 +58,15 @@ fn is_presentation_window(class_name: &str) -> bool {
     class_name.eq_ignore_ascii_case("MSO_BORDEREFFECT_WINDOW_CLASS")
 }
 
+// EnumWindows can omit the foreground shell UI, including Open With flyouts.
+// Include it once so callers can identify and reconcile the blocking window.
+#[cfg(any(windows, test))]
+fn include_foreground<T: Copy + PartialEq>(windows: &mut Vec<T>, foreground: T, visible: bool) {
+    if visible && !windows.contains(&foreground) {
+        windows.push(foreground);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Window enumeration
 // ---------------------------------------------------------------------------
@@ -399,6 +408,9 @@ fn list_windows_impl(
     }
 
     let foreground = unsafe { GetForegroundWindow() };
+    include_foreground(&mut hwnds, foreground, !foreground.0.is_null() && unsafe {
+        IsWindowVisible(foreground).as_bool()
+    });
     let mut windows_info = Vec::new();
 
     for hwnd in hwnds {
@@ -625,7 +637,7 @@ pub fn ensure_foreground(hwnd: isize, expected_pid: u64) -> Result<(), ProtocolE
         } else {
             Err(ProtocolError::new(
                 format!(
-                    "Windows refused to foreground the target; physical input was not sent: {}",
+                    "Windows refused to foreground the target; this input step was not sent, but earlier input may have been sent: {}",
                     result
                 ),
                 ErrorCode::ForegroundRequired,
@@ -668,7 +680,7 @@ pub fn require_pointer_target(
         let (hit, root, hit_pid) = observe_pointer_hit(x, y);
         if hit == 0 || root != hwnd || hit_pid != expected_pid {
             return Err(ProtocolError::new(format!(
-                "Pointer target is occluded; physical input was not sent: targetHwnd={hwnd}; targetPid={expected_pid}; point=({x},{y}); hitHwnd={}; hitRootHwnd={}; hitPid={hit_pid}", hit, root), ErrorCode::OccludedTarget));
+                "Pointer target is occluded; this input step was not sent, but earlier input may have been sent: targetHwnd={hwnd}; targetPid={expected_pid}; point=({x},{y}); hitHwnd={}; hitRootHwnd={}; hitPid={hit_pid}", hit, root), ErrorCode::OccludedTarget));
         }
         // Re-observe foreground after the hit test; never activate the hit window.
         require_foreground(hwnd, expected_pid)
@@ -704,6 +716,15 @@ mod unit_tests {
     use super::*;
     #[cfg(not(windows))]
     use crate::error::ErrorCode;
+
+    #[test]
+    fn foreground_missing_from_enumeration_is_returned_once_if_visible() {
+        let mut windows = vec![10, 20];
+        include_foreground(&mut windows, 30, true);
+        include_foreground(&mut windows, 30, true);
+        include_foreground(&mut windows, 40, false);
+        assert_eq!(windows, vec![10, 20, 30]);
+    }
 
     #[cfg(windows)]
     #[test]

@@ -60,7 +60,8 @@
 		"native/macos/window_document.swift",
 		"native/macos/root_reference_store.swift",
 		"native/macos/input_recovery.swift",
-		"scripts/recover-native-input.mjs"
+		"scripts/recover-native-input.mjs",
+		"scripts/check-windows-pointer-live.mjs"
 	],
 	"pi": {
 		"extensions": [
@@ -105,6 +106,7 @@
 		"test:linux": "tsx scripts/check-platform-linux.mjs",
 		"test:linux-scripts": "node scripts/check-linux-build-scripts.mjs",
 		"test:linux-live": "PI_CU_LIVE=1 tsx scripts/check-linux-live.mjs",
+		"test:windows-pointer-live": "node scripts/check-windows-pointer-live.mjs",
 		"test:focus-optional-capture": "tsx scripts/check-focus-optional-capture.mjs",
 		"test:readiness-without-capture": "tsx scripts/check-readiness-without-capture.mjs",
 		"test:capture-trace": "tsx scripts/check-capture-trace.mjs",

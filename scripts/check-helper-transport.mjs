@@ -107,7 +107,7 @@ try{
  assert.equal(await client.command('echo',{value:'after-native-error'}),'after-native-error');
 
  const beforeInput={version:1,phase:'before_input',inputDispatched:false,recoverable:true,recovery:'observe_ui'};
- for(const [nativeCode,readStage,action] of [['occluded_target',false,undefined],['occluded_target',true,undefined],['foreground_required',false,undefined],['uia_resolution_failed',true,'setText']]){
+ for(const [nativeCode,readStage,action] of [['occluded_target',false,undefined],['occluded_target',true,undefined],['foreground_required',false,undefined],['uia_resolution_failed',true,'setText'],['stale_ref',true,'press']]){
   await assert.rejects(()=>client.command('act',{nativePreflightFixture:true,proof:beforeInput,readStage,nativeCode,action}),error=>{
    assert.equal(error.code,'cu_preflight_rejected');
    assert.deepEqual(error.preflight,beforeInput);
@@ -123,7 +123,8 @@ try{
   ['act',{proof:{...beforeInput,phase:'after_input'}}],['act',{proof:{...beforeInput,inputDispatched:true}}],
   ['act',{proof:{...beforeInput,recoverable:false}}],['act',{proof:{...beforeInput,recovery:'correct_call'}}],
   ['act',{proof:{...beforeInput,eventsDispatched:1}}],['act',{proof:beforeInput,mutationEvidence:true}],
-  ['act',{proof:beforeInput,nativeCode:'stale_ref'}],['actBatch',{proof:beforeInput}],
+  ['act',{nativeCode:'stale_ref'}],['act',{proof:beforeInput,nativeCode:'stale_ref',afterMutation:true}],
+  ['actBatch',{proof:beforeInput,nativeCode:'stale_ref'}],['actBatch',{proof:beforeInput}],
   ['act',{proof:beforeInput,nativeCode:'uia_resolution_failed'}],
   ['act',{proof:beforeInput,nativeCode:'uia_resolution_failed',action:'press'}],
   ['act',{nativeCode:'uia_resolution_failed',action:'setText'}],

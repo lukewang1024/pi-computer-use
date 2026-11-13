@@ -25,6 +25,7 @@ const requiredPrebuilt = [
 const expected = [
 	"native/cursor_raster.rs",
 	"src/agent-cursor-style.json",
+	"scripts/check-windows-pointer-live.mjs",
 	...requiredPrebuilt,
 	...await listFiles(path.join(rootDir, "prebuilt"), "prebuilt"),
 	...helperSourceRelativePaths,

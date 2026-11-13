@@ -250,6 +250,14 @@ pub struct ParsedActRequest {
     pub params: Value,
 }
 
+// UIA Invoke/Selection is a single primary activation. It cannot represent
+// a secondary button or a multi-click without changing the requested action.
+pub fn requires_pointer_click(request: &ParsedActRequest) -> bool {
+    matches!(request.action.as_str(), "press" | "click")
+        && (request.params.get("button").is_some_and(|v| v.as_str() != Some("left"))
+            || request.params.get("clickCount").is_some_and(|v| v.as_u64() != Some(1)))
+}
+
 pub fn parse_act_request(args: &Value) -> Result<ParsedActRequest, ProtocolError> {
     let look_id = args
         .get("lookId")
@@ -1261,6 +1269,25 @@ mod tests {
         );
         let foreground = parse_act_request(&json!({"lookId":"look_1","action":"click","policy":"foreground","target":{"x":1,"y":1},"params":{}})).unwrap();
         assert!(policy_allows_raw_input(&foreground).is_ok());
+    }
+
+    #[test]
+    fn secondary_and_multiple_clicks_cannot_use_semantic_activation() {
+        for action in ["press", "click"] {
+            for params in [json!({"button":"right"}), json!({"button":"middle"}),
+                           json!({"button":"left","clickCount":2}), json!({"clickCount":3}),
+                           json!({"button":"invalid"}), json!({"clickCount":0})] {
+                let request = parse_act_request(&json!({"lookId":"look_1","action":action,
+                    "policy":"background","target":{"ref":"@e1"},"params":params})).unwrap();
+                assert!(requires_pointer_click(&request));
+                assert_eq!(policy_allows_raw_input(&request).unwrap_err().code, ErrorCode::ForegroundRequired);
+            }
+            for params in [json!({}), json!({"button":"left","clickCount":1})] {
+                let request = parse_act_request(&json!({"lookId":"look_1","action":action,
+                    "target":{"ref":"@e1"},"params":params})).unwrap();
+                assert!(!requires_pointer_click(&request));
+            }
+        }
     }
 
     #[test]

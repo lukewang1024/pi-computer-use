@@ -1,4 +1,5 @@
-//! Exact-HWND activation. Never synthesize input or attach foreign input queues.
+//! Foreground ownership, including active native menus of that exact window.
+//! Never synthesize input or attach foreign input queues to establish ownership.
 use crate::error::{ErrorCode, ProtocolError};
 use serde_json::{json, Value};
 use std::{
@@ -147,23 +148,67 @@ unsafe fn identity(hwnd: HWND) -> Value {
         owners.push(json!({"hwnd":owner.0 as isize,"pid":owner_pid,"threadId":owner_thread}));
         current = owner;
     }
-    json!({"hwnd":hwnd.0 as isize,"className":String::from_utf16_lossy(&class_name[..class_len]),"rootHwnd":root.0 as isize,"pid":pid,"threadId":tid,"valid":IsWindow(hwnd).as_bool(),"visible":IsWindowVisible(hwnd).as_bool(),"enabled":IsWindowEnabled(hwnd).as_bool(),"minimized":IsIconic(hwnd).as_bool(),"ownerChain":owners,"guiThreadInfo":if gui_ok {json!({"activeHwnd":gui.hwndActive.0 as isize,"focusHwnd":gui.hwndFocus.0 as isize,"flags":gui.flags.0})} else {Value::Null}})
+    json!({"hwnd":hwnd.0 as isize,"className":String::from_utf16_lossy(&class_name[..class_len]),"rootHwnd":root.0 as isize,"pid":pid,"threadId":tid,"valid":IsWindow(hwnd).as_bool(),"visible":IsWindowVisible(hwnd).as_bool(),"enabled":IsWindowEnabled(hwnd).as_bool(),"minimized":IsIconic(hwnd).as_bool(),"ownerChain":owners,"guiThreadInfo":if gui_ok {json!({"activeHwnd":gui.hwndActive.0 as isize,"focusHwnd":gui.hwndFocus.0 as isize,"menuOwnerHwnd":gui.hwndMenuOwner.0 as isize,"flags":gui.flags.0})} else {Value::Null}})
+}
+
+fn popup_foreground_matches(target: &Value, foreground: &Value, menu: &Value) -> bool {
+    let menu_flags = u64::from(GUI_INMENUMODE.0);
+    target["className"] == "#32768"
+        && target["visible"] == true
+        && foreground["valid"] == true
+        && foreground["enabled"] == true
+        && foreground["visible"] == true
+        && foreground["minimized"] == false
+        && target["pid"] == foreground["pid"]
+        && target["threadId"] == foreground["threadId"]
+        && target["guiThreadInfo"]["activeHwnd"] == foreground["hwnd"]
+        && target["guiThreadInfo"]["flags"]
+            .as_u64()
+            .is_some_and(|flags| flags & menu_flags == menu_flags)
+        && menu["focused"] == true
+        && menu["ownerRootHwnd"] == foreground["hwnd"]
+        && menu["ownerPid"] == foreground["pid"]
+        && menu["ownerThreadId"] == foreground["threadId"]
+}
+
+unsafe fn popup_state(hwnd: HWND, target: &Value) -> Value {
+    if target["className"] != "#32768" {
+        return Value::Null;
+    }
+    let owner = HWND(
+        target["guiThreadInfo"]["menuOwnerHwnd"]
+            .as_i64()
+            .unwrap_or(0) as *mut _,
+    );
+    let mut owner_pid = 0;
+    let owner_thread = GetWindowThreadProcessId(owner, Some(&mut owner_pid));
+    let mut info = MENUBARINFO {
+        cbSize: size_of::<MENUBARINFO>() as u32,
+        ..Default::default()
+    };
+    // A popup has no independent foreground HWND. Windows reports its focus
+    // through MENUBARINFO and its menu owner through GUITHREADINFO.
+    let result = GetMenuBarInfo(hwnd, OBJID_CLIENT, 0, &mut info);
+    json!({"focused":result.is_ok() && !info.hMenu.0.is_null() && info._bitfield & 1 != 0,"ownerRootHwnd":GetAncestor(owner, GA_ROOT).0 as isize,"ownerPid":owner_pid,"ownerThreadId":owner_thread,"error":result.err().map(|error| error.code().0)})
 }
 
 unsafe fn observe(hwnd: HWND, pid: u32, tid: u32) -> Value {
     let target = identity(hwnd);
     let desktop = desktop_state(tid);
     let foreground = GetForegroundWindow();
+    let foreground_identity = identity(foreground);
+    let menu = popup_state(hwnd, &target);
+    let active_popup = popup_foreground_matches(&target, &foreground_identity, &menu);
     let eligible = target["valid"] == true
         && target["pid"] == pid
         && target["threadId"] == tid
         && target["enabled"] == true
         && desktop["ready"] == true;
-    json!({"eligible":eligible,"focused":eligible && foreground == hwnd && target["minimized"] == false && target["visible"] == true,"target":target,"foreground":identity(foreground),"desktop":desktop})
+    json!({"eligible":eligible,"focused":eligible && (foreground == hwnd || active_popup) && target["minimized"] == false && target["visible"] == true,"target":target,"foreground":foreground_identity,"popup":menu,"desktop":desktop})
 }
 
 /// Check focus continuity without activating a window or changing the caret.
-/// Even an implicit keyboard target must remain the exact foreground HWND.
+/// A native popup must still be active and owned by the exact foreground HWND.
 pub fn require_foreground(raw: isize, expected_pid: u64) -> Result<(), ProtocolError> {
     ensure_activation_safe()?;
     unsafe {
@@ -205,7 +250,12 @@ pub fn activate(raw: isize, expected_pid: u64) -> Result<Value, ProtocolError> {
         let mut observations = vec![json!({"step":"initial","observation":initial})];
         for step in 0..6 {
             let before = observe(hwnd, pid, tid);
-            if before["focused"] == true || before["eligible"] != true {
+            // Activating a #32768 HWND dismisses the existing popup. An inactive
+            // or unverified menu must be rejected without changing its owner.
+            if before["focused"] == true
+                || before["eligible"] != true
+                || before["target"]["className"] == "#32768"
+            {
                 break;
             }
             let api = match step {
@@ -224,7 +274,10 @@ pub fn activate(raw: isize, expected_pid: u64) -> Result<Value, ProtocolError> {
             observations.push(json!({"step":step,"api":api,"observation":observe(hwnd,pid,tid)}));
         }
         let before_uia = observe(hwnd, pid, tid);
-        if before_uia["focused"] != true && before_uia["eligible"] == true {
+        if before_uia["focused"] != true
+            && before_uia["eligible"] == true
+            && before_uia["target"]["className"] != "#32768"
+        {
             let result = uia_fallback(raw, pid, tid).map_err(|e| {
                 ProtocolError::new(
                     format!(
@@ -372,6 +425,65 @@ pub fn capture_state(raw: isize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn popup_requires_live_focus_and_its_exact_foreground_owner() {
+        let target = json!({"className":"#32768","visible":true,"pid":7,"threadId":8,
+            "guiThreadInfo":{"activeHwnd":10,"flags":20}});
+        let foreground = json!({"hwnd":10,"valid":true,"visible":true,"enabled":true,
+            "minimized":false,"pid":7,"threadId":8});
+        let menu = json!({"focused":true,"ownerRootHwnd":10,"ownerPid":7,"ownerThreadId":8});
+        assert!(popup_foreground_matches(&target, &foreground, &menu));
+        // Menubar and system-menu popups need not set GUI_POPUPMENUMODE.
+        for flags in [4, 12] {
+            let mut active = target.clone();
+            active["guiThreadInfo"]["flags"] = json!(flags);
+            assert!(popup_foreground_matches(&active, &foreground, &menu));
+        }
+
+        for (field, value) in [
+            ("focused", json!(false)),
+            ("ownerRootHwnd", json!(11)),
+            ("ownerPid", json!(9)),
+            ("ownerThreadId", json!(9)),
+        ] {
+            let mut invalid = menu.clone();
+            invalid[field] = value;
+            assert!(!popup_foreground_matches(&target, &foreground, &invalid));
+        }
+        for flags in [0, 16] {
+            let mut inactive = target.clone();
+            inactive["guiThreadInfo"]["flags"] = json!(flags);
+            assert!(!popup_foreground_matches(&inactive, &foreground, &menu));
+        }
+        for (field, value) in [
+            ("className", json!("STATIC")),
+            ("visible", json!(false)),
+            ("pid", json!(9)),
+            ("threadId", json!(9)),
+            ("guiThreadInfo", Value::Null),
+        ] {
+            let mut invalid = target.clone();
+            invalid[field] = value;
+            assert!(!popup_foreground_matches(&invalid, &foreground, &menu));
+        }
+        for (field, value) in [
+            ("hwnd", json!(11)),
+            ("valid", json!(false)),
+            ("visible", json!(false)),
+            ("enabled", json!(false)),
+            ("minimized", json!(true)),
+        ] {
+            let mut invalid = foreground.clone();
+            invalid[field] = value;
+            assert!(!popup_foreground_matches(&target, &invalid, &menu));
+        }
+        assert!(!popup_foreground_matches(
+            &target,
+            &foreground,
+            &Value::Null
+        ));
+    }
     #[test]
     fn desktop_gate_rejects_locked_disconnected_and_wrong_desktops() {
         assert!(interactive_desktop_ready(

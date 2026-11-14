@@ -36,6 +36,17 @@ $button.SetBounds(100,90,250,80)
 $button.Add_MouseUp({ param($sender,$eventArgs) if($eventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Right){Add-Content -LiteralPath $env:PI_CU_FIXTURE_EVENTS -Value 'right_up'} elseif($eventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left){Add-Content -LiteralPath $env:PI_CU_FIXTURE_EVENTS -Value 'left_up'} })
 $button.Add_Click({ Add-Content -LiteralPath $env:PI_CU_FIXTURE_EVENTS -Value 'activated' })
 $form.Controls.Add($button)
+$menuButton = New-Object System.Windows.Forms.Button
+$menuButton.Text = 'Menu test button'
+$menuButton.SetBounds(100,190,250,50)
+$menu = New-Object System.Windows.Forms.ContextMenu
+$open = New-Object System.Windows.Forms.MenuItem '&Open with'
+$choice = New-Object System.Windows.Forms.MenuItem '&Choice'
+$choice.Add_Click({ Add-Content -LiteralPath $env:PI_CU_FIXTURE_EVENTS -Value 'menu_selected' })
+[void]$open.MenuItems.Add($choice)
+[void]$menu.MenuItems.Add($open)
+$menuButton.ContextMenu = $menu
+$form.Controls.Add($menuButton)
 $form.Add_Shown({ [IO.File]::WriteAllText($env:PI_CU_FIXTURE_LOG,'shown'); $form.Activate() })
 [void]$form.ShowDialog()
 } catch { [IO.File]::WriteAllText($env:PI_CU_FIXTURE_LOG,$_.Exception.ToString()); exit 1 }
@@ -63,10 +74,10 @@ function request(cmd,args={}) {
   helper.stdin.write(JSON.stringify({protocolVersion:4,id,cmd,args})+'\n');
  });
 }
-function findButton(node) {
+function findButton(node, title='Pointer test button') {
  if (!node || typeof node !== 'object') return null;
- if (node.title === 'Pointer test button' && node.ref) return node;
- for (const child of node.children ?? []) { const found=findButton(child); if(found)return found; }
+ if (node.title === title && node.ref) return node;
+ for (const child of node.children ?? []) { const found=findButton(child,title); if(found)return found; }
  return null;
 }
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -107,6 +118,39 @@ try {
    results.push({action,button,count,background:background.error.code,foreground:foreground.result.outcome,events});
   }
  }
+ const look=await request('look',{rootRef:root.rootRef,includeImage:true});
+ assert.equal(look.ok,true,JSON.stringify(look.error));
+ const menuButton=findButton(look.result.outline,'Menu test button'); assert(menuButton);
+ fs.rmSync(eventsPath,{force:true});
+ const opened=await request('act',{lookId:look.result.lookId,action:'click',target:{ref:menuButton.ref},params:{button:'right'},policy:'foreground'});
+ assert.equal(opened.ok,true,JSON.stringify(opened.error));
+ const menus=async()=>{
+  const response=await request('listRoots'); assert.equal(response.ok,true,JSON.stringify(response.error));
+  return response.result.roots.filter(item=>item.pid===fixture.pid&&item.kind==='menu');
+ };
+ const parent=(await menus())[0]; assert(parent,'context menu missing');
+ const key=async(menu,keys,policy='foreground')=>{
+  const observed=await request('look',{rootRef:menu.rootRef,includeImage:false});
+  assert.equal(observed.ok,true,JSON.stringify(observed.error));
+  return request('act',{lookId:observed.result.lookId,action:'keypress',target:{ref:menu.rootRef},params:{keys},policy});
+ };
+ const background=await key(parent,['DOWN'],'background');
+ assert.equal(background.ok,false);
+ assert.equal(background.error.code,'foreground_required');
+ assert((await menus()).some(item=>item.windowId===parent.windowId),'background refusal dismissed menu');
+ for(const keys of [['DOWN'],['RIGHT']]) {
+  const response=await key(parent,keys);
+  assert.equal(response.ok,true,JSON.stringify(response.error));
+ }
+ const submenu=(await menus()).find(item=>item.windowId!==parent.windowId);
+ assert(submenu,'foreground keyboard input did not open the submenu');
+ const selected=await key(submenu,['ENTER']);
+ assert.equal(selected.ok,true,JSON.stringify(selected.error));
+ await sleep(300);
+ const menuEvents=fs.existsSync(eventsPath)?fs.readFileSync(eventsPath,'utf8').trim().split(/\r?\n/):[];
+ assert.deepEqual(menuEvents,['menu_selected'],'menu action must select exactly once');
+ assert.equal((await menus()).length,0,'selected menu did not close');
+ results.push({action:'native-menu-keyboard',background:background.error.code,events:menuEvents});
  console.log(JSON.stringify({status:'passed',results}));
 } catch(error) {
  const fixtureLog=fs.existsSync(fixtureLogPath)?fs.readFileSync(fixtureLogPath,'utf8'):'';

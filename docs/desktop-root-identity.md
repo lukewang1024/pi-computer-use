@@ -52,7 +52,8 @@ before acting, and never treat a partial page as a complete inventory.
 
 Windows returned action errors retain `nativeActionDiagnostics` alongside the
 original error code and message. The versioned record contains the command
-(`act` or `actBatch`) and at most 32 correlated, allowlisted progress stages.
+and at most 32 correlated, allowlisted progress stages. Observations also trace
+PrintWindow and UIA resolution, subtree discovery, properties and ancestry reads.
 Only stage names and bounded elapsed times are retained; action arguments and
 unrelated helper stderr are discarded. SDK error compaction preserves the
 original error as its cause for trusted downstream diagnostics.

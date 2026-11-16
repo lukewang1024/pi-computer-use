@@ -24,6 +24,14 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
  const r=JSON.parse(line);
  if(r.cmd==='exit')return process.exit(0);
  if(r.cmd==='silent')return;
+ if(r.args.readFailureFixture){
+  fs.writeSync(2,'\\n'+JSON.stringify({event:'cu_action_phase',requestId:r.id,stage:'print_window_started',elapsedMs:3})+'\\n');
+  setTimeout(()=>process.stdout.write(JSON.stringify({id:r.id,protocolVersion:r.protocolVersion,ok:false,error:{code:'capture_failed',message:'GDI read worker deadline exceeded; terminated and reaped'}})+'\\n'),30);return;
+ }
+ if(r.args.partialReadFixture){
+  fs.writeSync(2,JSON.stringify({event:'cu_action_phase',requestId:r.id,stage:'uia_find_all_started',elapsedMs:10})+'\\n');
+  setTimeout(()=>process.stdout.write(JSON.stringify({id:r.id,protocolVersion:r.protocolVersion,ok:true,result:{uiaDiagnostics:{status:'incomplete',reason:'read_timeout'}}})+'\\n'),30);return;
+ }
  if(r.args.nativePreflightFixture){
   const emit=(id,stage,elapsedMs=1)=>fs.writeSync(2,JSON.stringify({event:'cu_action_phase',requestId:id,stage,elapsedMs})+'\\n');
   emit('different-request','native_mutation_started');
@@ -75,6 +83,13 @@ client.ensureInstalled=async()=>{};
 try{
  assert.equal(await client.command('stderr-pressure',{value:'windows-drained'},{timeoutMs:3000}),'windows-drained');
  assert.equal(await client.command('echo',{value:'fragmented'}),'fragmented');
+ for(const command of ['look','screenshot'])await assert.rejects(()=>client.command(command,{readFailureFixture:true}),error=>{
+  assert.equal(error.code,'capture_failed');assert.equal(error.outcome,undefined);
+  assert.match(error.requestId,/^[a-z0-9-]+$/);
+  assert.deepEqual(error.stages,[{stage:'print_window_started',elapsedMs:3}]);return true;
+ });
+ assert.deepEqual((await client.command('look',{partialReadFixture:true})).uiaDiagnostics,
+  {status:'incomplete',reason:'read_timeout',readStages:[{stage:'uia_find_all_started',elapsedMs:10}]});
  const unrelated=client.command('echo',{value:'isolated',delay:10});
  let progressId;const progress=[];
  await assert.rejects(()=>client.command('act',{phaseFixture:true},{timeoutMs:200,onRequestId:id=>{progressId=id;},onStage:stage=>progress.push(stage)}),error=>{

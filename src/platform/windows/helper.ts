@@ -145,7 +145,7 @@ export class WindowsHelperClient {
 			if (this.child !== child) return;
 			diagnostics.push(chunk, (id, stage) => {
 				const pending = this.pending.get(id);
-				if (!pending || !["act", "actBatch", "reflowWindow"].includes(pending.command)) return;
+				if (!pending || !["act", "actBatch", "reflowWindow", "look", "screenshot"].includes(pending.command)) return;
 				// A bounded or reordered diagnostic history must not forget a
 				// contradictory mutation once it has been observed for this ID.
 				if (stage.stage === "native_mutation_started" || stage.stage === "native_mutation_returned") pending.nativeMutationObserved = true;
@@ -197,6 +197,9 @@ export class WindowsHelperClient {
 			if (parsed.protocolVersion !== WINDOWS_HELPER_PROTOCOL_VERSION) {
 				pending.reject(transportUnknownError(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`, pending.command, parsed.id, pending.stages));
 			} else if (parsed.ok === true) {
+				if (["look", "screenshot"].includes(pending.command) && parsed.result?.uiaDiagnostics?.status === "incomplete") {
+					parsed.result.uiaDiagnostics.readStages = pending.stages.map(row => ({...row}));
+				}
 				pending.resolve(parsed.result);
 			} else {
 				const native = parsed.error, proof = native?.preflight;
@@ -222,6 +225,9 @@ export class WindowsHelperClient {
 						version: 1, command: pending.command,
 						stages: pending.stages.map(row => ({ ...row })),
 					} });
+				}
+				if (["look", "screenshot"].includes(pending.command)) {
+					Object.assign(error, { requestId: parsed.id, stages: pending.stages.map(row => ({...row})) });
 				}
 				pending.reject(error);
 			}

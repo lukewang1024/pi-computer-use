@@ -19,4 +19,11 @@ for (const value of ["bad json\n", frame("invalid id"), frame("request-3", -1), 
 assert.equal(rows.length, 2);
 assert.equal(sanitizeActionStages(Array.from({length: 100}, () => ({stage:"request_started",elapsedMs:0}))).length, 32);
 assert.deepEqual(sanitizeActionStages(null), []);
+for (const stage of ["observation_started", "print_window_started", "print_window_finished",
+ "uia_read_worker_started", "uia_read_worker_finished", "uia_element_from_handle_started",
+ "uia_element_from_handle_finished", "uia_find_all_started", "uia_find_all_finished",
+ "uia_properties_started", "uia_properties_finished", "uia_ancestry_started", "uia_ancestry_finished"]) {
+ parser.push(JSON.stringify({event:"cu_action_phase", requestId:"read-1",stage,elapsedMs:3,secret:"discard"})+"\n",receive);
+ assert.deepEqual(rows.at(-1),{id:"read-1",stage,elapsedMs:3});
+}
 console.log("PASS bounded Windows diagnostic framing, malformed/oversized rejection and argument redaction; no input");

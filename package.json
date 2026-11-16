@@ -1,6 +1,6 @@
 {
 	"name": "@injaneity/pi-computer-use",
-	"version": "0.5.2-workbench.152",
+	"version": "0.5.2-workbench.153",
 	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
 	"type": "module",
 	"keywords": [
@@ -61,7 +61,8 @@
 		"native/macos/root_reference_store.swift",
 		"native/macos/input_recovery.swift",
 		"scripts/recover-native-input.mjs",
-		"scripts/check-windows-pointer-live.mjs"
+		"scripts/check-windows-pointer-live.mjs",
+		"scripts/check-windows-observation-live.mjs"
 	],
 	"pi": {
 		"extensions": [
@@ -81,6 +82,7 @@
 		"test:permissions": "tsx scripts/check-permission-readiness.mjs",
 		"test:presigned-helper": "node scripts/check-presigned-helper-update.mjs",
 		"test:action-preflight": "tsx scripts/check-action-preflight.mjs && tsx scripts/check-call-recovery.mjs",
+		"test:windows-observation-live": "node scripts/check-windows-observation-live.mjs",
 		"test:helper-transport": "tsx scripts/check-helper-transport.mjs && tsx scripts/check-linux-helper-transport.mjs && tsx scripts/check-windows-action-diagnostics.mjs && tsx scripts/check-windows-modal-pending.mjs && tsx scripts/check-windows-modal-transport.mjs",
 		"test:bridge-unknown": "tsx scripts/check-cu-bridge-unknown.mjs && tsx scripts/check-closed-root-capture.mjs && tsx scripts/check-native-transaction-interruptions.mjs && npm run test:input-recovery",
 		"test:input-recovery": "tsx scripts/check-input-recovery.mjs && node scripts/check-native-input-recovery.mjs",

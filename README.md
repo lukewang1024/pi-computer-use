@@ -60,6 +60,14 @@ Explicit local macOS builds reuse an existing signed helper across SDK-only vers
 
 On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 
+Window capture and UIA extraction run in disposable read-only processes. A target
+whose UI thread stops responding cannot leave PrintWindow blocking a helper
+request indefinitely. Capture workers have a 3.5-second deadline; timeout returns
+`capture_failed` after termination and reap, without repeating the capture or
+replaying input. Request-correlated phases distinguish capture from UIA stalls.
+To verify timeout, reap and subsequent healthy reads on owned test windows, run
+`$env:PI_CU_LIVE='1'; npm run test:windows-observation-live -- --helper C:\path\to\windows-bridge.exe`.
+
 Windows native element pointer fallback checks at most nine interior physical
 pixels, center first, against the original UIA identity and ancestor guard. A
 decorative sibling covering the center does not prevent choosing another exact

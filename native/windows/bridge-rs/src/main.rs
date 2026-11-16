@@ -137,6 +137,14 @@ fn with_physical_input<T>(
 
 fn main() {
     #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--read-only-capture") {
+        set_dpi_awareness();
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() != 3 { std::process::exit(2); }
+        println!("{}", capture::read_only_worker(&args[2]));
+        return;
+    }
+    #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
         set_dpi_awareness();
         windows_bridge::uia_action_worker::serve();
@@ -256,7 +264,7 @@ fn handle_request(request: &Request) -> Response {
         return Response::err(&request.id, ProtocolError::new(format!("Unsupported Windows helper protocol {}; expected {}. Restart Pi to use the installed helper.", request.protocol_version, PROTOCOL_VERSION), ErrorCode::InvalidRequest));
     }
 
-    let _trace = matches!(request.cmd.as_str(), "act" | "actBatch" | "reflowWindow")
+    let _trace = matches!(request.cmd.as_str(), "act" | "actBatch" | "reflowWindow" | "look" | "screenshot")
         .then(|| windows_bridge::action_trace::begin(&request.id));
     let result = match request.cmd.as_str() {
         "cursorStatus" => Ok(windows_bridge::agent_cursor::status()),
@@ -380,6 +388,7 @@ fn include_look_elements(args: &Value) -> Result<bool, ProtocolError> {
 }
 
 fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
+    windows_bridge::action_trace::phase("observation_started");
     let include_elements = include_look_elements(args)?;
     let started_at = Instant::now();
     let root_ref = args

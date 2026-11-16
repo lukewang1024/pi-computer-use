@@ -88,8 +88,9 @@ try{
   assert.match(error.requestId,/^[a-z0-9-]+$/);
   assert.deepEqual(error.stages,[{stage:'print_window_started',elapsedMs:3}]);return true;
  });
- assert.deepEqual((await client.command('look',{partialReadFixture:true})).uiaDiagnostics,
-  {status:'incomplete',reason:'read_timeout',readStages:[{stage:'uia_find_all_started',elapsedMs:10}]});
+ let readRequestId;
+ assert.deepEqual((await client.command('look',{partialReadFixture:true},{onRequestId:id=>{readRequestId=id;}})).uiaDiagnostics,
+  {status:'incomplete',reason:'read_timeout',requestId:readRequestId,readStages:[{stage:'uia_find_all_started',elapsedMs:10}]});
  const unrelated=client.command('echo',{value:'isolated',delay:10});
  let progressId;const progress=[];
  await assert.rejects(()=>client.command('act',{phaseFixture:true},{timeoutMs:200,onRequestId:id=>{progressId=id;},onStage:stage=>progress.push(stage)}),error=>{

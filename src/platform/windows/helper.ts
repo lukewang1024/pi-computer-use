@@ -198,6 +198,7 @@ export class WindowsHelperClient {
 				pending.reject(transportUnknownError(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`, pending.command, parsed.id, pending.stages));
 			} else if (parsed.ok === true) {
 				if (["look", "screenshot"].includes(pending.command) && parsed.result?.uiaDiagnostics?.status === "incomplete") {
+					parsed.result.uiaDiagnostics.requestId = parsed.id;
 					parsed.result.uiaDiagnostics.readStages = pending.stages.map(row => ({...row}));
 				}
 				pending.resolve(parsed.result);

@@ -216,7 +216,7 @@ interface TerminalDesktopActionDetails {
 		nativeWindowRef?: string;
 	};
 	execution: ExecutionTrace;
-	error: { code: string; message: string };
+	error: { code: string; message: string; nativeCode?: string; requestId?: string; stages?: ReturnType<typeof sanitizeActionStages> };
 }
 
 
@@ -2569,6 +2569,10 @@ async function terminalDesktopActionResult(
 	const partialCode = inputRecovered ? execution.error?.code : execution.error?.code === "modifier_interrupted_after_partial_hid" ? "modifier_interrupted_after_partial_hid" : "foreground_interrupted_after_partial_hid";
 	const code = batchUnknown ? "batch_step_unconfirmed" : semanticUnknown ? "semantic_dispatch_unknown" : transportUnknown ? "helper_transport_unknown" : partialInputUnknown ? (partialCode ?? "foreground_interrupted_after_partial_hid") : targetClosed ? "target_closed" : "post_action_observation_failed";
 	const message = error instanceof Error ? error.message : String(error);
+	const readError = error instanceof Error && !dispatchUnknown && !targetClosed
+		? error as Error & { code?: unknown; requestId?: unknown; stages?: unknown } : undefined;
+	const readRequestId = typeof readError?.requestId === "string" && /^[a-zA-Z0-9-]{1,128}$/.test(readError.requestId)
+		? readError.requestId : undefined;
 	clearDesktopOperationState(operationState());
 	const details: TerminalDesktopActionDetails = {
 		tool: "act_ui",
@@ -2584,7 +2588,11 @@ async function terminalDesktopActionResult(
 			nativeWindowRef: target.nativeWindowRef,
 		},
 		execution,
-		error: { code, message },
+		error: { code, message, ...(readRequestId ? {
+			requestId: readRequestId,
+			nativeCode: typeof readError?.code === "string" && /^[a-z_]{1,64}$/.test(readError.code) ? readError.code : undefined,
+			stages: sanitizeActionStages(readError?.stages),
+		} : {}) },
 	};
 	const unreleasedKeys = execution.inputDispatch?.unreleasedKeys ?? [];
 	const unreleasedButtons = execution.inputDispatch?.unreleasedMouseButtons ?? [];

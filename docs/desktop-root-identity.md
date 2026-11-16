@@ -56,12 +56,17 @@ and at most 32 correlated, allowlisted progress stages. Observations also trace
 PrintWindow and UIA resolution, subtree discovery, properties and ancestry reads.
 Only stage names and bounded elapsed times are retained; action arguments and
 unrelated helper stderr are discarded. SDK error compaction preserves the
-original error as its cause for trusted downstream diagnostics.
+original error as its cause for trusted downstream diagnostics. A failed
+post-action observation retains its native request ID, code and sanitized stages
+in `error`; it does not change the preceding action's dispatch receipt.
 
 The stdout error response and stderr progress travel on independent pipes.
 Stages may be missing, delayed, or incomplete. Neither a mutation stage nor its
 absence establishes delivery, completion, a safe retry, or foreground identity.
 These diagnostics never replace the existing action outcome or input guards.
+After foreground escalation, `backgroundAttempt` describes only the earlier
+attempt. It omits that preflight's recovery instruction; final delivery and any
+unverified effect remain in the foreground execution receipt.
 
 Windows UIA identity errors distinguish the bounded resolver reasons
 `Element reference has no identity`, `Element reference is ambiguous` and

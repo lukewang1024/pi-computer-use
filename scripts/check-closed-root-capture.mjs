@@ -16,7 +16,7 @@ async function scenario(options={}) {
    if(options.probeError)throw Error('Identity read failed');
    return options.available || options.reappears && probes>1 ? [root,other] : [other];
   },getFrontmost:async()=>({appName:'Fixture',pid:7,windowId:10,rootRef:'native-root'}),
-  observe:async()=>{if(dispatched)postCaptures++;return parseLookResponse({lookId:'fixture-look-'+postCaptures,capturedAt:Date.now()/1000,window:{windowId:10,framePoints:root.framePoints,scaleFactor:1,isModal:false},outline:{ref:'native-button',role:'button',title:'Close',canPress:true,actions:['press'],children:[]},timings:{}});},
+  observe:async()=>{if(dispatched){postCaptures++;if(options.captureError)throw Object.assign(Error('GDI read worker deadline exceeded; terminated and reaped'),{code:'capture_failed',requestId:'capture-after-press',stages:[{stage:'print_window_started',elapsedMs:5,privateText:'discard'},{stage:'unrecognized',elapsedMs:9}]});}return parseLookResponse({lookId:'fixture-look-'+postCaptures,capturedAt:Date.now()/1000,window:{windowId:10,framePoints:root.framePoints,scaleFactor:1,isModal:false},outline:{ref:'native-button',role:'button',title:'Close',canPress:true,actions:['press'],children:[]},timings:{}});},
   act:async()=>{
    dispatched=true;dispatches++;
    if(options.transportUnknown)throw Object.assign(Error('Response lost'),{code:'helper_transport_unknown',outcome:'unknown',command:'act',requestId:'request-exact',requestWriteAttempted:true});
@@ -45,11 +45,20 @@ async function scenario(options={}) {
   }else{
    assert.equal(postCaptures,1,'unproven closure must preserve normal successor capture');
    assert.notEqual(result.details.status,'target_closed');
+   if(options.captureError){
+    assert.equal(result.details.status,'post_action_observation_failed');
+    assert.equal(result.details.execution.dispatchCompletion,'returned');
+    assert.equal(result.details.error.nativeCode,'capture_failed');
+    assert.equal(result.details.error.requestId,'capture-after-press');
+    assert.deepEqual(result.details.error.stages,[{stage:'print_window_started',elapsedMs:5}]);
+    await assert.rejects(()=>call(executeAct,params));
+    assert.equal(dispatches,1,'failed successor capture cannot replay delivered input');
+   }
   }
  }finally{await shutdownComputerUseSession();}
 }
 try{
  for(const options of [{},{available:true},{reappears:true},{probeError:true},{unrelated:true,available:true},{wrongPid:true,available:true},{transportUnknown:true},{condition:'absent'},{condition:'present'},
-  {remapped:true},{remapped:true,available:true},{remapped:true,reappears:true},{remapped:true,wrongPid:true},{wrongHwnd:true}])await scenario(options);
- console.log('Closed-root capture regressions passed (14 injected native scenarios)');
+  {remapped:true},{remapped:true,available:true},{remapped:true,reappears:true},{remapped:true,wrongPid:true},{wrongHwnd:true},{available:true,captureError:true}])await scenario(options);
+ console.log('Closed-root capture regressions passed (15 injected native scenarios)');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

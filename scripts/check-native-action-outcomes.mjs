@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {executeFind,executeObserve,executeSearchUi,executeAct,shutdownComputerUseSession} from '../src/bridge.ts';
 import {currentPlatformBackend} from '../src/platform/index.ts';
+import {NativeActionPreflightError} from '../src/action-preflight.ts';
 import * as sdk from '@earendil-works/pi-coding-agent';
 import {Value} from 'typebox/value';
 // Controlled backend results exercise registered tools. No native helper/input.
@@ -185,7 +186,34 @@ try{
   assert.equal(result.details.execution.backgroundFirst,false);
  }
  }
- console.log('Registered native action outcome integration passed (3 controlled outcomes; no native input)');
+ // A historical background rejection must not instruct the caller to replay
+ // the foreground action, whether its dispatch returned or remained unknown.
+ currentPlatformBackend.name='windows';currentPlatformBackend.actWithModal=undefined;
+ for(const completion of ['returned','unknown']){
+  calls=[];
+  currentPlatformBackend.act=async(request)=>{
+   calls.push(request);
+   if(request.policy==='background')throw new NativeActionPreflightError('Background policy requires foreground','foreground_required');
+   if(completion==='unknown')throw Object.assign(new Error('Foreground response lost'),{code:'helper_transport_unknown',outcome:'unknown',command:'act',requestId:'foreground-fixture',requestWriteAttempted:true});
+   return {outcome:'unknown',performed:{grounding:'description',delivery:'hid'}};
+  };
+  const found=await call('find_roots',{text:root.title});
+  const observed=await call('observe_ui',{root:found.details.windows[0].windowRef,mode:'semantic'});
+  const matches=await call('search_ui',{stateId:observed.details.capture.stateId,text:'Commit',role:'button'});
+  const ref=matches.details.matches.find(m=>m.matchReason==='exact').ref;
+  const result=await call('act_ui',{stateId:observed.details.capture.stateId,actions:[{action:'press',ref}],observationMode:'semantic'});
+  assert.deepEqual(calls.map(c=>c.policy),['background','foreground'],'One refused attempt and one foreground attempt; no replay');
+  const execution=result.details.execution;
+  assert.equal(execution.dispatchCompletion,completion);
+  assert.equal(execution.outcome,'unknown');
+  assert.equal(execution.escalatedToForeground,true);
+  assert.match(execution.backgroundAttempt.reason,/Initial background attempt only/);
+  assert.doesNotMatch(execution.backgroundAttempt.reason,/Input was not sent|Correct the call/);
+  assert.equal(execution.backgroundAttempt.reason,execution.steps[0].backgroundAttempt.reason);
+  assert.match(result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n'),completion==='returned'?/Do not automatically repeat/:/Do not retry this action/);
+  await shutdownComputerUseSession();
+ }
+ console.log('Registered native action outcome integration passed (controlled outcomes and historical escalation diagnostics; no native input)');
 }finally{
  await shutdownComputerUseSession();
  Object.assign(currentPlatformBackend,original);

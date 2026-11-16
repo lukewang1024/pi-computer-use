@@ -1533,16 +1533,24 @@ async function helperAct(
 			transport.backgroundFirst = true;
 			transport.escalatedToForeground = true;
 			transport.escalationReason = code;
-			transport.backgroundAttempt = { outcome: "foreground_required", reason: error instanceof Error ? error.message : String(error) };
+			transport.backgroundAttempt = { outcome: "foreground_required", reason: historicalBackgroundReason(error) };
 			return transport;
 		}
 		const trace = executionTraceFromAct(foreground, "foreground");
 		trace.backgroundFirst = true;
 		trace.escalatedToForeground = true;
 		trace.escalationReason = code;
-		trace.backgroundAttempt = { outcome: "foreground_required", reason: error instanceof Error ? error.message : String(error) };
+		trace.backgroundAttempt = { outcome: "foreground_required", reason: historicalBackgroundReason(error) };
 		return trace;
 	}
+}
+
+function historicalBackgroundReason(error: unknown): string {
+	// A completed escalation must not carry the earlier preflight's instruction
+	// to repeat/correct the call into the final action receipt.
+	const cause = error instanceof NativeActionPreflightError ? error.nativeMessage
+		: error instanceof Error ? error.message : String(error);
+	return `Initial background attempt only: ${cause}. A foreground attempt followed; its delivery is recorded separately.`;
 }
 
 function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, policy = currentDeliveryPolicy()): PlatformActRequest {

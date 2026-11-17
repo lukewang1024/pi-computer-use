@@ -7,14 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn run(command: &mut Command, budget: Duration, max_output: usize) -> Result<Vec<u8>, String> {
+pub fn run(command: &mut Command, budget: Duration, max_output: usize, kind: &str) -> Result<Vec<u8>, String> {
     let started = Instant::now();
     let mut child = command
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("UIA read worker spawn: {e}"))?;
+        .map_err(|e| format!("{kind} read worker spawn: {e}"))?;
     let stdout = child.stdout.take().expect("piped worker stdout");
     // Drain concurrently: waiting for exit before reading deadlocks when an
     // otherwise healthy outline exceeds the OS pipe capacity.
@@ -40,13 +40,13 @@ pub fn run(command: &mut Command, budget: Duration, max_output: usize) -> Result
                     if !matches!(child.try_wait(), Ok(Some(_))) {
                         child
                             .kill()
-                            .map_err(|e| format!("UIA read worker termination failed: {e}"))?;
+                            .map_err(|e| format!("{kind} read worker termination failed: {e}"))?;
                     }
                     child
                         .wait()
-                        .map_err(|e| format!("UIA read worker reap failed: {e}"))?;
+                        .map_err(|e| format!("{kind} read worker reap failed: {e}"))?;
                     return Err(
-                        "UIA read worker output limit exceeded; terminated and reaped".into(),
+                        format!("{kind} read worker output limit exceeded; terminated and reaped"),
                     );
                 }
                 drained_output = Some(result);
@@ -60,13 +60,13 @@ pub fn run(command: &mut Command, budget: Duration, max_output: usize) -> Result
                 // or activation methods are reachable in this worker mode.
                 child
                     .kill()
-                    .map_err(|e| format!("UIA read worker termination failed: {e}"))?;
+                    .map_err(|e| format!("{kind} read worker termination failed: {e}"))?;
                 child
                     .wait()
-                    .map_err(|e| format!("UIA read worker reap failed: {e}"))?;
+                    .map_err(|e| format!("{kind} read worker reap failed: {e}"))?;
                 return Err(match result {
-                    Err(e) => format!("UIA read worker wait failed: {e}"),
-                    _ => "UIA read worker deadline exceeded; terminated and reaped".into(),
+                    Err(e) => format!("{kind} read worker wait failed: {e}"),
+                    _ => format!("{kind} read worker deadline exceeded; terminated and reaped"),
                 });
             }
         }
@@ -75,13 +75,13 @@ pub fn run(command: &mut Command, budget: Duration, max_output: usize) -> Result
         Some(result) => result?,
         None => receiver
             .recv_timeout(Duration::from_millis(100))
-            .map_err(|e| format!("UIA read worker output unavailable: {e}"))??,
+            .map_err(|e| format!("{kind} read worker output unavailable: {e}"))??,
     };
     if output.len() > max_output {
-        return Err("UIA read worker output limit exceeded".into());
+        return Err(format!("{kind} read worker output limit exceeded"));
     }
     if !status.success() {
-        return Err(format!("UIA read worker exited {status}"));
+        return Err(format!("{kind} read worker exited {status}"));
     }
     Ok(output)
 }
@@ -124,22 +124,22 @@ mod tests {
     }
     #[test]
     fn drains_outline_larger_than_pipe_capacity() {
-        let bytes = run(&mut worker("large"), Duration::from_secs(2), 250000).unwrap();
+        let bytes = run(&mut worker("large"), Duration::from_secs(2), 250000, "UIA").unwrap();
         assert!(bytes.len() >= 200000);
     }
     #[test]
     fn kills_and_reaps_nonresponsive_worker() {
         let started = Instant::now();
-        let error = run(&mut worker("hang"), Duration::from_millis(100), 1000).unwrap_err();
+        let error = run(&mut worker("hang"), Duration::from_millis(100), 1000, "UIA").unwrap_err();
         assert!(error.contains("terminated and reaped"));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
     #[test]
     fn rejects_failed_exit_and_oversized_output() {
-        assert!(run(&mut worker("fail"), Duration::from_secs(2), 1000)
+        assert!(run(&mut worker("fail"), Duration::from_secs(2), 1000, "UIA")
             .unwrap_err()
             .contains("exited"));
-        assert!(run(&mut worker("large"), Duration::from_secs(2), 1000)
+        assert!(run(&mut worker("large"), Duration::from_secs(2), 1000, "UIA")
             .unwrap_err()
             .contains("output limit"));
     }
@@ -149,7 +149,7 @@ mod tests {
         let error = run(
             &mut worker("overflow-then-hang"),
             Duration::from_secs(10),
-            1000,
+            1000, "UIA",
         )
         .unwrap_err();
         assert!(error.contains("output limit"), "{error}");

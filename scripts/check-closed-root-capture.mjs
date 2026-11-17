@@ -16,11 +16,11 @@ async function scenario(options={}) {
    if(options.probeError)throw Error('Identity read failed');
    return options.available || options.reappears && probes>1 ? [root,other] : [other];
   },getFrontmost:async()=>({appName:'Fixture',pid:7,windowId:10,rootRef:'native-root'}),
-  observe:async()=>{if(dispatched)postCaptures++;return parseLookResponse({lookId:'fixture-look-'+postCaptures,capturedAt:Date.now()/1000,window:{windowId:10,framePoints:root.framePoints,scaleFactor:1,isModal:false},outline:{ref:'native-button',role:'button',title:'Close',canPress:true,actions:['press'],children:[]},timings:{}});},
+  observe:async()=>{if(dispatched){postCaptures++;if(options.captureError)throw Object.assign(Error('GDI read worker deadline exceeded; terminated and reaped'),{code:'capture_failed',requestId:'capture-after-press',stages:[{stage:'print_window_started',elapsedMs:5,privateText:'discard'},{stage:'unrecognized',elapsedMs:9}]});}return parseLookResponse({lookId:'fixture-look-'+postCaptures,capturedAt:Date.now()/1000,window:{windowId:10,framePoints:root.framePoints,scaleFactor:1,isModal:false},outline:{ref:'native-button',role:'button',title:'Close',canPress:true,actions:['press'],children:[]},timings:{}});},
   act:async()=>{
    dispatched=true;dispatches++;
    if(options.transportUnknown)throw Object.assign(Error('Response lost'),{code:'helper_transport_unknown',outcome:'unknown',command:'act',requestId:'request-exact',requestWriteAttempted:true});
-   return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[{change:'closed',kind:options.remapped?'popover':'window',pid:options.wrongPid?8:7,ref:options.remapped?'discovery-modal-root':options.unrelated?'other-root':'native-root',windowId:options.wrongHwnd?11:options.remapped?10:undefined,title:'Owned fixture'}]};
+   return {outcome:'worked',performed:{delivery:'ax'},rootDelta:options.newWindow?[{change:'appeared',kind:'window',pid:7,ref:'other-root',windowId:11,title:'Generic app title'}]:[{change:'closed',kind:options.remapped?'popover':'window',pid:options.wrongPid?8:7,ref:options.remapped?'discovery-modal-root':options.unrelated?'other-root':'native-root',windowId:options.wrongHwnd?11:options.remapped?10:undefined,title:'Owned fixture'}]};
   },actBatch:undefined});
  try {
   const found=await call(executeFind,{text:'Owned fixture'});
@@ -45,11 +45,27 @@ async function scenario(options={}) {
   }else{
    assert.equal(postCaptures,1,'unproven closure must preserve normal successor capture');
    assert.notEqual(result.details.status,'target_closed');
+   if(options.captureError){
+    assert.equal(result.details.status,'post_action_observation_failed');
+    assert.equal(result.details.execution.dispatchCompletion,'returned');
+    assert.equal(result.details.error.nativeCode,'capture_failed');
+    assert.equal(result.details.error.requestId,'capture-after-press');
+    assert.deepEqual(result.details.error.stages,[{stage:'print_window_started',elapsedMs:5}]);
+    const text=result.content.filter(item=>item.type==='text').map(item=>item.text).join('\n');
+    assert.match(text,/Do not repeat the action/);
+    if(options.newWindow){
+     const ref=result.details.execution.rootDelta.find(delta=>delta.change==='appeared').ref;
+     assert(text.includes(`New root: window "Generic app title" (${ref})`),'The visible tool response must retain the new window, even when its generic title differs from its content');
+     assert.match(text,/inspect.*roots/i);
+    }
+    await assert.rejects(()=>call(executeAct,params));
+    assert.equal(dispatches,1,'failed successor capture cannot replay delivered input');
+   }
   }
  }finally{await shutdownComputerUseSession();}
 }
 try{
  for(const options of [{},{available:true},{reappears:true},{probeError:true},{unrelated:true,available:true},{wrongPid:true,available:true},{transportUnknown:true},{condition:'absent'},{condition:'present'},
-  {remapped:true},{remapped:true,available:true},{remapped:true,reappears:true},{remapped:true,wrongPid:true},{wrongHwnd:true}])await scenario(options);
- console.log('Closed-root capture regressions passed (14 injected native scenarios)');
+  {remapped:true},{remapped:true,available:true},{remapped:true,reappears:true},{remapped:true,wrongPid:true},{wrongHwnd:true},{available:true,captureError:true},{available:true,captureError:true,newWindow:true}])await scenario(options);
+ console.log('Closed-root capture regressions passed (16 injected native scenarios)');
 }finally{Object.assign(backend,original);await shutdownComputerUseSession();}

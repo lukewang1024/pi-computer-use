@@ -235,11 +235,13 @@ pub fn extract_elements_from(
 fn bounded_extract(store: &mut RefStore, hwnd: isize, runtime_id: &[i32], automation_id: &str)
     -> Result<Vec<Value>, String> {
     use std::{os::windows::process::CommandExt, process::Command, time::Duration};
-    let request = serde_json::json!({"hwnd": hwnd, "runtimeId": runtime_id, "automationId": automation_id}).to_string();
+    crate::action_trace::phase("uia_read_worker_started");
+    let request = serde_json::json!({"hwnd": hwnd, "runtimeId": runtime_id, "automationId": automation_id, "trace": crate::action_trace::context()}).to_string();
     if request.len() > 8_000 { return Err("UIA read worker request limit exceeded".into()); }
     let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     command.args(["--read-only-uia", &request]).creation_flags(0x08000000);
-    let output = crate::read_worker::run(&mut command, Duration::from_millis(8_500), 8 * 1024 * 1024)?;
+    let output = crate::read_worker::run(&mut command, Duration::from_millis(8_500), 8 * 1024 * 1024, "UIA")?;
+    crate::action_trace::phase("uia_read_worker_finished");
     let response: Value = serde_json::from_slice(&output).map_err(|e| e.to_string())?;
     if let Some(error) = response.get("error").and_then(Value::as_str) { return Err(error.into()); }
     let elements: Vec<Value> = serde_json::from_value(response.get("elements").cloned()
@@ -265,6 +267,9 @@ pub fn read_only_worker(request: &str) -> Value {
     let result = (|| -> Result<Vec<Value>, String> {
         if request.len() > 8_000 { return Err("UIA read worker request limit exceeded".into()); }
         let request: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
+        let trace: Option<(String, u64)> = serde_json::from_value(request.get("trace").cloned().unwrap_or(Value::Null))
+            .map_err(|e| e.to_string())?;
+        let _trace = trace.as_ref().map(|(id, elapsed)| crate::action_trace::begin_with_elapsed(id, *elapsed));
         let hwnd = request.get("hwnd").and_then(Value::as_i64).ok_or("Missing HWND")? as isize;
         let runtime_id: Vec<i32> = serde_json::from_value(request.get("runtimeId").cloned()
             .ok_or("Missing runtime ID")?).map_err(|e| e.to_string())?;
@@ -472,10 +477,12 @@ mod native {
 
         let uia = read_only_client()?;
 
+        crate::action_trace::phase("uia_element_from_handle_started");
         let root = unsafe {
             uia.ElementFromHandle(HWND(hwnd as *mut _))
                 .map_err(|e| format!("ElementFromHandle: {e}"))?
         };
+        crate::action_trace::phase("uia_element_from_handle_finished");
 
         extract_from_root(store, &uia, &root)
     }
@@ -505,10 +512,12 @@ mod native {
         };
 
         let find_started = Instant::now();
+        crate::action_trace::phase("uia_find_all_started");
         let found = unsafe {
             root.FindAll(TreeScope_Subtree, &condition)
                 .map_err(|e| format!("FindAll: {e}"))?
         };
+        crate::action_trace::phase("uia_find_all_finished");
 
         let find_ms = find_started.elapsed().as_millis() as u64;
 
@@ -571,6 +580,7 @@ mod native {
         };
 
         let retained_started = Instant::now();
+        crate::action_trace::phase("uia_properties_started");
         let mut visited = 0usize;
         let mut cache_failures = 0usize;
         let mut cached_unavailable_value_pattern_skips = 0usize;
@@ -604,6 +614,8 @@ mod native {
         }
 
         let retained_ms = retained_started.elapsed().as_millis() as u64;
+        crate::action_trace::phase("uia_properties_finished");
+        crate::action_trace::phase("uia_ancestry_started");
         let truncation_started = Instant::now();
         let mut ancestry_reads = 0usize;
         let mut ancestry_candidates = 0usize;
@@ -675,6 +687,7 @@ mod native {
         }
 
         let mut diagnostics = super::extraction_diagnostics(count, visited, elements.len());
+        crate::action_trace::phase("uia_ancestry_finished");
         diagnostics["budgetMs"] = json!(EXTRACTION_BUDGET_MS);
         diagnostics["elapsedMs"] = json!(extraction_started.elapsed().as_millis() as u64);
         diagnostics["cacheFailures"] = json!(cache_failures);
@@ -1440,6 +1453,13 @@ mod native {
     /// Calls `CoInitializeEx` on construction and `CoUninitialize` on drop.
     struct ComGuard;
 
+    // Match the apartment lifetime to the request worker. Per-call guards still
+    // balance nested initialization without tearing down the shared MTA between
+    // lookups; no UIA interface is moved to another thread.
+    pub fn initialize_client_thread() -> Result<impl Drop, String> {
+        ComGuard::new()
+    }
+
     impl ComGuard {
         fn new() -> Result<Self, String> {
             // SAFETY: COM must be initialised for the calling thread before
@@ -1503,7 +1523,7 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    ensure_enabled, focus, focus_keyboard_editor, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
+    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
 

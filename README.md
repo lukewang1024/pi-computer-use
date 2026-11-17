@@ -60,6 +60,20 @@ Explicit local macOS builds reuse an existing signed helper across SDK-only vers
 
 On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 
+Window capture and UIA extraction run in disposable read-only processes. A target
+whose UI thread stops responding cannot leave PrintWindow blocking a helper
+request indefinitely. Capture workers have a 3.5-second deadline; timeout returns
+`capture_failed` after termination and reap, without repeating the capture or
+replaying input. Request-correlated phases distinguish capture from UIA stalls.
+To verify timeout, reap and subsequent healthy reads on owned test windows, run
+`$env:PI_CU_LIVE='1'; npm run test:windows-observation-live -- --helper C:\path\to\windows-bridge.exe`.
+The same regression checks that repeated text reads keep helper thread and
+handle counts bounded. Request workers retain their COM MTA until they exit;
+individual UIA interfaces remain local to each call and are released first.
+Window discovery and foreground guards also exclude DWM-cloaked windows, which
+can retain `WS_VISIBLE` while the shell or application hides them from the user.
+The regression verifies discovery and activation refusal on an owned cloaked window.
+
 Windows native element pointer fallback checks at most nine interior physical
 pixels, center first, against the original UIA identity and ancestor guard. A
 decorative sibling covering the center does not prevent choosing another exact
@@ -176,6 +190,12 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 ## Development status
 
 `act_ui` accepts optional `outlineView: "folded"` to bound its returned structured UI tree. The complete successor remains available to state-scoped `search_ui` and `expand_ui`; this does not change dispatch, postconditions or stale-reference checks. The default remains the full tree.
+
+If input returned but its source window cannot be observed afterward, the terminal
+response retains the delivery receipt and reports new or focused roots for direct
+inspection. Do not repeat the input because capture failed. Native read errors
+remain in `details.error`; Windows roots keep the same public reference across
+action deltas and discovery of the same HWND/PID.
 
 `evaluate_browser` also accepts `outlineView: "folded"` and a bounded `outlineQuery`.
 Both reuse its original successor snapshot, without evaluating or observing again.

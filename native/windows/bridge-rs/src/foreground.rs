@@ -148,7 +148,7 @@ unsafe fn identity(hwnd: HWND) -> Value {
         owners.push(json!({"hwnd":owner.0 as isize,"pid":owner_pid,"threadId":owner_thread}));
         current = owner;
     }
-    json!({"hwnd":hwnd.0 as isize,"className":String::from_utf16_lossy(&class_name[..class_len]),"rootHwnd":root.0 as isize,"pid":pid,"threadId":tid,"valid":IsWindow(hwnd).as_bool(),"visible":IsWindowVisible(hwnd).as_bool(),"enabled":IsWindowEnabled(hwnd).as_bool(),"minimized":IsIconic(hwnd).as_bool(),"ownerChain":owners,"guiThreadInfo":if gui_ok {json!({"activeHwnd":gui.hwndActive.0 as isize,"focusHwnd":gui.hwndFocus.0 as isize,"menuOwnerHwnd":gui.hwndMenuOwner.0 as isize,"flags":gui.flags.0})} else {Value::Null}})
+    json!({"hwnd":hwnd.0 as isize,"className":String::from_utf16_lossy(&class_name[..class_len]),"rootHwnd":root.0 as isize,"pid":pid,"threadId":tid,"valid":IsWindow(hwnd).as_bool(),"visible":crate::window::is_desktop_visible(hwnd),"enabled":IsWindowEnabled(hwnd).as_bool(),"minimized":IsIconic(hwnd).as_bool(),"ownerChain":owners,"guiThreadInfo":if gui_ok {json!({"activeHwnd":gui.hwndActive.0 as isize,"focusHwnd":gui.hwndFocus.0 as isize,"menuOwnerHwnd":gui.hwndMenuOwner.0 as isize,"flags":gui.flags.0})} else {Value::Null}})
 }
 
 fn popup_foreground_matches(target: &Value, foreground: &Value, menu: &Value) -> bool {
@@ -200,6 +200,7 @@ unsafe fn observe(hwnd: HWND, pid: u32, tid: u32) -> Value {
     let menu = popup_state(hwnd, &target);
     let active_popup = popup_foreground_matches(&target, &foreground_identity, &menu);
     let eligible = target["valid"] == true
+        && target["visible"] == true
         && target["pid"] == pid
         && target["threadId"] == tid
         && target["enabled"] == true

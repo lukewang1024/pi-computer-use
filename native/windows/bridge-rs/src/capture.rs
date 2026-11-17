@@ -99,7 +99,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct CaptureFrame {
     hwnd: isize,
     pid: u32,
@@ -329,10 +329,10 @@ fn screenshot_impl(
             ErrorCode::CaptureFailed,
         )
     })?;
-    let mut captured =
-        unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension, owner) };
+    let mut captured = bounded_gdi_capture((x, y, width, height), max_dimension, owner);
     for _ in 0..3 {
         if captured.is_ok() || crate::foreground::capture_state(hwnd.0 as isize)["eligible"] != true
+            || captured.as_ref().is_err_and(|error| error.message.starts_with("GDI read worker"))
         {
             break;
         }
@@ -350,8 +350,7 @@ fn screenshot_impl(
         if width == 0 || height == 0 {
             break;
         }
-        captured =
-            unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension, owner) };
+        captured = bounded_gdi_capture((x, y, width, height), max_dimension, owner);
     }
     let (png_base64, output_width, output_height, captured_frame, capture_diagnostics) = captured?;
     let image_capture_ms = image_started.elapsed().as_millis() as u64;
@@ -401,6 +400,49 @@ fn screenshot_impl(
     });
 
     Ok(result)
+}
+
+// PrintWindow synchronously waits for the target UI thread. Keep it out of
+// the long-lived helper just like UIA reads: a busy target must not retain a
+// request worker after the caller's observation deadline.
+#[cfg(windows)]
+fn bounded_gdi_capture(
+    bounds: (i32, i32, i32, i32),
+    max_dimension: Option<u32>,
+    owner: CaptureFrame,
+) -> Result<(String, u32, u32, CaptureFrame, Value), ProtocolError> {
+    use std::{os::windows::process::CommandExt, process::Command, time::Duration};
+    let result = (|| -> Result<_, String> {
+        let request = serde_json::to_string(&(owner, bounds, max_dimension, crate::action_trace::context()))
+            .map_err(|e| e.to_string())?;
+        let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+        command.args(["--read-only-capture", &request]).creation_flags(0x08000000);
+        let output = crate::read_worker::run(&mut command, Duration::from_millis(3_500), 32 * 1024 * 1024, "GDI")?;
+        let response: Value = serde_json::from_slice(&output).map_err(|e| e.to_string())?;
+        if let Some(error) = response.get("error").and_then(Value::as_str) { return Err(error.to_owned()); }
+        serde_json::from_value(response.get("capture").cloned().ok_or("GDI read worker missing capture")?)
+            .map_err(|e| format!("GDI read worker invalid capture: {e}"))
+    })();
+    result.map_err(|e| ProtocolError::new(e, ErrorCode::CaptureFailed))
+}
+
+/// Read-only capture entry point; it cannot dispatch input or activate windows.
+#[cfg(windows)]
+pub fn read_only_worker(request: &str) -> Value {
+    let result = (|| -> Result<_, String> {
+        if request.len() > 8_000 { return Err("GDI read worker request limit exceeded".into()); }
+        let (owner, (x, y, width, height), max_dimension, trace): (CaptureFrame, (i32, i32, i32, i32), Option<u32>, Option<(String, u64)>) =
+            serde_json::from_str(request).map_err(|e| e.to_string())?;
+        let _trace = trace.as_ref().map(|(id, elapsed)| crate::action_trace::begin_with_elapsed(id, *elapsed));
+        // Validate the requested bounds against the live HWND before allocating.
+        if width <= 0 || height <= 0 { return Err("GDI read worker invalid dimensions".into()); }
+        unsafe { gdi_capture_to_base64(HWND(owner.hwnd as *mut _), x, y, width, height, max_dimension, owner) }
+            .map_err(|e| e.message)
+    })();
+    match result {
+        Ok(capture) => json!({"capture": capture}),
+        Err(error) => json!({"error": error}),
+    }
 }
 
 /// Perform GDI capture of the given window and return a base64-encoded PNG.
@@ -461,7 +503,9 @@ unsafe fn gdi_capture_to_base64(
     let old_bitmap = SelectObject(hdc_mem, hbitmap);
 
     // Render the window content using PrintWindow (client area).
+    crate::action_trace::phase("print_window_started");
     let pw_ok = PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(0));
+    crate::action_trace::phase("print_window_finished");
     if !pw_ok.as_bool() {
         // PrintWindow can fail for various reasons.  We note it but
         // continue — the DC might still have partial content.

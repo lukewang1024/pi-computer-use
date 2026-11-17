@@ -107,6 +107,8 @@ use windows::core::PWSTR;
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT, TRUE};
 #[cfg(windows)]
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+#[cfg(windows)]
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -127,6 +129,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 #[cfg(windows)]
 const ROOT_EVENT_CAPACITY: usize = 256;
+
+/// WS_VISIBLE also includes windows suppressed by the shell or their owner.
+/// Such a window must not be advertised as an available desktop input target.
+#[cfg(windows)]
+pub(crate) fn is_desktop_visible(hwnd: HWND) -> bool {
+    if !unsafe { IsWindowVisible(hwnd).as_bool() } {
+        return false;
+    }
+    let mut cloaked = 0u32;
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    result.is_ok() && cloaked == 0
+}
 
 #[cfg(windows)]
 #[derive(Clone)]
@@ -408,13 +429,15 @@ fn list_windows_impl(
     }
 
     let foreground = unsafe { GetForegroundWindow() };
-    include_foreground(&mut hwnds, foreground, !foreground.0.is_null() && unsafe {
-        IsWindowVisible(foreground).as_bool()
-    });
+    include_foreground(
+        &mut hwnds,
+        foreground,
+        !foreground.0.is_null() && is_desktop_visible(foreground),
+    );
     let mut windows_info = Vec::new();
 
     for hwnd in hwnds {
-        if !unsafe { IsWindowVisible(hwnd).as_bool() } {
+        if !is_desktop_visible(hwnd) {
             continue;
         }
 
@@ -570,13 +593,16 @@ pub fn require_visual_bounds(
         unsafe {
             GetWindowThreadProcessId(handle, Some(&mut owner));
         }
-        if owner as u64 != expected_pid
-            || !unsafe { IsWindow(handle).as_bool() }
-            || !unsafe { IsWindowVisible(handle).as_bool() }
-        {
+        if owner as u64 != expected_pid || !unsafe { IsWindow(handle).as_bool() } {
             return Err(ProtocolError::new(
                 "Observed root no longer belongs to the captured process",
                 ErrorCode::TargetNotFound,
+            ));
+        }
+        if !is_desktop_visible(handle) {
+            return Err(ProtocolError::new(
+                "Captured window is no longer visible on this desktop; physical input was not sent",
+                ErrorCode::StaleLook,
             ));
         }
         let mut rect = windows::Win32::Foundation::RECT::default();

@@ -6,6 +6,12 @@ const stages = new Set([
     "enabled_check_started", "pattern_lookup_started",
     "native_mutation_started", "native_mutation_returned", "post_action_observation_started",
     "reflow_expand_started", "reflow_restore_started",
+    "observation_started", "print_window_started", "print_window_finished",
+    "uia_read_worker_started", "uia_read_worker_finished",
+    "uia_element_from_handle_started", "uia_element_from_handle_finished",
+    "uia_find_all_started", "uia_find_all_finished",
+    "uia_properties_started", "uia_properties_finished",
+    "uia_ancestry_started", "uia_ancestry_finished",
 ]);
 export function sanitizeActionStages(value: unknown): WindowsActionStage[] {
     if (!Array.isArray(value)) return [];

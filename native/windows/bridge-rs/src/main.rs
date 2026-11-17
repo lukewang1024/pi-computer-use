@@ -190,14 +190,24 @@ fn main() {
     let workers = (0..REQUEST_WORKERS)
         .map(|_| {
             let receiver = Arc::clone(&receiver);
-            thread::spawn(move || loop {
-                let request = match receiver.lock() {
-                    Ok(receiver) => receiver.recv(),
-                    Err(_) => return,
+            thread::spawn(move || {
+                #[cfg(windows)]
+                let _apartment = match windows_bridge::uia::initialize_client_thread() {
+                    Ok(apartment) => apartment,
+                    Err(error) => {
+                        eprintln!("[uia] request worker initialization failed: {error}");
+                        return;
+                    }
                 };
-                match request {
-                    Ok(request) => emit_response(&handle_request(&request)),
-                    Err(_) => return,
+                loop {
+                    let request = match receiver.lock() {
+                        Ok(receiver) => receiver.recv(),
+                        Err(_) => return,
+                    };
+                    match request {
+                        Ok(request) => emit_response(&handle_request(&request)),
+                        Err(_) => return,
+                    }
                 }
             })
         })

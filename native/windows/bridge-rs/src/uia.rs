@@ -1453,6 +1453,13 @@ mod native {
     /// Calls `CoInitializeEx` on construction and `CoUninitialize` on drop.
     struct ComGuard;
 
+    // Match the apartment lifetime to the request worker. Per-call guards still
+    // balance nested initialization without tearing down the shared MTA between
+    // lookups; no UIA interface is moved to another thread.
+    pub fn initialize_client_thread() -> Result<impl Drop, String> {
+        ComGuard::new()
+    }
+
     impl ComGuard {
         fn new() -> Result<Self, String> {
             // SAFETY: COM must be initialised for the calling thread before
@@ -1516,7 +1523,7 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    ensure_enabled, focus, focus_keyboard_editor, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
+    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
 

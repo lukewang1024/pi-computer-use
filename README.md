@@ -67,6 +67,9 @@ request indefinitely. Capture workers have a 3.5-second deadline; timeout return
 replaying input. Request-correlated phases distinguish capture from UIA stalls.
 To verify timeout, reap and subsequent healthy reads on owned test windows, run
 `$env:PI_CU_LIVE='1'; npm run test:windows-observation-live -- --helper C:\path\to\windows-bridge.exe`.
+The same regression checks that repeated text reads keep helper thread and
+handle counts bounded. Request workers retain their COM MTA until they exit;
+individual UIA interfaces remain local to each call and are released first.
 
 Windows native element pointer fallback checks at most nine interior physical
 pixels, center first, against the original UIA identity and ancestor guard. A

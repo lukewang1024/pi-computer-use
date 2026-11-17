@@ -17,7 +17,8 @@ const source=String.raw`
 using System;using System.IO;using System.Threading;using System.Windows.Forms;
 public class ObservationFixture {
  static Form Window(string title){var f=new Form();f.Text=title;f.Width=420;f.Height=260;
- f.Controls.Add(new Button{Text="Read fixture sentinel",Left=40,Top=70,Width=240});return f;}
+ f.Controls.Add(new Button{Text="Read fixture sentinel",Left=40,Top=70,Width=240});
+ f.Controls.Add(new TextBox{Text="Repeated read sentinel",Left=40,Top=120,Width=240});return f;}
  public static void Run(string dir, bool block){
   var main=Window(block?"Unresponsive observation fixture":"Healthy observation fixture");
   main.Shown+=(s,e)=>File.WriteAllText(Path.Combine(dir,block?"target.txt":"healthy.txt"),main.Handle.ToInt64().ToString());
@@ -71,11 +72,23 @@ try{
  const after=await request('look',{rootRef:healthyRoot.rootRef,includeImage:true,includeElements:true});
  assert.equal(after.ok,true,JSON.stringify(after.error));assert(after.result.image?.jpegBase64);
  assert.match(JSON.stringify(after.result.outline),/Read fixture sentinel/);
+ const nodes=value=>!value||typeof value!=='object'?[]:Array.isArray(value)?value.flatMap(nodes):[value,...Object.values(value).flatMap(nodes)];
+ const editor=nodes(after.result.outline).find(node=>node.role==='edit');assert(editor);
+ const read=async()=>{
+  const result=await request('uiaReadText',{lookId:after.result.lookId,elementRef:editor.ref});
+  assert.equal(result.ok,true,JSON.stringify(result.error));assert.equal(result.result.text,'Repeated read sentinel');
+ };
+ const usage=()=>JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',`$p=Get-Process -Id ${helper.pid};@{threads=$p.Threads.Count;handles=$p.HandleCount}|ConvertTo-Json -Compress`],{windowsHide:true,encoding:'utf8'}));
+ for(let i=0;i<8;i++)await read();
+ const beforeReads=usage();for(let i=0;i<32;i++)await read();const afterReads=usage();
+ assert(afterReads.threads<=beforeReads.threads+8,`UIA read threads accumulate: ${JSON.stringify({beforeReads,afterReads})}`);
+ assert(afterReads.handles<=beforeReads.handles+64,`UIA read handles accumulate: ${JSON.stringify({beforeReads,afterReads})}`);
  const children=JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',`ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Filter "ParentProcessId=${helper.pid}" | ForEach-Object { @{name=$_.Name;readWorker=($_.CommandLine -match '--read-only-(uia|capture)')} })`],{windowsHide:true,encoding:'utf8'}).trim());
  assert.equal(children.filter(child=>child.readWorker).length,0,`read worker survived its completed request: ${JSON.stringify(children)}`);
  assert.match(stderr,/print_window_started/);assert.match(stderr,/uia_element_from_handle_started/);
  console.log(JSON.stringify({status:'passed',captureFailure:blocked.error,captureElapsedMs:blocked.elapsedMs,
-  semantic:semantic.result.uiaDiagnostics,healthyCaptureElapsedMs:after.elapsedMs,ownedReadWorkers:0,helperChildren:children}));
+  semantic:semantic.result.uiaDiagnostics,healthyCaptureElapsedMs:after.elapsedMs,ownedReadWorkers:0,helperChildren:children,
+  repeatedReads:{count:40,beforeReads,afterReads}}));
 }catch(error){console.error(`${error.stack}\n${stderr}`);process.exitCode=1;}
 finally{
  lines.close();

@@ -264,7 +264,7 @@ fn handle_request(request: &Request) -> Response {
         return Response::err(&request.id, ProtocolError::new(format!("Unsupported Windows helper protocol {}; expected {}. Restart Pi to use the installed helper.", request.protocol_version, PROTOCOL_VERSION), ErrorCode::InvalidRequest));
     }
 
-    let _trace = matches!(request.cmd.as_str(), "act" | "actBatch" | "reflowWindow" | "look" | "screenshot")
+    let _trace = matches!(request.cmd.as_str(), "act" | "actBatch" | "reflowWindow" | "look" | "screenshot" | "diagnostics")
         .then(|| windows_bridge::action_trace::begin(&request.id));
     let result = match request.cmd.as_str() {
         "cursorStatus" => Ok(windows_bridge::agent_cursor::status()),

@@ -145,7 +145,7 @@ export class WindowsHelperClient {
 			if (this.child !== child) return;
 			diagnostics.push(chunk, (id, stage) => {
 				const pending = this.pending.get(id);
-				if (!pending || !["act", "actBatch", "reflowWindow", "look", "screenshot"].includes(pending.command)) return;
+				if (!pending || !["act", "actBatch", "reflowWindow", "look", "screenshot", "diagnostics"].includes(pending.command)) return;
 				// A bounded or reordered diagnostic history must not forget a
 				// contradictory mutation once it has been observed for this ID.
 				if (stage.stage === "native_mutation_started" || stage.stage === "native_mutation_returned") pending.nativeMutationObserved = true;

@@ -24,6 +24,10 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
  const r=JSON.parse(line);
  if(r.cmd==='exit')return process.exit(0);
  if(r.cmd==='silent')return;
+ if(r.cmd==='diagnostics' && r.args.phaseFixture){
+  fs.writeSync(2,'\\n'+JSON.stringify({event:'cu_action_phase',requestId:r.id,stage:'request_started',elapsedMs:0})+'\\n');
+  return;
+ }
  if(r.args.readFailureFixture){
   fs.writeSync(2,'\\n'+JSON.stringify({event:'cu_action_phase',requestId:r.id,stage:'print_window_started',elapsedMs:3})+'\\n');
   setTimeout(()=>process.stdout.write(JSON.stringify({id:r.id,protocolVersion:r.protocolVersion,ok:false,error:{code:'capture_failed',message:'GDI read worker deadline exceeded; terminated and reaped'}})+'\\n'),30);return;
@@ -83,6 +87,13 @@ client.ensureInstalled=async()=>{};
 try{
  assert.equal(await client.command('stderr-pressure',{value:'windows-drained'},{timeoutMs:3000}),'windows-drained');
  assert.equal(await client.command('echo',{value:'fragmented'}),'fragmented');
+ await assert.rejects(()=>client.command('diagnostics',{phaseFixture:true},{timeoutMs:200}),error=>{
+  assert.equal(error.code,'helper_transport_unknown');
+  assert.equal(error.command,'diagnostics');
+  assert.deepEqual(error.stages,[{stage:'request_started',elapsedMs:0}]);
+  assert.equal(error.preflight,undefined,'readiness phases are not input non-delivery proof');
+  return true;
+ });
  for(const command of ['look','screenshot'])await assert.rejects(()=>client.command(command,{readFailureFixture:true}),error=>{
   assert.equal(error.code,'capture_failed');assert.equal(error.outcome,undefined);
   assert.match(error.requestId,/^[a-z0-9-]+$/);

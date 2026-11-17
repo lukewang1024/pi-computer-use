@@ -794,7 +794,10 @@ function assertBrowserUseAllowed(target: { appName: string; bundleId?: string })
 
 function windowRecordIdentity(record: Pick<WindowRefRecord, "pid" | "windowId" | "nativeWindowRef" | "windowTitle" | "framePoints" | "rootKind">): string {
 	if (record.windowId && record.windowId > 0) {
-		return `pid:${record.pid}|id:${record.windowId}${record.rootKind ? `|kind:${record.rootKind}` : ""}`;
+		// Windows action deltas carry a root kind while window discovery may
+		// omit it. The same HWND/PID must not acquire a second public reference.
+		const kind = currentPlatformBackend.name === "windows" ? undefined : record.rootKind;
+		return `pid:${record.pid}|id:${record.windowId}${kind ? `|kind:${kind}` : ""}`;
 	}
 	if (record.nativeWindowRef) {
 		return `pid:${record.pid}|ref:${record.nativeWindowRef}`;
@@ -2610,13 +2613,13 @@ async function terminalDesktopActionResult(
 		? `${inputFailure} verification failed after ${execution.inputDispatch?.eventsDispatched ?? "an unconfirmed number of"} HID events were dispatched. Do not retry this action. ${unreleasedKeys.length || unreleasedButtons.length ? `The helper reports possibly held key codes [${unreleasedKeys.join(",")}] and mouse button codes [${unreleasedButtons.join(",")}].` : "A partial input sequence may have changed the target."} Recover the desktop explicitly; do not send blind global key-up or button-up events to the current foreground.`
 		: targetClosed
 		? `The action was delivered, and its source root ${target.appName} — ${target.windowTitle} closed before a successor observation could be captured.`
-		: `The action was delivered, but its source root ${target.appName} — ${target.windowTitle} could not be observed afterward: ${message}`;
+		: `The action was delivered, but its source root ${target.appName} — ${target.windowTitle} could not be observed afterward. The original read error is retained in details.error.`;
 	return {
 		content: [{ type: "text", text: inputRecovered && !transportUnknown && !semanticUnknown && !batchUnknown
 			? `${result}\nNo successor state was created. Call find_roots, then observe_ui to inspect the actual result and obtain fresh state and refs before continuing.`
 			: dispatchUnknown
 			? `${result}\nNo successor state was created. Keep writes quarantined and perform explicit desktop recovery before any further CU call.`
-			: `${result}\nNo successor state was created. Call find_roots, then observe_ui to continue.` }],
+			: `${result}\n${rootDeltaLines(execution).join("\n")}\nNo successor state was created. Do not repeat the action because its observation failed. Inspect the reported new or focused roots with observe_ui; use find_roots if their references are no longer available.` }],
 		details,
 	};
 }

@@ -185,6 +185,12 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
 `act_ui` accepts optional `outlineView: "folded"` to bound its returned structured UI tree. The complete successor remains available to state-scoped `search_ui` and `expand_ui`; this does not change dispatch, postconditions or stale-reference checks. The default remains the full tree.
 
+If input returned but its source window cannot be observed afterward, the terminal
+response retains the delivery receipt and reports new or focused roots for direct
+inspection. Do not repeat the input because capture failed. Native read errors
+remain in `details.error`; Windows roots keep the same public reference across
+action deltas and discovery of the same HWND/PID.
+
 `evaluate_browser` also accepts `outlineView: "folded"` and a bounded `outlineQuery`.
 Both reuse its original successor snapshot, without evaluating or observing again.
 `outlineView` cannot be combined with `includeOutline: false`; a query alone can.

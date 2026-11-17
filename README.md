@@ -71,6 +71,13 @@ For an interactive Windows regression against a built helper, run
 `$env:PI_CU_LIVE='1'; npm run test:windows-pointer-live -- --helper C:\path\to\windows-bridge.exe`.
 The test creates its own temporary window and sends pointer input to it.
 
+Active Windows popup menus retain their owner's foreground window. The helper
+checks the exact menu's native focus and the foreground owner, process and GUI
+thread before sending input; it never activates the popup HWND itself, which
+would dismiss the menu. An inactive or unverifiable popup is refused without
+activation. The same live regression covers right-click, submenu keyboard
+navigation and exactly one menu selection, including background refusal.
+
 `reflow_window` is an explicit Windows recovery operation for a normal,
 resizable foreground window with a fresh image-backed state. It makes one
 guarded four-pixel border drag and, only after verifying the intermediate

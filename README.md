@@ -70,6 +70,9 @@ To verify timeout, reap and subsequent healthy reads on owned test windows, run
 The same regression checks that repeated text reads keep helper thread and
 handle counts bounded. Request workers retain their COM MTA until they exit;
 individual UIA interfaces remain local to each call and are released first.
+Window discovery and foreground guards also exclude DWM-cloaked windows, which
+can retain `WS_VISIBLE` while the shell or application hides them from the user.
+The regression verifies discovery and activation refusal on an owned cloaked window.
 
 Windows native element pointer fallback checks at most nine interior physical
 pixels, center first, against the original UIA identity and ancestor guard. A

@@ -14,16 +14,28 @@ const helperPath=helperArg<0?undefined:process.argv[helperArg+1];
 if(!helperPath||!path.isAbsolute(helperPath))throw new Error('--helper requires an absolute path');
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'pi-cu-observation-'));
 const source=String.raw`
-using System;using System.IO;using System.Threading;using System.Windows.Forms;
+using System;using System.IO;using System.Threading;using System.Windows.Forms;using System.Runtime.InteropServices;
 public class ObservationFixture {
+ [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h,int attribute,ref int value,int size);
+ [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h,int attribute,out int value,int size);
  static Form Window(string title){var f=new Form();f.Text=title;f.Width=420;f.Height=260;
  f.Controls.Add(new Button{Text="Read fixture sentinel",Left=40,Top=70,Width=240});
  f.Controls.Add(new TextBox{Text="Repeated read sentinel",Left=40,Top=120,Width=240});return f;}
  public static void Run(string dir, bool block){
   var main=Window(block?"Unresponsive observation fixture":"Healthy observation fixture");
-  main.Shown+=(s,e)=>File.WriteAllText(Path.Combine(dir,block?"target.txt":"healthy.txt"),main.Handle.ToInt64().ToString());
+  Form hidden=null;
+  main.Shown+=(s,e)=>{
+   File.WriteAllText(Path.Combine(dir,block?"target.txt":"healthy.txt"),main.Handle.ToInt64().ToString());
+   if(!block){hidden=Window("Cloaked observation fixture");hidden.Show();
+    File.WriteAllText(Path.Combine(dir,"cloaked.txt"),hidden.Handle.ToInt64().ToString());}
+  };
   var timer=new System.Windows.Forms.Timer();timer.Interval=50;
-  timer.Tick+=(s,e)=>{if(block && File.Exists(Path.Combine(dir,"block.request"))){timer.Stop();
+  timer.Tick+=(s,e)=>{
+   if(!block && File.Exists(Path.Combine(dir,"cloak.request")) && !File.Exists(Path.Combine(dir,"cloak.done"))){
+    int cloak=1;Marshal.ThrowExceptionForHR(DwmSetWindowAttribute(hidden.Handle,13,ref cloak,4));
+    int actual;Marshal.ThrowExceptionForHR(DwmGetWindowAttribute(hidden.Handle,14,out actual,4));
+    File.WriteAllText(Path.Combine(dir,"cloak.done"),actual.ToString());}
+   if(block && File.Exists(Path.Combine(dir,"block.request"))){timer.Stop();
    File.WriteAllText(Path.Combine(dir,"blocked.txt"),"blocked");Thread.Sleep(30000);}};
   timer.Start();Application.Run(main);
  }
@@ -47,14 +59,23 @@ const request=(cmd,args)=>new Promise((resolve,reject)=>{
 });
 const waitFile=async name=>{for(let i=0;i<160;i++){if(fs.existsSync(path.join(dir,name)))return fs.readFileSync(path.join(dir,name),'utf8');await new Promise(r=>setTimeout(r,50));}throw new Error(`Missing fixture ${name}: ${stderr}`);};
 try{
- const hwnd=Number(await waitFile('target.txt')),healthy=Number(await waitFile('healthy.txt'));
+ const hwnd=Number(await waitFile('target.txt')),healthy=Number(await waitFile('healthy.txt')),cloaked=Number(await waitFile('cloaked.txt'));
  let roots;
  for(let i=0;i<40;i++){
   roots=await request('listRoots',{});assert.equal(roots.ok,true);
-  if([hwnd,healthy].every(id=>roots.result.roots.some(root=>root.windowId===id)))break;
+  if([hwnd,healthy,cloaked].every(id=>roots.result.roots.some(root=>root.windowId===id)))break;
   await new Promise(resolve=>setTimeout(resolve,50));
  }
- assert([hwnd,healthy].every(id=>roots.result.roots.some(root=>root.windowId===id)),JSON.stringify(roots));
+ assert([hwnd,healthy,cloaked].every(id=>roots.result.roots.some(root=>root.windowId===id)),JSON.stringify(roots));
+ const previouslyVisibleRoot=roots.result.roots.find(root=>root.windowId===cloaked);
+ fs.writeFileSync(path.join(dir,'cloak.request'),'cloak');assert.equal(Number(await waitFile('cloak.done')),1);
+ const hiddenFocus=await request('focusWindow',{rootRef:previouslyVisibleRoot.rootRef,pid:healthyFixture.pid});
+ assert.equal(hiddenFocus.ok,true,JSON.stringify(hiddenFocus.error));
+ assert.equal(hiddenFocus.result.focused,false,'Cloaked fixture was treated as focused');
+ assert.equal(hiddenFocus.result.activationDiagnostics.final.eligible,false,'Cloaked fixture was eligible for activation');
+ assert.equal(hiddenFocus.result.activationDiagnostics.attempts.length,1,'Cloaked fixture triggered an activation attempt');
+ roots=await request('listRoots',{});assert.equal(roots.ok,true);
+ assert(!roots.result.roots.some(root=>root.windowId===cloaked),'Cloaked fixture was advertised as visible');
  const before=await request('look',{windowId:hwnd,includeImage:true,includeElements:true});
  assert.equal(before.ok,true,JSON.stringify(before.error));assert(before.result.image?.jpegBase64);
  assert.match(JSON.stringify(before.result.outline),/Read fixture sentinel/);
@@ -86,7 +107,7 @@ try{
  const children=JSON.parse(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',`ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Filter "ParentProcessId=${helper.pid}" | ForEach-Object { @{name=$_.Name;readWorker=($_.CommandLine -match '--read-only-(uia|capture)')} })`],{windowsHide:true,encoding:'utf8'}).trim());
  assert.equal(children.filter(child=>child.readWorker).length,0,`read worker survived its completed request: ${JSON.stringify(children)}`);
  assert.match(stderr,/print_window_started/);assert.match(stderr,/uia_element_from_handle_started/);
- console.log(JSON.stringify({status:'passed',captureFailure:blocked.error,captureElapsedMs:blocked.elapsedMs,
+ console.log(JSON.stringify({status:'passed',cloakedRootExcluded:true,cloakedActivation: hiddenFocus.result.activationDiagnostics.final,captureFailure:blocked.error,captureElapsedMs:blocked.elapsedMs,
   semantic:semantic.result.uiaDiagnostics,healthyCaptureElapsedMs:after.elapsedMs,ownedReadWorkers:0,helperChildren:children,
   repeatedReads:{count:40,beforeReads,afterReads}}));
 }catch(error){console.error(`${error.stack}\n${stderr}`);process.exitCode=1;}

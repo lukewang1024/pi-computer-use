@@ -1533,16 +1533,25 @@ fn coordinate_fallback(
         let mut point = None;
         for attempt in 0..3 {
             match windows_bridge::hit_target::select_clear_point(snapshot.rect, |x, y| {
-                windows_bridge::uia::occlusion_ok(element.hwnd, &snapshot.runtime_id,
-                    &element.automation_id, x, y)
-            }) {
-                Ok(Some(clear)) => {
+                // UIA can return a popup item through the owner window's tree.
+                // Check the actual HWND hit before moving the cursor or injecting input.
+                if !windows_bridge::uia::occlusion_ok(
+                    element.hwnd, &snapshot.runtime_id, &element.automation_id, x, y,
+                ).map_err(stale_ref_from_uia)? {
+                    return Ok(false);
+                }
+                match window::require_pointer_target(element.hwnd, expected_pid, x as i32, y as i32) {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.code == ErrorCode::OccludedTarget => Ok(false),
+                    Err(error) => Err(error),
+                }
+            })? {
+                Some(clear) => {
                     point = Some(clear);
                     break;
                 }
-                Ok(None) if attempt < 2 => sleep(Duration::from_millis(20)),
-                Ok(None) => break,
-                Err(message) => return Err(stale_ref_from_uia(message)),
+                None if attempt < 2 => sleep(Duration::from_millis(20)),
+                None => break,
             }
         }
         let Some((x, y)) = point else {

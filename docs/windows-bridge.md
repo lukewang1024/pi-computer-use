@@ -233,6 +233,11 @@ PID, point and hit HWND/root/PID without sending button or wheel input. Drag
 paths are checked before their first button-down. These checks reduce the
 foreground-to-pointer race; they do not make OS input dispatch atomic.
 
+Ref-targeted pointer fallback now checks the exact HWND hit during point
+selection, before any cursor movement. A list item exposed by the owner's UIA
+tree can be drawn in a separate popup. Refresh the exact popup observation or
+use verified keyboard focus after a no-input occlusion receipt.
+
 ### Timeout phase diagnostics
 
 For native actions, the helper emits at most 32 request-correlated phase events.

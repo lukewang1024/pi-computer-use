@@ -14,7 +14,7 @@ The normal loop is:
 | `find_roots` | Return a bounded, ranked set of desktop and CDP browser-page roots. |
 | `focus_window` | Activate and verify one exact visible root before interaction. Supported on macOS, Windows, and Linux; it sends no pointer or keyboard input. |
 | `observe_ui` | Capture the current/frontmost root or one exact `@r` root and return a folded outline plus `stateId`. |
-| `search_ui` | Run a bounded, ranked query over the full cached outline. |
+| `search_ui` | Run a bounded, ranked query over the full cached outline and show each match’s available actions. |
 | `expand_ui` | Show local outline context for one ref. |
 | `inspect_ui` | Show fields, rects, actions, and evidence for one ref. |
 | `act_ui` | Perform checked actions and return the resulting saved state, showing its changes or a full view when needed. |

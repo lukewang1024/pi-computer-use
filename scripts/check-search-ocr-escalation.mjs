@@ -12,7 +12,7 @@ const overrides={
  observe:async(request)=>{
   requests.push(request);const ocr=request.readText==='always';
   return parseLookResponse({lookId:'search-look-'+requests.length,capturedAt:Date.now(),window:{windowId:root.windowId,rootRef:root.rootRef,framePoints:root.framePoints,scaleFactor:1,isModal:false},
-   outline:{ref:'window',role:'AXWindow',title:root.title,children:[{ref:'pane',role:'AXGroup',title:'Document Pane',children:[]},{ref:'note',role:'AXStaticText',title:'Cached note',children:[]},...(ocr?[{ref:'pixels',role:'AXStaticText',title:'Only pixels',pictureOnly:true,children:[]}]:[])]},
+   outline:{ref:'window',role:'AXWindow',title:root.title,children:[{ref:'pane',role:'AXGroup',title:'Document Pane',children:[]},{ref:'note',role:'AXStaticText',title:'Cached note',children:[]},{ref:'city',role:'listItem',title:'上海',canPress:true,canFocus:true,children:[]},...(ocr?[{ref:'pixels',role:'AXStaticText',title:'Only pixels',pictureOnly:true,children:[]}]:[])]},
    readText:{requested:request.readText||'auto',executed:ocr},
    image:ocr?{jpegBase64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT1sAAAAASUVORK5CYII=',mimeType:'image/png',width:1,height:1}:undefined,timings:{}});
  },act:async()=>{throw Error('Search must not dispatch input');},
@@ -26,6 +26,9 @@ try{
   const result=await call(executeSearchUi,{stateId,...query});assert.equal(result.details.stateId,stateId);assert.equal(requests.length,initial,'Cached structural/text matches and role-only misses must not capture pixels');
   assert.equal(result.details.matches.length,query.role?0:1);
  }
+ const city=await call(executeSearchUi,{stateId,text:'上海',role:'listItem'});
+ assert.equal(requests.length,initial,'An exact option match must stay in the cached outline');
+ assert.match(city.content[0].text,/listItem "上海" \[press,focus\] \[exact\]/);
  const pixels=await call(executeSearchUi,{stateId,text:'Only pixels'});assert.equal(requests.length,initial+1,'Unmatched text must retain the OCR fallback');
  assert.equal(pixels.details.matches.length,1);assert.equal(pixels.details.matches[0].label,'Only pixels');
  const next=pixels.details.stateId;await call(executeSearchUi,{stateId:next,text:'Only pixels'});await call(executeSearchUi,{stateId:next,text:'Still absent'});

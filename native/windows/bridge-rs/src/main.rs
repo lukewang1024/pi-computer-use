@@ -45,6 +45,7 @@ struct LookRecord {
     image_w: f64,
     image_h: f64,
     has_image: bool,
+    browser_popup_owner: Option<isize>,
     elements: HashMap<String, ElementRecord>,
 }
 
@@ -632,6 +633,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
             .as_ref()
             .map(|look| look.has_image)
             .unwrap_or_else(|| image_payload.is_some()),
+        browser_popup_owner: observed_browser_popup_owner(&root),
         elements: element_records,
     };
     store_look_record(look_id.clone(), record)?;
@@ -1414,6 +1416,22 @@ fn act_on_ref(
             }
         }
     }
+    if let Some(owner) = record.browser_popup_owner.filter(|_| {
+        matches!(parsed.action.as_str(), "press" | "click")
+            && element.role == "menuItem"
+            && element.can_press
+            && !element.runtime_id.is_empty()
+    }) {
+        let result = windows_bridge::uia_action_worker::press(
+            element.hwnd, record.pid, &element.runtime_id, "", Some(owner),
+        ).map_err(stale_ref_from_uia)?;
+        if matches!(result, windows_bridge::uia::PressResult::Invoked) {
+            return Ok(json!({
+                "outcome": "unknown",
+                "performed": {"grounding": "description", "delivery": "ax", "nativeAction": "Invoke.MenuItem"},
+            }));
+        }
+    }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
         && matches!(parsed.action.as_str(), "press" | "click")
@@ -1449,7 +1467,7 @@ fn act_on_ref(
             })
         }
         "press" | "click" => match if args.get("isolateUiaPress").and_then(Value::as_bool) == Some(true) {
-            windows_bridge::uia_action_worker::press(element.hwnd, record.pid, &element.runtime_id, &element.automation_id)
+            windows_bridge::uia_action_worker::press(element.hwnd, record.pid, &element.runtime_id, &element.automation_id, None)
         } else {
             windows_bridge::uia::press(element.hwnd, &element.runtime_id, &element.automation_id)
         }
@@ -1589,6 +1607,16 @@ fn coordinate_fallback(
         executable["pointerGuard"] = json!({"hwnd": element.hwnd, "pid": expected_pid});
         input::act(&executable)
     })
+}
+
+fn observed_browser_popup_owner(root: &Value) -> Option<isize> {
+    if root["kind"] != "popover"
+        || !matches!(root["metadata"]["browserFamily"].as_str(), Some("chrome" | "edge" | "brave"))
+    {
+        return None;
+    }
+    let owner = root["metadata"]["interaction"]["ownerHwnd"].as_i64()?;
+    isize::try_from(owner).ok().filter(|owner| *owner > 0)
 }
 
 fn is_web_backed(element: &ElementRecord) -> bool {
@@ -2364,6 +2392,25 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
+    #[test]
+    fn native_browser_popup_uses_its_observed_owner() {
+        let popup = json!({
+            "kind": "popover",
+            "windowId": 30,
+            "metadata": {"browserFamily": "edge", "interaction": {"ownerHwnd": 20}},
+        });
+        assert_eq!(observed_browser_popup_owner(&popup), Some(20));
+        let mut dialog = popup.clone();
+        dialog["kind"] = json!("dialog");
+        assert_eq!(observed_browser_popup_owner(&dialog), None);
+        let mut unrelated = popup.clone();
+        unrelated["metadata"]["browserFamily"] = json!("firefox");
+        assert_eq!(observed_browser_popup_owner(&unrelated), None);
+        let mut ownerless = popup;
+        ownerless["metadata"]["interaction"]["ownerHwnd"] = Value::Null;
+        assert_eq!(observed_browser_popup_owner(&ownerless), None);
+    }
+
     fn look_with_element(x: f64) -> LookRecord {
         LookRecord {
             window_ref: "@w1".to_owned(),
@@ -2376,6 +2423,7 @@ mod tests {
             image_w: 100.0,
             image_h: 100.0,
             has_image: false,
+            browser_popup_owner: None,
             elements: HashMap::from([(
                 "same-ref".to_owned(),
                 ElementRecord {

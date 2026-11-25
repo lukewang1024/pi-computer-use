@@ -1000,20 +1000,50 @@ mod native {
         Ok(super::ComboSelection::Returned(selected))
     }
 
+    fn configure_contained_press_timeout(uia: &IUIAutomation) -> Result<(), String> {
+        // Bound the dedicated action worker without changing ordinary provider calls.
+        if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
+            let modern: IUIAutomation2 = uia.cast().map_err(|e| format!("Action client: {e}"))?;
+            unsafe { modern.SetTransactionTimeout(crate::uia_action_worker::ACTION_BUDGET_MS as u32) }
+                .map_err(|e| format!("Set modal action timeout: {e}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn invoke_browser_menu_item(
+        hwnd: isize,
+        owner: isize,
+        pid: u64,
+        requested_id: &[i32],
+    ) -> Result<PressResult, String> {
+        let (_com, uia, item) = resolve(hwnd, requested_id, "")?;
+        configure_contained_press_timeout(&uia)?;
+        if requested_id.is_empty() || runtime_id(&item).as_deref() != Some(requested_id) {
+            return Err("Element reference is stale".to_owned());
+        }
+        if unsafe { item.CurrentControlType().ok() } != Some(UIA_MenuItemControlTypeId) {
+            return Ok(PressResult::NoPattern);
+        }
+        ensure_element_enabled(&item)?;
+        let Ok(pattern) = (unsafe {
+            item.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+        }) else {
+            return Ok(PressResult::NoPattern);
+        };
+        crate::window::require_foreground_browser_popup(hwnd, owner, pid).map_err(|error| error.message)?;
+        crate::action_trace::phase("native_mutation_started");
+        unsafe { pattern.Invoke() }.map_err(|error| format!("Invoke browser menu item: {error}"))?;
+        crate::action_trace::phase("native_mutation_returned");
+        Ok(PressResult::Invoked)
+    }
+
     pub fn press(
         hwnd: isize,
         runtime_id_target: &[i32],
         automation_id: &str,
     ) -> Result<PressResult, String> {
-        let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
-        // Only the dedicated, contained modal-action worker opts into this
-        // budget. Lookup remains bounded by resolve(); ordinary actions retain
-        // their provider defaults. The parent bounds the worker lifetime.
-        if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
-            let modern: IUIAutomation2 = _uia.cast().map_err(|e| format!("Action client: {e}"))?;
-            unsafe { modern.SetTransactionTimeout(crate::uia_action_worker::ACTION_BUDGET_MS as u32) }
-                .map_err(|e| format!("Set modal action timeout: {e}"))?;
-        }
+        let (_com, uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        configure_contained_press_timeout(&uia)?;
         crate::action_trace::phase("enabled_check_started");
         ensure_element_enabled(&element)?;
         crate::action_trace::phase("pattern_lookup_started");
@@ -1558,7 +1588,7 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, live_elements, occlusion_ok, press, read_live_text, scroll, select_combo_item, set_text, snapshot,
+    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, invoke_browser_menu_item, live_elements, occlusion_ok, press, read_live_text, scroll, select_combo_item, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
 

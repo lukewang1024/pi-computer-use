@@ -15,12 +15,14 @@ struct Request {
     pid: u64,
     runtime_id: Vec<i32>,
     automation_id: String,
+    browser_popup_owner: Option<isize>,
 }
 
 fn decode(bytes: &[u8]) -> Result<Request, String> {
     if bytes.len() > MAX_REQUEST { return Err("UIA action request too large".into()); }
     let r: Request = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if r.hwnd <= 0 || r.pid == 0 || r.pid > u32::MAX as u64 || r.runtime_id.is_empty()
+        || r.browser_popup_owner.is_some_and(|owner| owner <= 0 || owner == r.hwnd)
         || r.runtime_id.len() > 128 || r.id.is_empty() || r.id.len() > 128
         || !r.id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
         return Err("UIA action requires an exact window and element identity".into());
@@ -40,14 +42,19 @@ pub fn serve() {
         let tid = unsafe { GetWindowThreadProcessId(HWND(r.hwnd as *mut _), Some(&mut actual_pid)) };
         if tid == 0 || actual_pid as u64 != r.pid { return Err("UIA action window identity changed".into()); }
         let _trace = crate::action_trace::begin(&r.id);
-        crate::uia::press(r.hwnd, &r.runtime_id, &r.automation_id)
+        match r.browser_popup_owner {
+            Some(owner) => crate::uia::invoke_browser_menu_item(r.hwnd, owner, r.pid, &r.runtime_id),
+            None => crate::uia::press(r.hwnd, &r.runtime_id, &r.automation_id),
+        }
     })();
     // This worker has no coordinate/keyboard fallback and never retries.
     let _ = writeln!(std::io::stdout().lock(), "{}", serde_json::to_string(&result).unwrap());
 }
 
 #[cfg(windows)]
-pub fn press(hwnd: isize, pid: u64, runtime_id: &[i32], automation_id: &str) -> Result<PressResult, String> {
+pub fn press(
+    hwnd: isize, pid: u64, runtime_id: &[i32], automation_id: &str, browser_popup_owner: Option<isize>,
+) -> Result<PressResult, String> {
     use std::{io::{Read, Write}, os::windows::{io::AsRawHandle, process::CommandExt},
         process::{Command, Stdio}, sync::mpsc, thread, time::{Duration, Instant}};
     use windows::{core::PCWSTR, Win32::{Foundation::{CloseHandle, HANDLE}, System::JobObjects::*}};
@@ -55,7 +62,7 @@ pub fn press(hwnd: isize, pid: u64, runtime_id: &[i32], automation_id: &str) -> 
     struct Job(HANDLE);
     impl Drop for Job { fn drop(&mut self) { unsafe { let _ = CloseHandle(self.0); } } }
     let request = Request { id: crate::action_trace::request_id().ok_or("Missing action trace identity")?,
-        hwnd, pid, runtime_id: runtime_id.to_vec(), automation_id: automation_id.into() };
+        hwnd, pid, runtime_id: runtime_id.to_vec(), automation_id: automation_id.into(), browser_popup_owner };
     let bytes = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     decode(&bytes)?;
     let job = Job(unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(|e| format!("Action job: {e}"))?);
@@ -109,7 +116,9 @@ pub fn press(hwnd: isize, pid: u64, runtime_id: &[i32], automation_id: &str) -> 
 }
 
 #[cfg(not(windows))]
-pub fn press(_hwnd: isize, _pid: u64, _runtime_id: &[i32], _automation_id: &str) -> Result<PressResult, String> {
+pub fn press(
+    _hwnd: isize, _pid: u64, _runtime_id: &[i32], _automation_id: &str, _browser_popup_owner: Option<isize>,
+) -> Result<PressResult, String> {
     Err("UIA action workers require Windows".into())
 }
 
@@ -121,7 +130,7 @@ mod tests {
         let valid = serde_json::json!({"id":"request-1","hwnd":10,"pid":7,"runtime_id":[1,2],"automation_id":""});
         assert!(decode(&serde_json::to_vec(&valid).unwrap()).is_ok());
         for (key, value) in [("pid", serde_json::json!(0)), ("runtime_id", serde_json::json!([])),
-            ("hwnd", serde_json::json!(0)), ("id", serde_json::json!("bad id")), ("extra", serde_json::json!(true))] {
+            ("hwnd", serde_json::json!(0)), ("browser_popup_owner", serde_json::json!(10)), ("id", serde_json::json!("bad id")), ("extra", serde_json::json!(true))] {
             let mut invalid = valid.clone(); invalid[key] = value;
             assert!(decode(&serde_json::to_vec(&invalid).unwrap()).is_err(), "{key}");
         }

@@ -241,6 +241,12 @@ focused control's keyboard input. Observe the exact popup before targeting it
 with a pointer. When the popup itself gains focus, inspect that root to verify
 the result of the action before sending another input.
 
+Chrome-family popup commands can use UIA Invoke when their exact captured
+owner is still in the foreground. The helper verifies the visible popup,
+its owner and their process and thread before the isolated UIA worker sends
+the command. Use the returned window changes and a new observation to verify
+the effect.
+
 A primary action on a browser combo box item can use the native UIA
 SelectionItem pattern. The helper resolves the exact runtime ID under the
 foreground owner, checks the live item and its combo box parent, and reports

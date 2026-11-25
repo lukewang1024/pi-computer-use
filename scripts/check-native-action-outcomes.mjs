@@ -52,7 +52,7 @@ try{
   const text=result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
   if(expected==='worked'){assert.equal(calls.length,2);assert.equal(presses,1);assert.match(text,/Attempted 2 of 2/);}
   else{assert.equal(calls.length,1);assert.equal(presses,0);assert.equal(value,'old');assert.match(text,/Attempted 1 of 2/);assert.match(text,/Remaining 1 actions were not sent/);}
-  if(expected==='unknown')assert.match(text,/Do not automatically repeat/);
+  if(expected==='unknown')assert.match(text,/native input request completed.*If the intended effect is confirmed, continue with the next action.*Do not replay the original input/);
   if(expected==='didnt')assert.match(text,/no effect was observed/);
  }
  // Explicit semantic successor avoids image capture without relaxing input grounding.
@@ -210,7 +210,7 @@ try{
   assert.match(execution.backgroundAttempt.reason,/Initial background attempt only/);
   assert.doesNotMatch(execution.backgroundAttempt.reason,/Input was not sent|Correct the call/);
   assert.equal(execution.backgroundAttempt.reason,execution.steps[0].backgroundAttempt.reason);
-  assert.match(result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n'),completion==='returned'?/Do not automatically repeat/:/Do not retry this action/);
+  assert.match(result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n'),completion==='returned'?/native input request completed.*effect is unverified/:/Do not retry this action/);
   await shutdownComputerUseSession();
  }
  console.log('Registered native action outcome integration passed (controlled outcomes and historical escalation diagnostics; no native input)');

@@ -1355,13 +1355,17 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 	return ref;
 }
 
+function effectVerification(outcome: ActOutcome | undefined): ExecutionTrace["effectVerification"] {
+	return outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified";
+}
+
 function executionTraceFromAct(result: HelperActResult, policy = currentDeliveryPolicy()): ExecutionTrace {
 	const rootDelta = result.rootDelta?.map((delta) => ({ ...delta, ref: modelRefForRootDelta(delta) }));
 	const inputDispatch = partialHidDispatchFromAct(result);
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
 		dispatchCompletion: inputDispatch?.recoveryRequired ? "unknown" : "returned",
-		effectVerification: result.outcome === "worked" ? "observed" : result.outcome === "didnt" ? "not_observed" : "unverified",
+		effectVerification: effectVerification(result.outcome),
 		performed: result.performed,
 		evidence: result.evidence,
 		error: result.error,
@@ -2460,7 +2464,7 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
 		dispatchCompletion: pendingModal ? "pending" : dispatchUnconfirmed ? "unknown" : "returned",
-		effectVerification: outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified",
+		effectVerification: effectVerification(outcome),
 		pendingModal,
 		steps,
 		actionCount: dispatchUnconfirmed ? undefined : steps.length,
@@ -2561,6 +2565,7 @@ async function terminalDesktopActionResult(
 			timeoutMs: condition.timeoutMs,
 		};
 		execution.outcome = outcomeAfterCheck(execution.outcome ?? "unknown", verificationStatus);
+		execution.effectVerification = effectVerification(execution.outcome);
 		if (verificationStatus === "failed") {
 			execution.error = {
 				code: "postcondition_failed",
@@ -2755,10 +2760,11 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			if (execution.verification?.status !== "unverified") {
 				execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			}
+			execution.effectVerification = effectVerification(execution.outcome);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}
-			const result = await buildToolResult("act_ui", `${describeActionExecution(executedActions.length, actions.length, execution.outcome ?? "unknown")} Target: ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			const result = await buildToolResult("act_ui", `${describeActionExecution(executedActions.length, actions.length, execution.outcome ?? "unknown", execution.dispatchCompletion)} Target: ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
 			if (pixelSuccessor) {
 				result.details.observation = { status: "pixels_only", readOnly: true };
 				result.content.unshift({ type: "text", text: "Pixel-only successor: fresh screenshot captured without accessibility tree or OCR. Previous semantic element refs are invalid; observe semantic or fused before querying controls." });

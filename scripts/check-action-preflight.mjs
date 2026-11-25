@@ -32,14 +32,18 @@ for(const scrollY of [-20,-3,0,3,20]) {
 assert.equal(preflightActionSequence([{action:'scroll',ref:'@e1',scrollY:6000}],false,{...env,platform:'macos'})[0].params.scrollY,6000);
 for(const action of sequence)assert.equal(canRetryInForeground(action,'unknown',false),false,'unknown delivery must never be retried');
 assert.equal(canRetryInForeground(sequence[1],'didnt',true),false,'headless execution has no foreground retry');
-const failed=describeActionExecution(1,3,'didnt');
+const failed=describeActionExecution(1,3,'didnt','returned');
 assert.match(failed,/Attempted 1 of 3/);
 assert.match(failed,/no effect was observed/);
 assert.match(failed,/Remaining 2 actions were not sent/);
-const unknown=describeActionExecution(1,2,'unknown');
-assert.match(unknown,/effect is unverified/);
-assert.match(unknown,/Do not automatically repeat/);
-assert.doesNotMatch(describeActionExecution(2,2,'worked'),/Remaining|unverified|no effect/);
+const unverified=describeActionExecution(1,2,'unknown','returned');
+assert.match(unverified,/native input request completed.*effect is unverified/);
+assert.match(unverified,/If the intended effect is confirmed, continue with the next action/);
+assert.match(unverified,/Do not replay the original input/);
+const unknown=describeActionExecution(1,2,'unknown','unknown');
+assert.match(unknown,/Input delivery is unconfirmed.*Stop input/);
+assert.doesNotMatch(unknown,/continue|request completed/);
+assert.doesNotMatch(describeActionExecution(2,2,'worked','returned'),/Remaining|unverified|no effect/);
 
 // Word comment acceptance exposed these public-contract boundaries.
 const editableTyping=preflightActionSequence([{action:'click',ref:'@e1'},{action:'typeText',text:'comment'},{action:'keypress',keys:['ctrl','Enter']}],false,env);

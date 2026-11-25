@@ -3,10 +3,20 @@ import type { OutlineNode } from "./outline.ts";
 import type { PlatformName } from "./platform/types.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 
-export function describeActionExecution(attempted: number, requested: number, outcome: "worked" | "didnt" | "unknown"): string {
+export function describeActionExecution(
+	attempted: number,
+	requested: number,
+	outcome: "worked" | "didnt" | "unknown",
+	dispatchCompletion: "returned" | "unknown" | "pending" | undefined,
+): string {
 	const remaining = requested - attempted;
-	const effect = outcome === "worked" ? "worked" : outcome === "didnt" ? "didnt (no effect was observed)" : "unknown (effect is unverified)";
-	return `Attempted ${attempted} of ${requested} UI actions. Reported outcome: ${effect}.${remaining > 0 ? ` Remaining ${remaining} actions were not sent.` : ""}${outcome === "unknown" ? " Do not automatically repeat these actions; inspect the returned state." : ""}`;
+	const summary = `Attempted ${attempted} of ${requested} UI actions.${remaining > 0 ? ` Remaining ${remaining} actions were not sent.` : ""}`;
+	if (outcome === "worked") return `${summary} Reported outcome: worked.`;
+	if (outcome === "didnt") return `${summary} Reported outcome: didnt (no effect was observed).`;
+	if (dispatchCompletion === "returned") {
+		return `${summary} The native input request completed. Its UI effect is unverified. Check the returned state or observe again. If the intended effect is confirmed, continue with the next action. Do not replay the original input.`;
+	}
+	return `${summary} Input delivery is unconfirmed. Stop input and inspect the receipt. Do not replay the original input.`;
 }
 
 export type ActionTarget = { ref: string } | { x: number; y: number } | { focus: { x: number; y: number } };

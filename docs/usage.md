@@ -228,10 +228,11 @@ Optional capture has a 9-second caller budget (native SCK budget remains 8 secon
 ### Dispatch receipts and optional observation
 
 `keypress` requires an exact current outline `ref` in the public action schema.
-A native terminal reply sets `execution.dispatchCompletion: "returned"`; this does
-not prove the requested effect. `effectVerification: "unverified"` with generic
-`outcome: "unknown"` can mean no observable delta (for example Save). Explicit
-`transport`/`inputDispatch` uncertainty still forbids replay and requires recovery.
+A native terminal reply sets `execution.dispatchCompletion: "returned"`.
+`effectVerification: "unverified"` with `outcome: "unknown"` calls for read-only
+verification. For example, check that the saved copy appeared, then open it as
+the next action. Keep the original input from being replayed. Explicit
+`transport`/`inputDispatch` uncertainty requires stopping input and recovery.
 
 Native `observe_ui` obtains real semantic evidence before an optional image. Image
 failure returns semantic refs and `observation.status: "semantic_only"`, no image.

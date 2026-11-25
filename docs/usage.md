@@ -129,8 +129,10 @@ only needs the current UI tree. This skips the post-action screenshot and OCR,
 returns fresh semantic refs and a successor state, and keeps the input delivery,
 foreground, exact-window and stale-state checks. Image-coordinate actions from that
 outline-only successor require a fresh image-bearing observation. The default
-`"fused"` behavior still captures pixels. Pixel-only input states cannot request
-a semantic successor; observe a semantic or fused state first. This option is
+`"fused"` behavior still captures pixels. An exact window keypress or a
+screenshot-grounded action can request a fresh semantic successor from a
+pixel-only input state. A semantic `expect` still needs a semantic input state
+to distinguish new effects from preexisting controls. This option is
 currently desktop-only and is rejected for CDP browser contexts before input.
 
 Windows and macOS native `act_ui` also accept `observationMode: "pixels"`.

@@ -21,14 +21,24 @@ const call=(fn,params)=>fn('windows-root-delta',params,undefined,undefined,{cwd:
 try{
  for(const kind of ['window','dialog','popover','menu'])for(const returnedRef of ['temporary-snapshot-ref',owned.rootRef]){
   await shutdownComputerUseSession();roots=[owned];inputs.length=0;
-  backend.act=async request=>{inputs.push(request);roots=[owned,root(81,'native-live-popup',kind)];return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[{change:'appeared',kind,ref:returnedRef,windowId:81,title:'Same title popup',pid}]};};
+  backend.act=async request=>{
+   inputs.push(request);roots=[owned,root(81,'native-live-popup',kind)];
+   const appeared={change:'appeared',kind,ref:returnedRef,windowId:81,title:'Same title popup',pid};
+   return {outcome:'worked',performed:{delivery:'ax'},rootDelta:[appeared,{...appeared,change:'focused'}]};
+  };
   const found=await call(executeFind,{text:owned.title});
   const observed=await call(executeObserve,{root:found.details.windows[0].windowRef,mode:'semantic'});
   const acted=await call(executeAct,{stateId:observed.details.capture.stateId,actions:[{action:'press',ref:observed.details.outline.root.children[0].ref}]});
   const delta=acted.details.execution.rootDelta.find(d=>d.change==='appeared');assert(delta);
   const guidance=/whose owner control still has focus.*refresh the owner in semantic mode.*observe the popover itself/i;
-  if(kind==='popover') assert.match(acted.content[0].text,guidance);
-  else assert.doesNotMatch(acted.content[0].text,guidance);
+  const focusedGuidance=/Observe this focused popover directly to verify what opened/;
+  if(kind==='popover') {
+   assert.match(acted.content[0].text,guidance);
+   assert.match(acted.content[0].text,focusedGuidance);
+  } else {
+   assert.doesNotMatch(acted.content[0].text,guidance);
+   assert.doesNotMatch(acted.content[0].text,focusedGuidance);
+  }
   const discovered=await call(executeFind,{});
   assert.equal(discovered.details.windows.find(w=>w.windowId===81).windowRef,delta.ref,'The same Windows HWND must keep its model ref across action and discovery');
   roots=[owned,root(81,'native-remapped-popup',kind),root(82,'native-decoy',kind)];

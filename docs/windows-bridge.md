@@ -238,7 +238,8 @@ selection, before any cursor movement. A list item exposed by the owner's UIA
 tree can be drawn in a separate popup. When a dropdown appears and its owner
 control retains focus, refresh the owner's semantic observation and use the
 focused control's keyboard input. Observe the exact popup before targeting it
-with a pointer.
+with a pointer. When the popup itself gains focus, inspect that root to verify
+the result of the action before sending another input.
 
 ### Timeout phase diagnostics
 

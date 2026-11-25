@@ -1590,14 +1590,16 @@ function rootDeltaLines(execution: ExecutionTrace): string[] {
 		const sheetCount = typeof delta.metadata?.sheetCount === "number" && Number.isFinite(delta.metadata.sheetCount) ? Math.max(0, Math.trunc(delta.metadata.sheetCount)) : undefined;
 		const flags = [delta.isModal ? "modal" : undefined, sheetCount ? `sheets=${sheetCount}` : undefined].filter(Boolean).join(", ");
 		const suffix = `${quotedTitle}${flags ? ` (${flags})` : ""}${ref}`;
+		const windowsPopover = currentPlatformBackend.name === "windows" && delta.kind === "popover" && Boolean(ref);
 		if (delta.change === "appeared") {
-			const guidance = currentPlatformBackend.name === "windows" && delta.kind === "popover" && ref
+			const guidance = windowsPopover
 				? "\nFor a dropdown whose owner control still has focus, refresh the owner in semantic mode and use the focused control's keypress. Observe the popover itself before any pointer action inside it."
 				: "";
 			return `New root: ${delta.kind}${suffix}${guidance}`;
 		}
 		if (delta.change === "closed") return `Root closed: ${delta.kind}${suffix}`;
-		return `Root focused: ${delta.kind}${suffix}`;
+		const guidance = windowsPopover ? "\nObserve this focused popover directly to verify what opened before sending more input." : "";
+		return `Root focused: ${delta.kind}${suffix}${guidance}`;
 	});
 }
 
@@ -2688,11 +2690,10 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const pixelOnly = isPixelOnlyLook(look);
-	const pixelSuccessor = pixelOnly || params.observationMode === "pixels";
+	const pixelSuccessor = params.observationMode === "pixels" || (pixelOnly && !semanticSuccessor);
 	const { condition, scopeNode } = validateBeforeInput(() => {
 		if (params.observationMode === "pixels" && params.expect) throw new Error("Pixel-only successor cannot verify semantic postconditions; use semantic or fused.");
 		if (params.observationMode === "pixels" && params.outlineQuery) throw new Error("outlineQuery requires a semantic successor.");
-		if (pixelOnly && semanticSuccessor) throw new Error("Pixel-only state cannot return a semantic successor; observe semantic or fused first.");
 		if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
 		const condition = params.expect ? validateCondition(params.expect) : undefined;
 		return { condition, scopeNode: condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined };

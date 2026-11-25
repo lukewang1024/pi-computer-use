@@ -241,6 +241,11 @@ focused control's keyboard input. Observe the exact popup before targeting it
 with a pointer. When the popup itself gains focus, inspect that root to verify
 the result of the action before sending another input.
 
+A Windows observation with at most 32 outline nodes returns all observed
+controls in its readable outline. This exposes nested menu and download items
+even when UIA wraps them in multiple panes. Larger outlines use the existing
+folding budget.
+
 ### Timeout phase diagnostics
 
 For native actions, the helper emits at most 32 request-correlated phase events.

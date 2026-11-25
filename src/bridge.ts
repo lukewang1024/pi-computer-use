@@ -1221,7 +1221,10 @@ async function buildToolResult(
 	const fallbackReason = imageFallbackReason(tool, result, imageMode);
 	const transition = base ? changesBetween(base.outline, result.outline) : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
-	const folded = foldToBudget(result.outline);
+	// UIA can wrap the contents of a small popup in many window and pane nodes.
+	// Show those controls in the first response when the whole tree is small.
+	const compactWindowsOutline = currentPlatformBackend.name === "windows" && result.outline.nodes.length <= 32;
+	const folded = foldToBudget(result.outline, compactWindowsOutline ? { maxDepth: 32, maxNodes: 32 } : undefined);
 	const renderedNote = renderNote(state.currentNote);
 
 	const details: ComputerUseDetails = {

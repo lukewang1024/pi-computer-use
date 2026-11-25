@@ -1403,11 +1403,9 @@ fn act_on_ref(
         {
             windows_bridge::uia::ComboSelection::Unsupported => {}
             windows_bridge::uia::ComboSelection::Returned(selected) => {
-                let outcome = match selected {
-                    Some(true) => "worked",
-                    Some(false) => "didnt",
-                    None => "unknown",
-                };
+                // The browser can acknowledge Select before its active option
+                // changes. Only a positive readback verifies the effect here.
+                let outcome = if selected == Some(true) { "worked" } else { "unknown" };
                 return Ok(json!({
                     "outcome": outcome,
                     "performed": {"grounding": "description", "delivery": "ax", "nativeAction": "SelectionItem.Select"},

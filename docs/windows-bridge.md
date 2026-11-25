@@ -244,8 +244,10 @@ the result of the action before sending another input.
 A primary action on a browser combo box item can use the native UIA
 SelectionItem pattern. The helper resolves the exact runtime ID under the
 foreground owner, checks the live item and its combo box parent, and reports
-the provider's selection readback. A selection attempt never replays as a
-pointer action.
+the provider's selection readback. A positive readback verifies the effect.
+When the provider has yet to reflect the selection, use the resulting outline
+or a fresh observation to verify the combo box value. Each press sends at most
+one selection attempt.
 
 A Windows observation with at most 32 outline nodes returns all observed
 controls in its readable outline. This exposes nested menu and download items

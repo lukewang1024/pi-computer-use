@@ -269,3 +269,6 @@ occupy one quantized color bucket. Non-client decorations cannot rescue a blank
 client. Unavailable client geometry retains the conservative whole-image rule.
 This changes capture classification, not window activation or physical-input
 permission.
+
+Windows encodes the returned screenshot as lossless PNG with balanced
+compression to reduce transfer size while preserving pixel values and dimensions.

@@ -1401,7 +1401,7 @@ fn act_on_ref(
         && window::require_foreground(element.hwnd, record.pid).is_ok()
     {
         match windows_bridge::uia::select_combo_item(element.hwnd, record.pid, &element.runtime_id)
-            .map_err(stale_ref_from_uia)?
+            .map_err(combo_selection_failure)?
         {
             windows_bridge::uia::ComboSelection::Unsupported => {}
             windows_bridge::uia::ComboSelection::Returned(selected) => {
@@ -1441,7 +1441,7 @@ fn act_on_ref(
             &element.runtime_id,
             &element.automation_id,
         )
-        .map_err(stale_ref_from_uia)?;
+        .map_err(reference_before_input_failure)?;
     }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
@@ -1565,6 +1565,13 @@ fn coordinate_fallback(
     expected_pid: u64,
 ) -> Result<Value, ProtocolError> {
     input::policy_allows_raw_input(parsed)?;
+    let resolution_failure: fn(String) -> ProtocolError =
+        if matches!(parsed.action.as_str(), "press" | "click") {
+            reference_before_input_failure
+        } else {
+            // Non-pointer callers may have already focused a native control.
+            stale_ref_from_uia
+        };
     with_physical_input(|| {
         window::ensure_foreground(element.hwnd, expected_pid)?;
         let snapshot = windows_bridge::uia::snapshot(
@@ -1572,7 +1579,7 @@ fn coordinate_fallback(
             &element.runtime_id,
             &element.automation_id,
         )
-        .map_err(stale_ref_from_uia)?;
+        .map_err(resolution_failure)?;
         let mut point = None;
         for attempt in 0..3 {
             match windows_bridge::hit_target::select_clear_point(snapshot.rect, |x, y| {
@@ -1580,7 +1587,7 @@ fn coordinate_fallback(
                 // Check the actual HWND hit before moving the cursor or injecting input.
                 if !windows_bridge::uia::occlusion_ok(
                     element.hwnd, &snapshot.runtime_id, &element.automation_id, x, y,
-                ).map_err(stale_ref_from_uia)? {
+                ).map_err(resolution_failure)? {
                     return Ok(false);
                 }
                 match window::require_pointer_target(element.hwnd, expected_pid, x as i32, y as i32) {
@@ -1637,6 +1644,24 @@ fn stale_ref_from_uia(message: String) -> ProtocolError {
         ProtocolError::new("Element reference is stale", ErrorCode::StaleRef)
     } else {
         ProtocolError::new(message, ErrorCode::InternalError)
+    }
+}
+
+fn reference_before_input_failure(message: String) -> ProtocolError {
+    let error = stale_ref_from_uia(message);
+    if error.code == ErrorCode::StaleRef {
+        ProtocolError::stale_reference_before_input()
+    } else {
+        error
+    }
+}
+
+fn combo_selection_failure(error: windows_bridge::uia::ComboSelectionError) -> ProtocolError {
+    match error {
+        windows_bridge::uia::ComboSelectionError::Preparation(message) =>
+            reference_before_input_failure(message),
+        windows_bridge::uia::ComboSelectionError::Dispatch(message) =>
+            stale_ref_from_uia(message),
     }
 }
 
@@ -2390,6 +2415,27 @@ mod tests {
     fn action_batch_rejects_empty_transactions() {
         let error = handle_act_batch(&json!({ "actions": [] })).expect_err("empty batch must fail");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn stale_combo_or_pointer_lookup_advertises_only_proven_no_dispatch() {
+        use windows_bridge::uia::ComboSelectionError;
+
+        let stale = "Element reference is stale".to_owned();
+        let lookup = serde_json::to_value(reference_before_input_failure(stale.clone())).unwrap();
+        let combo = serde_json::to_value(
+            combo_selection_failure(ComboSelectionError::Preparation(stale.clone())),
+        ).unwrap();
+        for error in [lookup, combo] {
+            assert_eq!(error["code"], "stale_ref");
+            assert_eq!(error["preflight"]["inputDispatched"], false);
+        }
+
+        let dispatch = serde_json::to_value(
+            combo_selection_failure(ComboSelectionError::Dispatch(stale)),
+        ).unwrap();
+        assert_eq!(dispatch["code"], "stale_ref");
+        assert!(dispatch.get("preflight").is_none());
     }
 
     #[test]

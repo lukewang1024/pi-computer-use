@@ -969,13 +969,15 @@ mod native {
         hwnd: isize,
         pid: u64,
         requested_id: &[i32],
-    ) -> Result<super::ComboSelection, String> {
-        let (_com, uia, item) = resolve(hwnd, requested_id, "")?;
+    ) -> Result<super::ComboSelection, super::ComboSelectionError> {
+        use super::ComboSelectionError;
+        let (_com, uia, item) = resolve(hwnd, requested_id, "")
+            .map_err(ComboSelectionError::Preparation)?;
         if requested_id.is_empty() || runtime_id(&item).as_deref() != Some(requested_id) {
-            return Err("Element reference is stale".to_owned());
+            return Err(ComboSelectionError::Preparation("Element reference is stale".to_owned()));
         }
         let walker = unsafe { uia.ControlViewWalker() }
-            .map_err(|error| format!("Resolve combo box hierarchy: {error}"))?;
+            .map_err(|error| ComboSelectionError::Preparation(format!("Resolve combo box hierarchy: {error}")))?;
         let item_type = unsafe { item.CurrentControlType().ok() };
         let parent_type = unsafe {
             walker.GetParentElement(&item).ok()
@@ -987,14 +989,16 @@ mod native {
         {
             return Ok(super::ComboSelection::Unsupported);
         }
-        ensure_element_enabled(&item)?;
+        ensure_element_enabled(&item).map_err(ComboSelectionError::Preparation)?;
         let pattern = unsafe {
             item.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
         }
-        .map_err(|error| format!("Resolve combo box selection pattern: {error}"))?;
-        crate::window::require_foreground(hwnd, pid).map_err(|error| error.message)?;
+        .map_err(|error| ComboSelectionError::Preparation(format!("Resolve combo box selection pattern: {error}")))?;
+        crate::window::require_foreground(hwnd, pid)
+            .map_err(|error| ComboSelectionError::Preparation(error.message))?;
         crate::action_trace::phase("native_mutation_started");
-        unsafe { pattern.Select() }.map_err(|error| format!("Select combo box item: {error}"))?;
+        unsafe { pattern.Select() }
+            .map_err(|error| ComboSelectionError::Dispatch(format!("Select combo box item: {error}")))?;
         crate::action_trace::phase("native_mutation_returned");
         let selected = unsafe { pattern.CurrentIsSelected().ok() }.map(|value| value.as_bool());
         Ok(super::ComboSelection::Returned(selected))
@@ -1597,9 +1601,16 @@ pub enum ComboSelection {
     Returned(Option<bool>),
 }
 
+pub enum ComboSelectionError {
+    Preparation(String),
+    Dispatch(String),
+}
+
 #[cfg(not(windows))]
-pub fn select_combo_item(_hwnd: isize, _pid: u64, _runtime_id: &[i32]) -> Result<ComboSelection, String> {
-    Err("UIA is only supported on Windows".to_owned())
+pub fn select_combo_item(
+    _hwnd: isize, _pid: u64, _runtime_id: &[i32],
+) -> Result<ComboSelection, ComboSelectionError> {
+    Err(ComboSelectionError::Preparation("UIA is only supported on Windows".to_owned()))
 }
 
 #[cfg(not(windows))]

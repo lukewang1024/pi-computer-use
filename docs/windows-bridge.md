@@ -253,7 +253,8 @@ foreground owner, checks the live item and its combo box parent, and reports
 the provider's selection readback. A positive readback verifies the effect.
 When the provider has yet to reflect the selection, use the resulting outline
 or a fresh observation to verify the combo box value. Each press sends at most
-one selection attempt.
+one selection attempt. A stale reference detected during lookup carries a
+preflight receipt so the caller can observe the control again.
 
 A Windows observation with at most 32 outline nodes returns all observed
 controls in its readable outline. This exposes nested menu and download items

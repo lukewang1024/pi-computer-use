@@ -26,6 +26,9 @@ try{
   const observed=await call(executeObserve,{root:found.details.windows[0].windowRef,mode:'semantic'});
   const acted=await call(executeAct,{stateId:observed.details.capture.stateId,actions:[{action:'press',ref:observed.details.outline.root.children[0].ref}]});
   const delta=acted.details.execution.rootDelta.find(d=>d.change==='appeared');assert(delta);
+  const guidance=/whose owner control still has focus.*refresh the owner in semantic mode.*observe the popover itself/i;
+  if(kind==='popover') assert.match(acted.content[0].text,guidance);
+  else assert.doesNotMatch(acted.content[0].text,guidance);
   const discovered=await call(executeFind,{});
   assert.equal(discovered.details.windows.find(w=>w.windowId===81).windowRef,delta.ref,'The same Windows HWND must keep its model ref across action and discovery');
   roots=[owned,root(81,'native-remapped-popup',kind),root(82,'native-decoy',kind)];

@@ -235,8 +235,10 @@ foreground-to-pointer race; they do not make OS input dispatch atomic.
 
 Ref-targeted pointer fallback now checks the exact HWND hit during point
 selection, before any cursor movement. A list item exposed by the owner's UIA
-tree can be drawn in a separate popup. Refresh the exact popup observation or
-use verified keyboard focus after a no-input occlusion receipt.
+tree can be drawn in a separate popup. When a dropdown appears and its owner
+control retains focus, refresh the owner's semantic observation and use the
+focused control's keyboard input. Observe the exact popup before targeting it
+with a pointer.
 
 ### Timeout phase diagnostics
 

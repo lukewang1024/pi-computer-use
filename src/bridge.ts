@@ -1590,7 +1590,12 @@ function rootDeltaLines(execution: ExecutionTrace): string[] {
 		const sheetCount = typeof delta.metadata?.sheetCount === "number" && Number.isFinite(delta.metadata.sheetCount) ? Math.max(0, Math.trunc(delta.metadata.sheetCount)) : undefined;
 		const flags = [delta.isModal ? "modal" : undefined, sheetCount ? `sheets=${sheetCount}` : undefined].filter(Boolean).join(", ");
 		const suffix = `${quotedTitle}${flags ? ` (${flags})` : ""}${ref}`;
-		if (delta.change === "appeared") return `New root: ${delta.kind}${suffix}`;
+		if (delta.change === "appeared") {
+			const guidance = currentPlatformBackend.name === "windows" && delta.kind === "popover" && ref
+				? "\nFor a dropdown whose owner control still has focus, refresh the owner in semantic mode and use the focused control's keypress. Observe the popover itself before any pointer action inside it."
+				: "";
+			return `New root: ${delta.kind}${suffix}${guidance}`;
+		}
 		if (delta.change === "closed") return `Root closed: ${delta.kind}${suffix}`;
 		return `Root focused: ${delta.kind}${suffix}`;
 	});

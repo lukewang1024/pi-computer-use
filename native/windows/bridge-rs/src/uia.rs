@@ -965,20 +965,89 @@ mod native {
         Ok(())
     }
 
+    pub fn select_combo_item(
+        hwnd: isize,
+        pid: u64,
+        requested_id: &[i32],
+    ) -> Result<super::ComboSelection, super::ComboSelectionError> {
+        use super::ComboSelectionError;
+        let (_com, uia, item) = resolve(hwnd, requested_id, "")
+            .map_err(ComboSelectionError::Preparation)?;
+        if requested_id.is_empty() || runtime_id(&item).as_deref() != Some(requested_id) {
+            return Err(ComboSelectionError::Preparation("Element reference is stale".to_owned()));
+        }
+        let walker = unsafe { uia.ControlViewWalker() }
+            .map_err(|error| ComboSelectionError::Preparation(format!("Resolve combo box hierarchy: {error}")))?;
+        let item_type = unsafe { item.CurrentControlType().ok() };
+        let parent_type = unsafe {
+            walker.GetParentElement(&item).ok()
+                .and_then(|parent| parent.CurrentControlType().ok())
+        };
+        if item_type != Some(UIA_ListItemControlTypeId)
+            || parent_type != Some(UIA_ComboBoxControlTypeId)
+            || !pattern_available(&item, UIA_IsSelectionItemPatternAvailablePropertyId)
+        {
+            return Ok(super::ComboSelection::Unsupported);
+        }
+        ensure_element_enabled(&item).map_err(ComboSelectionError::Preparation)?;
+        let pattern = unsafe {
+            item.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+        }
+        .map_err(|error| ComboSelectionError::Preparation(format!("Resolve combo box selection pattern: {error}")))?;
+        crate::window::require_foreground(hwnd, pid)
+            .map_err(|error| ComboSelectionError::Preparation(error.message))?;
+        crate::action_trace::phase("native_mutation_started");
+        unsafe { pattern.Select() }
+            .map_err(|error| ComboSelectionError::Dispatch(format!("Select combo box item: {error}")))?;
+        crate::action_trace::phase("native_mutation_returned");
+        let selected = unsafe { pattern.CurrentIsSelected().ok() }.map(|value| value.as_bool());
+        Ok(super::ComboSelection::Returned(selected))
+    }
+
+    fn configure_contained_press_timeout(uia: &IUIAutomation) -> Result<(), String> {
+        // Bound the dedicated action worker without changing ordinary provider calls.
+        if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
+            let modern: IUIAutomation2 = uia.cast().map_err(|e| format!("Action client: {e}"))?;
+            unsafe { modern.SetTransactionTimeout(crate::uia_action_worker::ACTION_BUDGET_MS as u32) }
+                .map_err(|e| format!("Set modal action timeout: {e}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn invoke_browser_menu_item(
+        hwnd: isize,
+        owner: isize,
+        pid: u64,
+        requested_id: &[i32],
+    ) -> Result<PressResult, String> {
+        let (_com, uia, item) = resolve(hwnd, requested_id, "")?;
+        configure_contained_press_timeout(&uia)?;
+        if requested_id.is_empty() || runtime_id(&item).as_deref() != Some(requested_id) {
+            return Err("Element reference is stale".to_owned());
+        }
+        if unsafe { item.CurrentControlType().ok() } != Some(UIA_MenuItemControlTypeId) {
+            return Ok(PressResult::NoPattern);
+        }
+        ensure_element_enabled(&item)?;
+        let Ok(pattern) = (unsafe {
+            item.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+        }) else {
+            return Ok(PressResult::NoPattern);
+        };
+        crate::window::require_foreground_browser_popup(hwnd, owner, pid).map_err(|error| error.message)?;
+        crate::action_trace::phase("native_mutation_started");
+        unsafe { pattern.Invoke() }.map_err(|error| format!("Invoke browser menu item: {error}"))?;
+        crate::action_trace::phase("native_mutation_returned");
+        Ok(PressResult::Invoked)
+    }
+
     pub fn press(
         hwnd: isize,
         runtime_id_target: &[i32],
         automation_id: &str,
     ) -> Result<PressResult, String> {
-        let (_com, _uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
-        // Only the dedicated, contained modal-action worker opts into this
-        // budget. Lookup remains bounded by resolve(); ordinary actions retain
-        // their provider defaults. The parent bounds the worker lifetime.
-        if std::env::args().nth(1).as_deref() == Some("--uia-press-worker") {
-            let modern: IUIAutomation2 = _uia.cast().map_err(|e| format!("Action client: {e}"))?;
-            unsafe { modern.SetTransactionTimeout(crate::uia_action_worker::ACTION_BUDGET_MS as u32) }
-                .map_err(|e| format!("Set modal action timeout: {e}"))?;
-        }
+        let (_com, uia, element) = resolve(hwnd, runtime_id_target, automation_id)?;
+        configure_contained_press_timeout(&uia)?;
         crate::action_trace::phase("enabled_check_started");
         ensure_element_enabled(&element)?;
         crate::action_trace::phase("pattern_lookup_started");
@@ -1523,9 +1592,26 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
+    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, invoke_browser_menu_item, live_elements, occlusion_ok, press, read_live_text, scroll, select_combo_item, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
+
+pub enum ComboSelection {
+    Unsupported,
+    Returned(Option<bool>),
+}
+
+pub enum ComboSelectionError {
+    Preparation(String),
+    Dispatch(String),
+}
+
+#[cfg(not(windows))]
+pub fn select_combo_item(
+    _hwnd: isize, _pid: u64, _runtime_id: &[i32],
+) -> Result<ComboSelection, ComboSelectionError> {
+    Err(ComboSelectionError::Preparation("UIA is only supported on Windows".to_owned()))
+}
 
 #[cfg(not(windows))]
 #[derive(Clone, Debug)]

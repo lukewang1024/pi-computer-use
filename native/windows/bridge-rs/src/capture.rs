@@ -19,7 +19,7 @@ use crate::state::StateId;
 #[cfg(windows)]
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 #[cfg(windows)]
-use image::codecs::png::PngEncoder;
+use image::codecs::png::{CompressionType, FilterType as PngFilterType, PngEncoder};
 #[cfg(windows)]
 use image::{imageops::FilterType, ExtendedColorType, ImageEncoder, RgbaImage};
 #[cfg(windows)]
@@ -671,10 +671,14 @@ unsafe fn gdi_capture_to_base64(
             .into_raw()
     };
 
-    // Encode to PNG in memory.
+    // Use balanced lossless compression to reduce desktop receipt transfer.
     let mut png_data: Vec<u8> = Vec::new();
     {
-        let encoder = PngEncoder::new(&mut png_data);
+        let encoder = PngEncoder::new_with_quality(
+            &mut png_data,
+            CompressionType::Default,
+            PngFilterType::Adaptive,
+        );
         encoder
             .write_image(
                 &pixels,

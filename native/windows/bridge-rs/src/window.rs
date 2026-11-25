@@ -646,6 +646,30 @@ pub fn require_foreground(hwnd: isize, expected_pid: u64) -> Result<(), Protocol
     }
 }
 
+#[cfg(windows)]
+pub fn require_foreground_browser_popup(popup: isize, owner: isize, pid: u64) -> Result<(), ProtocolError> {
+    let popup = HWND(popup as *mut _);
+    let owner_handle = HWND(owner as *mut _);
+    unsafe {
+        let mut popup_pid = 0;
+        let mut owner_pid = 0;
+        let popup_tid = GetWindowThreadProcessId(popup, Some(&mut popup_pid));
+        let owner_tid = GetWindowThreadProcessId(owner_handle, Some(&mut owner_pid));
+        if popup_tid == 0
+            || popup_tid != owner_tid
+            || u64::from(popup_pid) != pid
+            || popup_pid != owner_pid
+            || GetWindow(popup, GW_OWNER).ok() != Some(owner_handle)
+            || GetForegroundWindow() != owner_handle
+            || !is_desktop_visible(popup)
+            || !IsWindowEnabled(popup).as_bool()
+        {
+            return Err(ProtocolError::foreground_before_input());
+        }
+    }
+    require_foreground(owner, pid)
+}
+
 pub fn ensure_foreground(hwnd: isize, expected_pid: u64) -> Result<(), ProtocolError> {
     #[cfg(not(windows))]
     {

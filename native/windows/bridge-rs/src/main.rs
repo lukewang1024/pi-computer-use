@@ -25,6 +25,7 @@ struct ElementRecord {
     h: f64,
     automation_id: String,
     class_name: String,
+    role: String,
     is_secure: bool,
     can_press: bool,
     can_set_value: bool,
@@ -44,6 +45,7 @@ struct LookRecord {
     image_w: f64,
     image_h: f64,
     has_image: bool,
+    browser_popup_owner: Option<isize>,
     elements: HashMap<String, ElementRecord>,
 }
 
@@ -631,6 +633,7 @@ fn handle_look(args: &Value) -> Result<Value, ProtocolError> {
             .as_ref()
             .map(|look| look.has_image)
             .unwrap_or_else(|| image_payload.is_some()),
+        browser_popup_owner: observed_browser_popup_owner(&root),
         elements: element_records,
     };
     store_look_record(look_id.clone(), record)?;
@@ -736,7 +739,7 @@ fn outline_from_elements(
         let can_press = addressable && is_enabled && caps.get("canPress").or_else(|| caps.get("canInvoke")).and_then(Value::as_bool).unwrap_or(false);
         let can_set_value = addressable && is_enabled && caps.get("canSetValue").or_else(|| caps.get("canEditText")).and_then(Value::as_bool).unwrap_or(false);
         let can_scroll = addressable && caps.get("canScroll").and_then(Value::as_bool).unwrap_or(false);
-        if !reference.is_empty() { records.insert(reference.clone(), ElementRecord { hwnd, x: screen_x, y: screen_y, w: screen_w, h: screen_h, automation_id: automation_id.clone(), class_name, is_secure, can_press, can_set_value, can_scroll, runtime_id: runtime_id.clone() }); }
+        if !reference.is_empty() { records.insert(reference.clone(), ElementRecord { hwnd, x: screen_x, y: screen_y, w: screen_w, h: screen_h, automation_id: automation_id.clone(), class_name, role: role.clone(), is_secure, can_press, can_set_value, can_scroll, runtime_id: runtime_id.clone() }); }
         let node = json!({
             "ref": reference,
             "role": role,
@@ -1389,6 +1392,46 @@ fn act_on_ref(
     if input::requires_pointer_click(parsed) {
         return coordinate_fallback(args, parsed, &element, record.pid);
     }
+    if parsed.policy == "foreground"
+        && matches!(parsed.action.as_str(), "press" | "click")
+        && element.role == "listItem"
+        && element.can_press
+        && is_web_backed(&element)
+        && !element.runtime_id.is_empty()
+        && window::require_foreground(element.hwnd, record.pid).is_ok()
+    {
+        match windows_bridge::uia::select_combo_item(element.hwnd, record.pid, &element.runtime_id)
+            .map_err(combo_selection_failure)?
+        {
+            windows_bridge::uia::ComboSelection::Unsupported => {}
+            windows_bridge::uia::ComboSelection::Returned(selected) => {
+                // The browser can acknowledge Select before its active option
+                // changes. Only a positive readback verifies the effect here.
+                let outcome = if selected == Some(true) { "worked" } else { "unknown" };
+                return Ok(json!({
+                    "outcome": outcome,
+                    "performed": {"grounding": "description", "delivery": "ax", "nativeAction": "SelectionItem.Select"},
+                    "evidence": {"selected": selected}
+                }));
+            }
+        }
+    }
+    if let Some(owner) = record.browser_popup_owner.filter(|_| {
+        matches!(parsed.action.as_str(), "press" | "click")
+            && element.role == "menuItem"
+            && element.can_press
+            && !element.runtime_id.is_empty()
+    }) {
+        let result = windows_bridge::uia_action_worker::press(
+            element.hwnd, record.pid, &element.runtime_id, "", Some(owner),
+        ).map_err(stale_ref_from_uia)?;
+        if matches!(result, windows_bridge::uia::PressResult::Invoked) {
+            return Ok(json!({
+                "outcome": "unknown",
+                "performed": {"grounding": "description", "delivery": "ax", "nativeAction": "Invoke.MenuItem"},
+            }));
+        }
+    }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
         && matches!(parsed.action.as_str(), "press" | "click")
@@ -1398,7 +1441,7 @@ fn act_on_ref(
             &element.runtime_id,
             &element.automation_id,
         )
-        .map_err(stale_ref_from_uia)?;
+        .map_err(reference_before_input_failure)?;
     }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
@@ -1424,7 +1467,7 @@ fn act_on_ref(
             })
         }
         "press" | "click" => match if args.get("isolateUiaPress").and_then(Value::as_bool) == Some(true) {
-            windows_bridge::uia_action_worker::press(element.hwnd, record.pid, &element.runtime_id, &element.automation_id)
+            windows_bridge::uia_action_worker::press(element.hwnd, record.pid, &element.runtime_id, &element.automation_id, None)
         } else {
             windows_bridge::uia::press(element.hwnd, &element.runtime_id, &element.automation_id)
         }
@@ -1522,6 +1565,13 @@ fn coordinate_fallback(
     expected_pid: u64,
 ) -> Result<Value, ProtocolError> {
     input::policy_allows_raw_input(parsed)?;
+    let resolution_failure: fn(String) -> ProtocolError =
+        if matches!(parsed.action.as_str(), "press" | "click") {
+            reference_before_input_failure
+        } else {
+            // Non-pointer callers may have already focused a native control.
+            stale_ref_from_uia
+        };
     with_physical_input(|| {
         window::ensure_foreground(element.hwnd, expected_pid)?;
         let snapshot = windows_bridge::uia::snapshot(
@@ -1529,20 +1579,29 @@ fn coordinate_fallback(
             &element.runtime_id,
             &element.automation_id,
         )
-        .map_err(stale_ref_from_uia)?;
+        .map_err(resolution_failure)?;
         let mut point = None;
         for attempt in 0..3 {
             match windows_bridge::hit_target::select_clear_point(snapshot.rect, |x, y| {
-                windows_bridge::uia::occlusion_ok(element.hwnd, &snapshot.runtime_id,
-                    &element.automation_id, x, y)
-            }) {
-                Ok(Some(clear)) => {
+                // UIA can return a popup item through the owner window's tree.
+                // Check the actual HWND hit before moving the cursor or injecting input.
+                if !windows_bridge::uia::occlusion_ok(
+                    element.hwnd, &snapshot.runtime_id, &element.automation_id, x, y,
+                ).map_err(resolution_failure)? {
+                    return Ok(false);
+                }
+                match window::require_pointer_target(element.hwnd, expected_pid, x as i32, y as i32) {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.code == ErrorCode::OccludedTarget => Ok(false),
+                    Err(error) => Err(error),
+                }
+            })? {
+                Some(clear) => {
                     point = Some(clear);
                     break;
                 }
-                Ok(None) if attempt < 2 => sleep(Duration::from_millis(20)),
-                Ok(None) => break,
-                Err(message) => return Err(stale_ref_from_uia(message)),
+                None if attempt < 2 => sleep(Duration::from_millis(20)),
+                None => break,
             }
         }
         let Some((x, y)) = point else {
@@ -1555,6 +1614,16 @@ fn coordinate_fallback(
         executable["pointerGuard"] = json!({"hwnd": element.hwnd, "pid": expected_pid});
         input::act(&executable)
     })
+}
+
+fn observed_browser_popup_owner(root: &Value) -> Option<isize> {
+    if root["kind"] != "popover"
+        || !matches!(root["metadata"]["browserFamily"].as_str(), Some("chrome" | "edge" | "brave"))
+    {
+        return None;
+    }
+    let owner = root["metadata"]["interaction"]["ownerHwnd"].as_i64()?;
+    isize::try_from(owner).ok().filter(|owner| *owner > 0)
 }
 
 fn is_web_backed(element: &ElementRecord) -> bool {
@@ -1575,6 +1644,24 @@ fn stale_ref_from_uia(message: String) -> ProtocolError {
         ProtocolError::new("Element reference is stale", ErrorCode::StaleRef)
     } else {
         ProtocolError::new(message, ErrorCode::InternalError)
+    }
+}
+
+fn reference_before_input_failure(message: String) -> ProtocolError {
+    let error = stale_ref_from_uia(message);
+    if error.code == ErrorCode::StaleRef {
+        ProtocolError::stale_reference_before_input()
+    } else {
+        error
+    }
+}
+
+fn combo_selection_failure(error: windows_bridge::uia::ComboSelectionError) -> ProtocolError {
+    match error {
+        windows_bridge::uia::ComboSelectionError::Preparation(message) =>
+            reference_before_input_failure(message),
+        windows_bridge::uia::ComboSelectionError::Dispatch(message) =>
+            stale_ref_from_uia(message),
     }
 }
 
@@ -2330,6 +2417,46 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
+    #[test]
+    fn stale_combo_or_pointer_lookup_advertises_only_proven_no_dispatch() {
+        use windows_bridge::uia::ComboSelectionError;
+
+        let stale = "Element reference is stale".to_owned();
+        let lookup = serde_json::to_value(reference_before_input_failure(stale.clone())).unwrap();
+        let combo = serde_json::to_value(
+            combo_selection_failure(ComboSelectionError::Preparation(stale.clone())),
+        ).unwrap();
+        for error in [lookup, combo] {
+            assert_eq!(error["code"], "stale_ref");
+            assert_eq!(error["preflight"]["inputDispatched"], false);
+        }
+
+        let dispatch = serde_json::to_value(
+            combo_selection_failure(ComboSelectionError::Dispatch(stale)),
+        ).unwrap();
+        assert_eq!(dispatch["code"], "stale_ref");
+        assert!(dispatch.get("preflight").is_none());
+    }
+
+    #[test]
+    fn native_browser_popup_uses_its_observed_owner() {
+        let popup = json!({
+            "kind": "popover",
+            "windowId": 30,
+            "metadata": {"browserFamily": "edge", "interaction": {"ownerHwnd": 20}},
+        });
+        assert_eq!(observed_browser_popup_owner(&popup), Some(20));
+        let mut dialog = popup.clone();
+        dialog["kind"] = json!("dialog");
+        assert_eq!(observed_browser_popup_owner(&dialog), None);
+        let mut unrelated = popup.clone();
+        unrelated["metadata"]["browserFamily"] = json!("firefox");
+        assert_eq!(observed_browser_popup_owner(&unrelated), None);
+        let mut ownerless = popup;
+        ownerless["metadata"]["interaction"]["ownerHwnd"] = Value::Null;
+        assert_eq!(observed_browser_popup_owner(&ownerless), None);
+    }
+
     fn look_with_element(x: f64) -> LookRecord {
         LookRecord {
             window_ref: "@w1".to_owned(),
@@ -2342,6 +2469,7 @@ mod tests {
             image_w: 100.0,
             image_h: 100.0,
             has_image: false,
+            browser_popup_owner: None,
             elements: HashMap::from([(
                 "same-ref".to_owned(),
                 ElementRecord {
@@ -2352,6 +2480,7 @@ mod tests {
                     h: 1.0,
                     automation_id: String::new(),
                     class_name: String::new(),
+                    role: String::new(),
                     is_secure: false,
                     can_press: true,
                     can_set_value: true,

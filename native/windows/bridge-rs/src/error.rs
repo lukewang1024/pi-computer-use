@@ -109,8 +109,8 @@ impl ProtocolError {
         Self::before_input(message, ErrorCode::UiaResolutionFailed)
     }
 
-    /// The requested element was absent from the saved look, before any
-    /// provider call or input dispatch. Later stale errors remain unproved.
+    /// A reference was absent or became stale while resolving the target,
+    /// before any requested input was dispatched.
     pub fn stale_reference_before_input() -> Self {
         Self::before_input("Element reference is stale", ErrorCode::StaleRef)
     }

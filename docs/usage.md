@@ -14,7 +14,7 @@ The normal loop is:
 | `find_roots` | Return a bounded, ranked set of desktop and CDP browser-page roots. |
 | `focus_window` | Activate and verify one exact visible root before interaction. Supported on macOS, Windows, and Linux; it sends no pointer or keyboard input. |
 | `observe_ui` | Capture the current/frontmost root or one exact `@r` root and return a folded outline plus `stateId`. |
-| `search_ui` | Run a bounded, ranked query over the full cached outline. |
+| `search_ui` | Run a bounded, ranked query over the full cached outline and show each match’s available actions. |
 | `expand_ui` | Show local outline context for one ref. |
 | `inspect_ui` | Show fields, rects, actions, and evidence for one ref. |
 | `act_ui` | Perform checked actions and return the resulting saved state, showing its changes or a full view when needed. |
@@ -129,8 +129,10 @@ only needs the current UI tree. This skips the post-action screenshot and OCR,
 returns fresh semantic refs and a successor state, and keeps the input delivery,
 foreground, exact-window and stale-state checks. Image-coordinate actions from that
 outline-only successor require a fresh image-bearing observation. The default
-`"fused"` behavior still captures pixels. Pixel-only input states cannot request
-a semantic successor; observe a semantic or fused state first. This option is
+`"fused"` behavior still captures pixels. An exact window keypress or a
+screenshot-grounded action can request a fresh semantic successor from a
+pixel-only input state. A semantic `expect` still needs a semantic input state
+to distinguish new effects from preexisting controls. This option is
 currently desktop-only and is rejected for CDP browser contexts before input.
 
 Windows and macOS native `act_ui` also accept `observationMode: "pixels"`.
@@ -228,10 +230,11 @@ Optional capture has a 9-second caller budget (native SCK budget remains 8 secon
 ### Dispatch receipts and optional observation
 
 `keypress` requires an exact current outline `ref` in the public action schema.
-A native terminal reply sets `execution.dispatchCompletion: "returned"`; this does
-not prove the requested effect. `effectVerification: "unverified"` with generic
-`outcome: "unknown"` can mean no observable delta (for example Save). Explicit
-`transport`/`inputDispatch` uncertainty still forbids replay and requires recovery.
+A native terminal reply sets `execution.dispatchCompletion: "returned"`.
+`effectVerification: "unverified"` with `outcome: "unknown"` calls for read-only
+verification. For example, check that the saved copy appeared, then open it as
+the next action. Keep the original input from being replayed. Explicit
+`transport`/`inputDispatch` uncertainty requires stopping input and recovery.
 
 Native `observe_ui` obtains real semantic evidence before an optional image. Image
 failure returns semantic refs and `observation.status: "semantic_only"`, no image.

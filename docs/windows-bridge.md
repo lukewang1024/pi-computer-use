@@ -233,6 +233,34 @@ PID, point and hit HWND/root/PID without sending button or wheel input. Drag
 paths are checked before their first button-down. These checks reduce the
 foreground-to-pointer race; they do not make OS input dispatch atomic.
 
+Ref-targeted pointer fallback now checks the exact HWND hit during point
+selection, before any cursor movement. A list item exposed by the owner's UIA
+tree can be drawn in a separate popup. When a dropdown appears and its owner
+control retains focus, refresh the owner's semantic observation and use the
+focused control's keyboard input. Observe the exact popup before targeting it
+with a pointer. When the popup itself gains focus, inspect that root to verify
+the result of the action before sending another input.
+
+Chrome-family popup commands can use UIA Invoke when their exact captured
+owner is still in the foreground. The helper verifies the visible popup,
+its owner and their process and thread before the isolated UIA worker sends
+the command. Use the returned window changes and a new observation to verify
+the effect.
+
+A primary action on a browser combo box item can use the native UIA
+SelectionItem pattern. The helper resolves the exact runtime ID under the
+foreground owner, checks the live item and its combo box parent, and reports
+the provider's selection readback. A positive readback verifies the effect.
+When the provider has yet to reflect the selection, use the resulting outline
+or a fresh observation to verify the combo box value. Each press sends at most
+one selection attempt. A stale reference detected during lookup carries a
+preflight receipt so the caller can observe the control again.
+
+A Windows observation with at most 32 outline nodes returns all observed
+controls in its readable outline. This exposes nested menu and download items
+even when UIA wraps them in multiple panes. Larger outlines use the existing
+folding budget.
+
 ### Timeout phase diagnostics
 
 For native actions, the helper emits at most 32 request-correlated phase events.
@@ -261,3 +289,6 @@ occupy one quantized color bucket. Non-client decorations cannot rescue a blank
 client. Unavailable client geometry retains the conservative whole-image rule.
 This changes capture classification, not window activation or physical-input
 permission.
+
+Windows encodes the returned screenshot as lossless PNG with balanced
+compression to reduce transfer size while preserving pixel values and dimensions.

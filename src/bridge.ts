@@ -1221,7 +1221,10 @@ async function buildToolResult(
 	const fallbackReason = imageFallbackReason(tool, result, imageMode);
 	const transition = base ? changesBetween(base.outline, result.outline) : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
-	const folded = foldToBudget(result.outline);
+	// UIA can wrap the contents of a small popup in many window and pane nodes.
+	// Show those controls in the first response when the whole tree is small.
+	const compactWindowsOutline = currentPlatformBackend.name === "windows" && result.outline.nodes.length <= 32;
+	const folded = foldToBudget(result.outline, compactWindowsOutline ? { maxDepth: 32, maxNodes: 32 } : undefined);
 	const renderedNote = renderNote(state.currentNote);
 
 	const details: ComputerUseDetails = {
@@ -1355,13 +1358,17 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 	return ref;
 }
 
+function effectVerification(outcome: ActOutcome | undefined): ExecutionTrace["effectVerification"] {
+	return outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified";
+}
+
 function executionTraceFromAct(result: HelperActResult, policy = currentDeliveryPolicy()): ExecutionTrace {
 	const rootDelta = result.rootDelta?.map((delta) => ({ ...delta, ref: modelRefForRootDelta(delta) }));
 	const inputDispatch = partialHidDispatchFromAct(result);
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
 		dispatchCompletion: inputDispatch?.recoveryRequired ? "unknown" : "returned",
-		effectVerification: result.outcome === "worked" ? "observed" : result.outcome === "didnt" ? "not_observed" : "unverified",
+		effectVerification: effectVerification(result.outcome),
 		performed: result.performed,
 		evidence: result.evidence,
 		error: result.error,
@@ -1586,9 +1593,16 @@ function rootDeltaLines(execution: ExecutionTrace): string[] {
 		const sheetCount = typeof delta.metadata?.sheetCount === "number" && Number.isFinite(delta.metadata.sheetCount) ? Math.max(0, Math.trunc(delta.metadata.sheetCount)) : undefined;
 		const flags = [delta.isModal ? "modal" : undefined, sheetCount ? `sheets=${sheetCount}` : undefined].filter(Boolean).join(", ");
 		const suffix = `${quotedTitle}${flags ? ` (${flags})` : ""}${ref}`;
-		if (delta.change === "appeared") return `New root: ${delta.kind}${suffix}`;
+		const windowsPopover = currentPlatformBackend.name === "windows" && delta.kind === "popover" && Boolean(ref);
+		if (delta.change === "appeared") {
+			const guidance = windowsPopover
+				? "\nFor a dropdown whose owner control still has focus, refresh the owner in semantic mode and use the focused control's keypress. Observe the popover itself before any pointer action inside it."
+				: "";
+			return `New root: ${delta.kind}${suffix}${guidance}`;
+		}
 		if (delta.change === "closed") return `Root closed: ${delta.kind}${suffix}`;
-		return `Root focused: ${delta.kind}${suffix}`;
+		const guidance = windowsPopover ? "\nObserve this focused popover directly to verify what opened before sending more input." : "";
+		return `Root focused: ${delta.kind}${suffix}${guidance}`;
 	});
 }
 
@@ -2252,7 +2266,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	}
 	const detailMatches = matches.map(serializeOutlineSearchMatch);
 	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, matches: detailMatches, totalMatches: ranked.totalMatches, returned: matches.length, hasMore: ranked.totalMatches > matches.length, note: state.currentNote };
-	const lines = matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]${match.isEnabled === false ? " [disabled]" : ""}\n  path: ${match.path}`);
+	const lines = matches.map((match) => `${formatOutlineNodeLabel(match.node)} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]${match.isEnabled === false ? " [disabled]" : ""}\n  path: ${match.path}`);
 	const noteHeader = renderNote(state.currentNote);
 	const noteText = noteHeader ? `${noteHeader}\n\n` : "";
 	const escalationText = escalatedOCR ? " OCR text was escalated for this search after the cached outline had no matches." : "";
@@ -2460,7 +2474,7 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 	return executionTrace("act", steps.every((step) => step.variant === "stealth") ? "stealth" : "default", {
 		outcome,
 		dispatchCompletion: pendingModal ? "pending" : dispatchUnconfirmed ? "unknown" : "returned",
-		effectVerification: outcome === "worked" ? "observed" : outcome === "didnt" ? "not_observed" : "unverified",
+		effectVerification: effectVerification(outcome),
 		pendingModal,
 		steps,
 		actionCount: dispatchUnconfirmed ? undefined : steps.length,
@@ -2561,6 +2575,7 @@ async function terminalDesktopActionResult(
 			timeoutMs: condition.timeoutMs,
 		};
 		execution.outcome = outcomeAfterCheck(execution.outcome ?? "unknown", verificationStatus);
+		execution.effectVerification = effectVerification(execution.outcome);
 		if (verificationStatus === "failed") {
 			execution.error = {
 				code: "postcondition_failed",
@@ -2678,11 +2693,10 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const pixelOnly = isPixelOnlyLook(look);
-	const pixelSuccessor = pixelOnly || params.observationMode === "pixels";
+	const pixelSuccessor = params.observationMode === "pixels" || (pixelOnly && !semanticSuccessor);
 	const { condition, scopeNode } = validateBeforeInput(() => {
 		if (params.observationMode === "pixels" && params.expect) throw new Error("Pixel-only successor cannot verify semantic postconditions; use semantic or fused.");
 		if (params.observationMode === "pixels" && params.outlineQuery) throw new Error("outlineQuery requires a semantic successor.");
-		if (pixelOnly && semanticSuccessor) throw new Error("Pixel-only state cannot return a semantic successor; observe semantic or fused first.");
 		if (pixelOnly && params.expect) throw new Error("Pixel-only state cannot verify semantic postconditions; observe semantic or fused first.");
 		const condition = params.expect ? validateCondition(params.expect) : undefined;
 		return { condition, scopeNode: condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined };
@@ -2755,10 +2769,11 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			if (execution.verification?.status !== "unverified") {
 				execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			}
+			execution.effectVerification = effectVerification(execution.outcome);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}
-			const result = await buildToolResult("act_ui", `${describeActionExecution(executedActions.length, actions.length, execution.outcome ?? "unknown")} Target: ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
+			const result = await buildToolResult("act_ui", `${describeActionExecution(executedActions.length, actions.length, execution.outcome ?? "unknown", execution.dispatchCompletion)} Target: ${target.appName} — ${target.windowTitle}. Returned state ${capture.capture.stateId}.`, capture, execution, signal, state.currentImageMode, baseView);
 			if (pixelSuccessor) {
 				result.details.observation = { status: "pixels_only", readOnly: true };
 				result.content.unshift({ type: "text", text: "Pixel-only successor: fresh screenshot captured without accessibility tree or OCR. Previous semantic element refs are invalid; observe semantic or fused before querying controls." });

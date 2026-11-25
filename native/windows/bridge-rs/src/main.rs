@@ -25,6 +25,7 @@ struct ElementRecord {
     h: f64,
     automation_id: String,
     class_name: String,
+    role: String,
     is_secure: bool,
     can_press: bool,
     can_set_value: bool,
@@ -736,7 +737,7 @@ fn outline_from_elements(
         let can_press = addressable && is_enabled && caps.get("canPress").or_else(|| caps.get("canInvoke")).and_then(Value::as_bool).unwrap_or(false);
         let can_set_value = addressable && is_enabled && caps.get("canSetValue").or_else(|| caps.get("canEditText")).and_then(Value::as_bool).unwrap_or(false);
         let can_scroll = addressable && caps.get("canScroll").and_then(Value::as_bool).unwrap_or(false);
-        if !reference.is_empty() { records.insert(reference.clone(), ElementRecord { hwnd, x: screen_x, y: screen_y, w: screen_w, h: screen_h, automation_id: automation_id.clone(), class_name, is_secure, can_press, can_set_value, can_scroll, runtime_id: runtime_id.clone() }); }
+        if !reference.is_empty() { records.insert(reference.clone(), ElementRecord { hwnd, x: screen_x, y: screen_y, w: screen_w, h: screen_h, automation_id: automation_id.clone(), class_name, role: role.clone(), is_secure, can_press, can_set_value, can_scroll, runtime_id: runtime_id.clone() }); }
         let node = json!({
             "ref": reference,
             "role": role,
@@ -1388,6 +1389,32 @@ fn act_on_ref(
         .ok_or_else(ProtocolError::stale_reference_before_input)?;
     if input::requires_pointer_click(parsed) {
         return coordinate_fallback(args, parsed, &element, record.pid);
+    }
+    if parsed.policy == "foreground"
+        && matches!(parsed.action.as_str(), "press" | "click")
+        && element.role == "listItem"
+        && element.can_press
+        && is_web_backed(&element)
+        && !element.runtime_id.is_empty()
+        && window::require_foreground(element.hwnd, record.pid).is_ok()
+    {
+        match windows_bridge::uia::select_combo_item(element.hwnd, record.pid, &element.runtime_id)
+            .map_err(stale_ref_from_uia)?
+        {
+            windows_bridge::uia::ComboSelection::Unsupported => {}
+            windows_bridge::uia::ComboSelection::Returned(selected) => {
+                let outcome = match selected {
+                    Some(true) => "worked",
+                    Some(false) => "didnt",
+                    None => "unknown",
+                };
+                return Ok(json!({
+                    "outcome": outcome,
+                    "performed": {"grounding": "description", "delivery": "ax", "nativeAction": "SelectionItem.Select"},
+                    "evidence": {"selected": selected}
+                }));
+            }
+        }
     }
     if parsed.policy != "ax_only"
         && is_web_backed(&element)
@@ -2361,6 +2388,7 @@ mod tests {
                     h: 1.0,
                     automation_id: String::new(),
                     class_name: String::new(),
+                    role: String::new(),
                     is_secure: false,
                     can_press: true,
                     can_set_value: true,

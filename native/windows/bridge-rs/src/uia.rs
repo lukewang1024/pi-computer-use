@@ -965,6 +965,41 @@ mod native {
         Ok(())
     }
 
+    pub fn select_combo_item(
+        hwnd: isize,
+        pid: u64,
+        requested_id: &[i32],
+    ) -> Result<super::ComboSelection, String> {
+        let (_com, uia, item) = resolve(hwnd, requested_id, "")?;
+        if requested_id.is_empty() || runtime_id(&item).as_deref() != Some(requested_id) {
+            return Err("Element reference is stale".to_owned());
+        }
+        let walker = unsafe { uia.ControlViewWalker() }
+            .map_err(|error| format!("Resolve combo box hierarchy: {error}"))?;
+        let item_type = unsafe { item.CurrentControlType().ok() };
+        let parent_type = unsafe {
+            walker.GetParentElement(&item).ok()
+                .and_then(|parent| parent.CurrentControlType().ok())
+        };
+        if item_type != Some(UIA_ListItemControlTypeId)
+            || parent_type != Some(UIA_ComboBoxControlTypeId)
+            || !pattern_available(&item, UIA_IsSelectionItemPatternAvailablePropertyId)
+        {
+            return Ok(super::ComboSelection::Unsupported);
+        }
+        ensure_element_enabled(&item)?;
+        let pattern = unsafe {
+            item.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+        }
+        .map_err(|error| format!("Resolve combo box selection pattern: {error}"))?;
+        crate::window::require_foreground(hwnd, pid).map_err(|error| error.message)?;
+        crate::action_trace::phase("native_mutation_started");
+        unsafe { pattern.Select() }.map_err(|error| format!("Select combo box item: {error}"))?;
+        crate::action_trace::phase("native_mutation_returned");
+        let selected = unsafe { pattern.CurrentIsSelected().ok() }.map(|value| value.as_bool());
+        Ok(super::ComboSelection::Returned(selected))
+    }
+
     pub fn press(
         hwnd: isize,
         runtime_id_target: &[i32],
@@ -1523,9 +1558,19 @@ mod native {
 
 #[cfg(windows)]
 pub use native::{
-    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, live_elements, occlusion_ok, press, read_live_text, scroll, set_text, snapshot,
+    ensure_enabled, focus, focus_keyboard_editor, initialize_client_thread, live_elements, occlusion_ok, press, read_live_text, scroll, select_combo_item, set_text, snapshot,
     uia_extract, ElementSnapshot, PressResult, ScrollResult, SetTextResult,
 };
+
+pub enum ComboSelection {
+    Unsupported,
+    Returned(Option<bool>),
+}
+
+#[cfg(not(windows))]
+pub fn select_combo_item(_hwnd: isize, _pid: u64, _runtime_id: &[i32]) -> Result<ComboSelection, String> {
+    Err("UIA is only supported on Windows".to_owned())
+}
 
 #[cfg(not(windows))]
 #[derive(Clone, Debug)]

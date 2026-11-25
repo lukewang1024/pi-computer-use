@@ -241,6 +241,12 @@ focused control's keyboard input. Observe the exact popup before targeting it
 with a pointer. When the popup itself gains focus, inspect that root to verify
 the result of the action before sending another input.
 
+A primary action on a browser combo box item can use the native UIA
+SelectionItem pattern. The helper resolves the exact runtime ID under the
+foreground owner, checks the live item and its combo box parent, and reports
+the provider's selection readback. A selection attempt never replays as a
+pointer action.
+
 A Windows observation with at most 32 outline nodes returns all observed
 controls in its readable outline. This exposes nested menu and download items
 even when UIA wraps them in multiple panes. Larger outlines use the existing

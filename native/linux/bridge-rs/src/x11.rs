@@ -3,6 +3,8 @@ use crate::atspi::{Rect, RootSnapshot};
 use crate::{ErrorCode, ProtocolError};
 use base64::Engine as _;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ButtonIndex, ClientMessageData, ClientMessageEvent, ConnectionExt as _,
@@ -527,6 +529,9 @@ impl HidDispatch {
     }
     fn failed(&self, error: ProtocolError, window: Window) -> Result<Value, ProtocolError> {
         if self.events_attempted == 0 {
+            if error.code == ErrorCode::CoordinateBlocked {
+                return Err(error.before_input());
+            }
             return Err(error);
         }
         Ok(json!({
@@ -545,6 +550,12 @@ pub struct Input {
     expected_pid: u64,
     dispatch: std::cell::RefCell<HidDispatch>,
 }
+struct TextPlan {
+    events: Vec<(u8, u8)>,
+    mappings: BTreeMap<u32, Keycode>,
+    width: u8,
+}
+
 impl Input {
     pub fn connect(
         policy: PhysicalPolicy,
@@ -654,7 +665,7 @@ impl Input {
         }
         self.fake(BUTTON_RELEASE_EVENT, b, 0, 0)
     }
-    pub fn prepare_text(&self, text: &str) -> Result<Vec<(u8, u8)>, ProtocolError> {
+    fn prepare_text(&self, text: &str) -> Result<TextPlan, ProtocolError> {
         let extension = xkb::use_extension(&self.conn, 1, 0)
             .map_err(xerr)?
             .reply()
@@ -680,8 +691,30 @@ impl Input {
         if width == 0 {
             return Err(invalid("The X11 keyboard map has no keysyms"));
         }
-        prepare_text_events(text, |sym| {
-            resolve_base_group_symbol(&mapping.keysyms, width, min, sym)
+        if std::env::var("PI_COMPUTER_USE_X11_TEMPORARY_KEYMAP").as_deref() != Ok("1") {
+            return Ok(TextPlan {
+                events: prepare_text_events(text, |sym| {
+                    resolve_base_group_symbol(&mapping.keysyms, width, min, sym)
+                })?,
+                mappings: BTreeMap::new(),
+                width: mapping.keysyms_per_keycode,
+            });
+        }
+        let modifiers = self
+            .conn
+            .get_modifier_mapping()
+            .map_err(xerr)?
+            .reply()
+            .map_err(xerr)?;
+        let pressed = self
+            .conn
+            .query_keymap()
+            .map_err(xerr)?
+            .reply()
+            .map_err(xerr)?;
+        prepare_text_mapping(text, &mapping.keysyms, width, min, |key| {
+            !modifiers.keycodes.contains(&key)
+                && pressed.keys[usize::from(key / 8)] & (1 << (key % 8)) == 0
         })
     }
 
@@ -692,8 +725,82 @@ impl Input {
         Ok(())
     }
     pub fn type_text(&self, text: &str) -> Result<(), ProtocolError> {
-        let events = self.prepare_text(text)?;
-        self.type_prepared(&events)
+        self.type_text_after(text, || Ok(()))
+    }
+
+    pub fn type_text_after(
+        &self,
+        text: &str,
+        before: impl FnOnce() -> Result<(), ProtocolError>,
+    ) -> Result<(), ProtocolError> {
+        let plan = self.prepare_text(text)?;
+        let mut borrowed = Vec::new();
+        let delivery = (|| {
+            for (&symbol, &key) in &plan.mappings {
+                let mut row = self.keyboard_row(key)?;
+                if row.len() != usize::from(plan.width) || row.iter().any(|sym| *sym != 0) {
+                    return Err(invalid(
+                        "An unused X11 key was reassigned during text preparation",
+                    ));
+                }
+                // Retain the ownership intent before sending the checked request.
+                borrowed.push((symbol, key));
+                row[0] = symbol;
+                self.change_keyboard_row(key, &row)?;
+                if self.keyboard_row(key)?.first() != Some(&symbol) {
+                    return Err(invalid(
+                        "The server did not install the temporary X11 keysym",
+                    ));
+                }
+            }
+            before()?;
+            self.type_prepared(&plan.events)
+        })();
+        // Clients need the MappingNotify update to interpret the key events.
+        if !borrowed.is_empty() && self.dispatch.borrow().events_attempted != 0 {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let mut restore = Ok(());
+        for (symbol, key) in borrowed {
+            if let Err(error) = self.restore_keyboard_row(key, symbol) {
+                restore = Err(error);
+            }
+        }
+        restore.and(delivery)
+    }
+
+    fn restore_keyboard_row(&self, key: Keycode, symbol: u32) -> Result<(), ProtocolError> {
+        let mut row = self.keyboard_row(key)?;
+        if row.iter().all(|value| *value == 0) {
+            return Ok(());
+        }
+        if row.first() != Some(&symbol) || row.iter().any(|value| *value != 0 && *value != symbol) {
+            return Err(invalid("An external change replaced the temporary X11 key"));
+        }
+        row.fill(0);
+        self.change_keyboard_row(key, &row)?;
+        if self.keyboard_row(key)?.iter().any(|value| *value != 0) {
+            return Err(invalid("The temporary X11 keysym could not be restored"));
+        }
+        Ok(())
+    }
+
+    fn keyboard_row(&self, key: Keycode) -> Result<Vec<u32>, ProtocolError> {
+        Ok(self
+            .conn
+            .get_keyboard_mapping(key, 1)
+            .map_err(xerr)?
+            .reply()
+            .map_err(xerr)?
+            .keysyms)
+    }
+
+    fn change_keyboard_row(&self, key: Keycode, symbols: &[u32]) -> Result<(), ProtocolError> {
+        self.conn
+            .change_keyboard_mapping(1, key, symbols.len() as u8, symbols)
+            .map_err(xerr)?
+            .check()
+            .map_err(xerr)
     }
     pub fn prepare_keypress(&self, names: &[&str]) -> Result<Vec<(u8, u8)>, ProtocolError> {
         prepare_keypress_events(names, |sym| self.keycode(sym))
@@ -986,6 +1093,43 @@ fn prepare_text_events(
         }
     }
     Ok(events)
+}
+
+fn prepare_text_mapping(
+    text: &str,
+    mapping: &[u32],
+    width: usize,
+    min: u8,
+    mut available: impl FnMut(Keycode) -> bool,
+) -> Result<TextPlan, ProtocolError> {
+    let mut keys = mapping
+        .chunks_exact(width)
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let key = min + index as u8;
+            (row.iter().all(|value| *value == 0) && available(key)).then_some(key)
+        });
+    let mut mappings = BTreeMap::new();
+    let events = prepare_text_events(text, |symbol| {
+        if let Some(resolved) = resolve_base_group_symbol(mapping, width, min, symbol) {
+            return Some(resolved);
+        }
+        // A missing modifier or ASCII key remains a preflight error.
+        if symbol >> 24 != 1 {
+            return None;
+        }
+        if let Some(&key) = mappings.get(&symbol) {
+            return Some((key, false));
+        }
+        let key = keys.next()?;
+        mappings.insert(symbol, key);
+        Some((key, false))
+    })?;
+    Ok(TextPlan {
+        events,
+        mappings,
+        width: width as u8,
+    })
 }
 
 fn validate_text_keyboard_state(group: u8, modifiers: u16) -> Result<(), ProtocolError> {
@@ -1534,6 +1678,21 @@ mod tests {
         );
     }
     #[test]
+    fn coordinate_refusal_proves_non_delivery_only_before_any_write() {
+        let error = ProtocolError::new("occluded", ErrorCode::CoordinateBlocked);
+        let mut dispatch = HidDispatch::default();
+        let rejected = dispatch.failed(error.clone(), 99).unwrap_err();
+        assert!(rejected.rejected_before_input());
+        assert_eq!(
+            serde_json::to_value(rejected).unwrap()["preflight"]["inputDispatched"],
+            false
+        );
+        dispatch.attempted(BUTTON_PRESS_EVENT, 1);
+        let partial = dispatch.failed(error, 99).unwrap();
+        assert_eq!(partial["inputDispatch"]["recoveryRequired"], true);
+        assert!(partial["error"]["preflight"].is_null());
+    }
+    #[test]
     fn partial_input_retains_uncertain_presses_and_releases() {
         let mut dispatch = HidDispatch::default();
         dispatch.attempted(KEY_PRESS_EVENT, 37);
@@ -1709,6 +1868,26 @@ mod tests {
         for c in "/tmp/a-b_c.1.txt:[]\\;,'`=".chars() {
             assert!(char_keysym(c).is_some(), "path character {c:?}");
         }
+    }
+    #[test]
+    fn temporary_unicode_mapping_is_planned_before_typing() {
+        let rows = [b'a' as u32, b'A' as u32, 0, 0, 0, 0, 0, 0];
+        let plan = prepare_text_mapping("a张雨张", &rows, 2, 8, |key| key != 9).unwrap();
+        assert_eq!(
+            plan.mappings,
+            BTreeMap::from([(0x01005f20, 10), (0x010096e8, 11)])
+        );
+        assert_eq!(
+            plan.events
+                .iter()
+                .filter(|(event, _)| *event == KEY_PRESS_EVENT)
+                .map(|(_, key)| *key)
+                .collect::<Vec<_>>(),
+            vec![8, 10, 11, 10]
+        );
+        assert!(prepare_text_mapping("张雨", &rows, 2, 8, |key| key == 10).is_err());
+        assert!(prepare_text_mapping("a张\0", &rows, 2, 8, |_| true).is_err());
+        assert!(prepare_text_mapping("张!", &rows, 2, 8, |_| true).is_err());
     }
     #[test]
     fn bounded_capture_dimensions_preserve_aspect_ratio() {

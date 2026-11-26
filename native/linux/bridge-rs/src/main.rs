@@ -749,12 +749,12 @@ fn physical_act(
                 input.type_text(params.get("text").and_then(Value::as_str).unwrap_or(""))?
             }
             "setText" => {
-                let events =
-                    input.prepare_text(params.get("text").and_then(Value::as_str).unwrap_or(""))?;
                 let select_all = input.prepare_keypress(&["control", "a"])?;
-                input.click(x, y, button, 1)?;
-                input.type_prepared(&select_all)?;
-                input.type_prepared(&events)?;
+                let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+                input.type_text_after(text, || {
+                    input.click(x, y, button, 1)?;
+                    input.type_prepared(&select_all)
+                })?;
             }
             "keypress" => {
                 let keys = params
@@ -820,6 +820,9 @@ async fn act_batch(state: &Arc<Mutex<HelperState>>, args: &Value) -> Result<Valu
                 }
             }
             Err(error) => {
+                if index == 0 && error.rejected_before_input() {
+                    return Err(error);
+                }
                 steps.push(json!({"outcome":"didnt","error":{"code":error.code.to_string(),"message":error.message}}));
                 stopped_at = Some(index);
                 break;

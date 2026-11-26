@@ -26,6 +26,12 @@ readline.createInterface({input: process.stdin}).on('line', line => {
   fs.appendFileSync(${JSON.stringify(audit)}, JSON.stringify({mutation:r.id})+'\\n');
   return process.stdout.write(JSON.stringify({id:r.id,protocolVersion:4,ok:false,error:{code:'semantic_dispatch_unknown',message:'Mutation applied before service failure'}})+'\\n');
  }
+ if (r.cmd === 'act' && r.args.blocked) {
+  return process.stdout.write(JSON.stringify({id:r.id,protocolVersion:4,ok:false,error:{
+   code:'coordinate_blocked',message:'Fixture target is occluded',
+   ...(r.args.proof ? {preflight:{version:1,phase:'before_input',inputDispatched:false,recoverable:true,recovery:'observe_ui'}} : {})
+  }})+'\\n');
+ }
  if (r.cmd === 'act') return;
  if (r.cmd === 'exit') return process.exit(0);
  const response = r.cmd === 'native-reject'
@@ -78,6 +84,16 @@ try {
  await assert.rejects(() => client.command('wrong-version'), error => unknown(error, 'wrong-version'));
  await assert.rejects(() => client.command('native-reject'), error => {
   assert.equal(error.code, 'stale_element'); assert.equal(error.outcome, undefined); return true;
+ });
+ await assert.rejects(() => client.command('act', {blocked:true, proof:true}), error => {
+  assert.equal(error.preflight.inputDispatched, false);
+  assert.equal(error.preflight.recovery, 'observe_ui');
+  return true;
+ });
+ await assert.rejects(() => client.command('act', {blocked:true}), error => {
+  assert.equal(error.code, 'coordinate_blocked');
+  assert.equal(error.preflight, undefined);
+  return true;
  });
  await assert.rejects(() => client.command('semantic-mutate'), error => {
   assert.equal(error.code, 'semantic_dispatch_unknown');

@@ -5,6 +5,7 @@ import { access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ActionPreflightError } from "../../action-preflight.ts";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
@@ -213,7 +214,16 @@ export class LinuxHelperClient {
 			} else if (parsed.ok === true) {
 				pending.resolve(parsed.result);
 			} else {
-				const error = new Error(parsed.error?.message ?? "Linux helper command failed.") as Error & { code?: string };
+				const native = parsed.error, proof = native?.preflight;
+				if (["act", "actBatch"].includes(pending.command) && native?.code === "coordinate_blocked"
+					&& typeof native.message === "string"
+					&& proof?.version === 1 && proof.phase === "before_input"
+					&& proof.inputDispatched === false && proof.recoverable === true
+					&& proof.recovery === "observe_ui") {
+					pending.reject(new ActionPreflightError(native.message, "observe_ui"));
+					continue;
+				}
+				const error = new Error(native?.message ?? "Linux helper command failed.") as Error & { code?: string };
 				error.code = parsed.error?.code;
 				if (error.code === "semantic_dispatch_unknown") {
 					Object.assign(error, { outcome: "unknown", command: pending.command, requestId: parsed.id, retrySafe: false });

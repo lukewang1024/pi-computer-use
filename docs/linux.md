@@ -28,6 +28,8 @@ The upstream [AT-SPI development guide](https://gnome.pages.gitlab.gnome.org/at-
 
 “Capability-gated” means the target must export the corresponding AT-SPI interface. X11 physical fallback reports an `unknown` outcome unless later observation or a postcondition verifies the result. Capture prefers XComposite so covered windows can still be read; the `GetImage` fallback explicitly warns that pixels may be stale or obscured.
 
+On a disposable, dedicated X11 display, set `PI_COMPUTER_USE_X11_TEMPORARY_KEYMAP=1` to let physical text delivery borrow unused keycodes for unmapped Unicode characters. The helper preflights the whole string and verifies that borrowed entries are restored. Use a fresh display for each test: abnormal termination can leave temporary entries in that display's keymap. Shared desktop sessions should leave the option disabled.
+
 ## Background and headless guarantees
 
 Linux always attempts AT-SPI semantics first. Semantic delivery does not request compositor focus or inject global input; background delivery is not invisible execution, because an application may still update its visible window.

@@ -47,6 +47,18 @@ impl fmt::Display for ErrorCode {
 pub struct ProtocolError {
     pub message: String,
     pub code: ErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preflight: Option<ActionPreflight>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionPreflight {
+    version: u8,
+    phase: &'static str,
+    input_dispatched: bool,
+    recoverable: bool,
+    recovery: &'static str,
 }
 
 impl ProtocolError {
@@ -54,7 +66,23 @@ impl ProtocolError {
         Self {
             message: message.into(),
             code,
+            preflight: None,
         }
+    }
+
+    pub fn before_input(mut self) -> Self {
+        self.preflight = Some(ActionPreflight {
+            version: 1,
+            phase: "before_input",
+            input_dispatched: false,
+            recoverable: true,
+            recovery: "observe_ui",
+        });
+        self
+    }
+
+    pub fn rejected_before_input(&self) -> bool {
+        self.preflight.is_some()
     }
 }
 
